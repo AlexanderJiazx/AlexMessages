@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AlexMessage · Admin</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="theme-color" content="#F1EFE6" />
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png" />
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" />
+<link href="/fonts/fonts.css" rel="stylesheet" />
+<style>
+  :root {
+    --bg:        #F1EFE6;
+    --paper:     #FAF8F1;
+    --surface:   #FFFFFF;
+    --ink:       #1B241F;
+    --ink-2:     #344039;
+    --muted:     #6E7A72;
+    --faint:     #9AA59D;
+    --line:      #E2E4D9;
+    --line-2:    #EAEBE1;
+    --sage:      #4F7A5E;
+    --sage-deep: #355040;
+    --sage-mint: #C7E1C5;
+    --sage-tint: #ECF3E8;
+    --sage-glow: #B9DFB7;
+    --warn:      #C58A3B;
+    --danger:    #B85450;
+    --radius:    14px;
+    --radius-s:  10px;
+    --shadow-1:  0 1px 0 rgba(255,255,255,.7) inset, 0 1px 1px rgba(27,36,31,.04), 0 8px 24px -12px rgba(27,36,31,.10);
+    --shadow-2:  0 1px 0 rgba(255,255,255,.7) inset, 0 18px 50px -18px rgba(27,36,31,.30), 0 4px 12px -6px rgba(27,36,31,.08);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--ink); margin: 0; min-height: 100%; }
+  body {
+    font-family: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background-image: radial-gradient(rgba(85,110,90,.045) 1px, transparent 1px);
+    background-size: 3px 3px; mix-blend-mode: multiply; opacity: .55;
+  }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  .serif { font-family: 'Instrument Serif', 'Times New Roman', serif; font-weight: 400; letter-spacing: -.005em; }
+  .mono  { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* Login card */
+  .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; position: relative; z-index: 1; }
+  .login-card {
+    background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow-2); padding: 28px; width: 100%; max-width: 380px;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .logo {
+    width: 36px; height: 36px; border-radius: 11px;
+    background: radial-gradient(120% 120% at 30% 20%, var(--sage-mint), var(--sage) 70%);
+    box-shadow: inset 0 0 0 1px rgba(53,80,64,.25), 0 1px 0 rgba(255,255,255,.6) inset;
+    position: relative;
+  }
+  .logo::after {
+    content:""; position:absolute; inset:7px; border-radius:50%;
+    background: radial-gradient(circle at 35% 30%, #fff 0 18%, transparent 20%),
+                conic-gradient(from 200deg, var(--sage-deep), var(--sage), var(--sage-mint), var(--sage-deep));
+    opacity: .85;
+  }
+  .brand h1 { margin: 0; font-family: 'Instrument Serif', serif; font-weight: 400; font-size: 24px; letter-spacing: -.01em; }
+  .brand .sub { font-size: 11px; color: var(--muted); margin-top: 2px;
+                letter-spacing: .08em; text-transform: uppercase; font-weight: 600; }
+  form { display: flex; flex-direction: column; gap: 12px; }
+  label { display: flex; flex-direction: column; gap: 5px;
+          font-size: 11px; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; font-weight: 600; }
+  input.text, input.pw {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; font-size: 14px; color: var(--ink); outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  input.text:focus, input.pw:focus { border-color: var(--sage); box-shadow: 0 0 0 3px rgba(79,122,94,.16); }
+  .submit {
+    margin-top: 6px; background: var(--sage); color: #fff; border: 0;
+    padding: 11px 14px; border-radius: 10px; font-weight: 600; font-size: 14px;
+    box-shadow: var(--shadow-1);
+  }
+  .submit:hover { background: var(--sage-deep); }
+  .msg { margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; }
+  .msg.err { background: #FBECEA; border: 1px solid #EBC9C5; color: #7E2D2A; }
+  .msg.ok  { background: var(--sage-tint); border: 1px solid var(--sage-mint); color: var(--sage-deep); }
+
+  /* Dashboard */
+  .dash { padding: 24px 28px; position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; }
+  .topline {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding-bottom: 14px; border-bottom: 1px solid var(--line-2); margin-bottom: 22px;
+  }
+  .topline .brand { margin-bottom: 0; }
+  .topline .actions { display: flex; gap: 8px; align-items: center; }
+  .btn {
+    height: 34px; padding: 0 12px; border-radius: 10px; font-size: 13px; font-weight: 600;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+    display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
+  }
+  .btn:hover { background: var(--sage-tint); border-color: var(--sage-mint); color: var(--sage-deep); }
+  .btn.primary { background: var(--sage); color: #fff; border-color: var(--sage); }
+  .btn.primary:hover { background: var(--sage-deep); border-color: var(--sage-deep); }
+  .btn.danger { color: var(--danger); border-color: rgba(184,84,80,.3); }
+  .btn.danger:hover { background: #FBECEA; border-color: #EBC9C5; color: #7E2D2A; }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+  .btn.ghost:hover { background: var(--sage-tint); color: var(--sage-deep); }
+  .btn.small { height: 28px; padding: 0 10px; font-size: 12px; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 22px; }
+  .stat {
+    background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-s);
+    padding: 14px 16px; box-shadow: var(--shadow-1);
+  }
+  .stat .k { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); font-weight: 600; }
+  .stat .v { font-family: 'Instrument Serif', serif; font-size: 32px; line-height: 1; margin-top: 4px; }
+  .stat.warn .v { color: var(--warn); }
+
+  .section {
+    background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow-1); margin-bottom: 18px; overflow: hidden;
+  }
+  .section .hd {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--line-2);
+  }
+  .section .hd h2 { margin: 0; font-family: 'Instrument Serif', serif; font-weight: 400; font-size: 20px; }
+  .section .body { padding: 4px 0; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left; padding: 10px 16px; font-size: 13px;
+    border-bottom: 1px solid var(--line-2);
+  }
+  th { font-size: 10.5px; color: var(--faint); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+  tr:last-child td { border-bottom: 0; }
+  td.actions { white-space: nowrap; text-align: right; }
+  td.actions .btn { margin-left: 4px; }
+  .av-tiny {
+    display: inline-block; width: 24px; height: 24px; border-radius: 50%;
+    background: var(--sage); color: #fff; font-size: 10px; font-weight: 600;
+    display: inline-grid; place-items: center; margin-right: 8px; vertical-align: middle;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.08);
+  }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  }
+  .tag.pending  { background: #FBF1D8; color: #8A6A1F; }
+  .tag.approved { background: var(--sage-tint); color: var(--sage-deep); }
+  .tag.rejected { background: #FBECEA; color: #7E2D2A; }
+  .tag.disabled { background: #ECECEC; color: var(--muted); }
+  .tag.admin    { background: #DCE9F5; color: #2C4A6F; margin-left: 4px; }
+
+  .empty { padding: 18px; color: var(--muted); font-size: 13px; text-align: center; }
+
+  /* Modal */
+  .modal {
+    position: fixed; inset: 0; z-index: 50;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(20,28,24,.45); padding: 24px; backdrop-filter: blur(3px);
+  }
+  .modal.on { display: flex; }
+  .modal .card {
+    background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow-2); width: 100%; max-width: 460px; padding: 22px;
+  }
+  .modal h3 { margin: 0 0 14px; font-family: 'Instrument Serif', serif; font-weight: 400; font-size: 22px; }
+  .modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+
+  /* Toast */
+  .toast-stack { position: fixed; bottom: 26px; left: 50%; transform: translate(-50%, 0); z-index: 9999; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
+  .toast {
+    background: var(--ink); color: #ECF3E8;
+    padding: 9px 14px; border-radius: 999px; font-size: 12.5px;
+    box-shadow: var(--shadow-2); animation: toast-in .25s ease-out both;
+  }
+  .toast.err { background: var(--danger); }
+  @keyframes toast-in { from { opacity:0; transform: translateY(8px) } to { opacity:1; transform: translateY(0) } }
+</style>
+</head>
+<body>
+
+<!-- LOGIN VIEW -->
+<div id="loginView" class="login-wrap" style="display:none;">
+  <div class="login-card">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <h1 class="serif">AlexMessage</h1>
+        <div class="sub">Admin Control Panel</div>
+      </div>
+    </div>
+    <form id="loginForm">
+      <label>Admin username
+        <input class="text" name="username" autocomplete="username" required />
+      </label>
+      <label>Password
+        <input class="pw" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button class="submit" type="submit">Sign in</button>
+    </form>
+    <div id="loginMsg"></div>
+  </div>
+</div>
+
+<!-- DASHBOARD VIEW -->
+<div id="dashView" class="dash" style="display:none;">
+  <div class="topline">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <h1 class="serif">AlexMessage</h1>
+        <div class="sub">Admin Control Panel</div>
+      </div>
+    </div>
+    <div class="actions">
+      <span class="mono" id="adminWho" style="font-size:12px; color:var(--muted);"></span>
+      <button class="btn ghost" id="refreshBtn">Refresh</button>
+      <button class="btn ghost" id="logoutBtn">Sign out</button>
+    </div>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="section">
+    <div class="hd">
+      <h2 class="serif">Pending registrations</h2>
+      <span id="pendingCount" style="color:var(--muted); font-size:12px;"></span>
+    </div>
+    <div class="body" id="pendingBody"></div>
+  </div>
+
+  <div class="section">
+    <div class="hd">
+      <h2 class="serif">All accounts</h2>
+      <button class="btn primary" id="newUserBtn">+ New account</button>
+    </div>
+    <div class="body" id="usersBody"></div>
+  </div>
+
+  <div class="section">
+    <div class="hd">
+      <h2 class="serif">Global operations</h2>
+    </div>
+    <div class="body" style="padding: 14px 18px;">
+      <button class="btn danger" id="purgeBtn">Purge all messages</button>
+      <span style="margin-left: 10px; color: var(--muted); font-size: 12px;">Deletes every message and attachment record. Files on disk are retained.</span>
+    </div>
+  </div>
+</div>
+
+<!-- New user modal -->
+<div class="modal" id="newUserModal">
+  <div class="card">
+    <h3 class="serif">Create account</h3>
+    <form id="newUserForm">
+      <label>Username
+        <input class="text" name="username" required minlength="3" maxlength="32" />
+      </label>
+      <label>Display name
+        <input class="text" name="display_name" maxlength="40" placeholder="Optional" />
+      </label>
+      <label>Password
+        <input class="pw" name="password" type="password" required minlength="8" />
+      </label>
+      <label style="flex-direction: row; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-size: 13px;">
+        <input type="checkbox" name="is_admin" /> Grant administrator rights
+      </label>
+      <div class="row">
+        <button class="btn ghost" type="button" id="newUserCancel">Cancel</button>
+        <button class="btn primary" type="submit">Create</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Password reset modal -->
+<div class="modal" id="pwModal">
+  <div class="card">
+    <h3 class="serif">Set new password</h3>
+    <div style="font-size: 13px; color: var(--muted); margin-bottom: 10px;">
+      For <b class="mono" id="pwModalUser"></b>. All existing sessions will be revoked.
+    </div>
+    <form id="pwForm">
+      <label>New password
+        <input class="pw" name="password" type="password" required minlength="8" />
+      </label>
+      <div class="row">
+        <button class="btn ghost" type="button" id="pwCancel">Cancel</button>
+        <button class="btn primary" type="submit">Set password</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Edit user modal -->
+<div class="modal" id="editModal">
+  <div class="card">
+    <h3 class="serif">Edit account</h3>
+    <form id="editForm">
+      <label>Display name
+        <input class="text" name="display_name" maxlength="40" />
+      </label>
+      <label>Bio
+        <input class="text" name="bio" maxlength="280" />
+      </label>
+      <label style="flex-direction: row; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-size: 13px;">
+        <input type="checkbox" name="is_admin" /> Administrator
+      </label>
+      <div class="row">
+        <button class="btn ghost" type="button" id="editCancel">Cancel</button>
+        <button class="btn primary" type="submit">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="toast-stack" id="toasts"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let editingUserId = null;
+  let pwUserId = null;
+
+  function toast(text, isErr = false) {
+    const el = document.createElement("div");
+    el.className = "toast" + (isErr ? " err" : "");
+    el.textContent = text;
+    $("toasts").appendChild(el);
+    setTimeout(() => el.remove(), 2200);
+  }
+  function escapeHTML(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+  function initials(name) {
+    const parts = (name || "?").split(/[\s._-]+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return (parts[0] || "?").slice(0, 2).toUpperCase();
+  }
+
+  async function api(path, opts = {}) {
+    const r = await fetch(path, { credentials: "same-origin", ...opts });
+    let data = null;
+    try { data = await r.json(); } catch {}
+    return { ok: r.ok, status: r.status, data };
+  }
+
+  // ──────── Login ────────
+  async function checkLogin() {
+    const r = await api("/api/me");
+    if (r.ok) {
+      $("loginView").style.display = "none";
+      $("dashView").style.display = "";
+      $("adminWho").textContent = "@" + r.data.user.username;
+      await refreshAll();
+    } else {
+      $("loginView").style.display = "";
+      $("dashView").style.display = "none";
+    }
+  }
+
+  $("loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData($("loginForm"));
+    const r = await api("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: fd.get("username"), password: fd.get("password") }),
+    });
+    if (r.ok) {
+      $("loginMsg").innerHTML = "";
+      checkLogin();
+    } else {
+      $("loginMsg").innerHTML = `<div class="msg err">${escapeHTML((r.data && r.data.detail) || "Sign-in failed")}</div>`;
+    }
+  });
+
+  $("logoutBtn").addEventListener("click", async () => {
+    await api("/api/logout", { method: "POST" });
+    checkLogin();
+  });
+  $("refreshBtn").addEventListener("click", refreshAll);
+
+  // ──────── Stats ────────
+  async function loadStats() {
+    const r = await api("/api/stats");
+    if (!r.ok) return;
+    const s = r.data;
+    $("stats").innerHTML = `
+      <div class="stat"><div class="k">Accounts</div><div class="v">${s.users_total}</div></div>
+      <div class="stat ${s.pending ? "warn" : ""}"><div class="k">Pending</div><div class="v">${s.pending}</div></div>
+      <div class="stat"><div class="k">Approved</div><div class="v">${s.approved}</div></div>
+      <div class="stat"><div class="k">Messages</div><div class="v">${s.messages_total}</div></div>
+      <div class="stat"><div class="k">Attachments</div><div class="v">${s.attachments_total}</div></div>`;
+  }
+
+  // ──────── Users ────────
+  async function loadUsers() {
+    const r = await api("/api/users");
+    if (!r.ok) { return; }
+    const users = r.data.users;
+    renderPending(users.filter(u => u.status === "pending"));
+    renderAll(users);
+  }
+
+  function userRowHTML(u, mode) {
+    return `
+      <tr data-uid="${u.id}">
+        <td>
+          <span class="av-tiny">${escapeHTML(initials(u.display_name || u.username))}</span>
+          <b>${escapeHTML(u.display_name || u.username)}</b>
+          ${u.is_admin ? '<span class="tag admin">admin</span>' : ""}
+        </td>
+        <td class="mono">@${escapeHTML(u.username)}</td>
+        <td><span class="tag ${u.status}">${u.status}</span></td>
+        <td class="mono" style="color:var(--muted)">#${u.id}</td>
+        <td class="actions">${actionsFor(u, mode)}</td>
+      </tr>`;
+  }
+
+  function actionsFor(u, mode) {
+    if (mode === "pending") {
+      return `
+        <button class="btn small primary" data-act="approve">Approve</button>
+        <button class="btn small danger"  data-act="reject">Reject</button>`;
+    }
+    const parts = [];
+    parts.push(`<button class="btn small" data-act="edit">Edit</button>`);
+    parts.push(`<button class="btn small" data-act="password">Password</button>`);
+    if (u.status === "approved") {
+      parts.push(`<button class="btn small" data-act="disable">Disable</button>`);
+    } else if (u.status === "disabled" || u.status === "rejected") {
+      parts.push(`<button class="btn small" data-act="enable">Enable</button>`);
+    } else if (u.status === "pending") {
+      parts.push(`<button class="btn small primary" data-act="approve">Approve</button>`);
+    }
+    parts.push(`<button class="btn small danger" data-act="delete">Delete</button>`);
+    return parts.join("");
+  }
+
+  function renderPending(users) {
+    $("pendingCount").textContent = users.length ? `${users.length} awaiting review` : "";
+    const body = $("pendingBody");
+    if (!users.length) { body.innerHTML = `<div class="empty">No pending registrations.</div>`; return; }
+    body.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Account</th><th>Username</th><th>Status</th><th>ID</th><th></th>
+        </tr></thead>
+        <tbody>${users.map(u => userRowHTML(u, "pending")).join("")}</tbody>
+      </table>`;
+    wireActions(body);
+  }
+
+  function renderAll(users) {
+    const body = $("usersBody");
+    if (!users.length) { body.innerHTML = `<div class="empty">No accounts yet.</div>`; return; }
+    body.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Account</th><th>Username</th><th>Status</th><th>ID</th><th></th>
+        </tr></thead>
+        <tbody>${users.map(u => userRowHTML(u, "all")).join("")}</tbody>
+      </table>`;
+    wireActions(body);
+  }
+
+  function wireActions(scope) {
+    scope.querySelectorAll("[data-act]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        const tr = e.target.closest("tr");
+        const uid = parseInt(tr.getAttribute("data-uid"), 10);
+        const act = btn.getAttribute("data-act");
+        if (act === "approve") {
+          const r = await api(`/api/users/${uid}/approve`, { method: "POST" });
+          r.ok ? toast("Approved") : toast(r.data?.detail || "Failed", true); refreshAll();
+        } else if (act === "reject") {
+          if (!confirm("Reject this registration?")) return;
+          const r = await api(`/api/users/${uid}/reject`, { method: "POST" });
+          r.ok ? toast("Rejected") : toast(r.data?.detail || "Failed", true); refreshAll();
+        } else if (act === "disable") {
+          const r = await api(`/api/users/${uid}/disable`, { method: "POST" });
+          r.ok ? toast("Account disabled") : toast(r.data?.detail || "Failed", true); refreshAll();
+        } else if (act === "enable") {
+          const r = await api(`/api/users/${uid}/enable`, { method: "POST" });
+          r.ok ? toast("Account enabled") : toast(r.data?.detail || "Failed", true); refreshAll();
+        } else if (act === "delete") {
+          if (!confirm("Permanently delete this account, their messages, and uploads?")) return;
+          const r = await api(`/api/users/${uid}`, { method: "DELETE" });
+          r.ok ? toast("Deleted") : toast(r.data?.detail || "Failed", true); refreshAll();
+        } else if (act === "password") {
+          pwUserId = uid;
+          $("pwModalUser").textContent = "@" + (tr.querySelector("td.mono")?.textContent.replace("@","") || "");
+          $("pwForm").reset();
+          $("pwModal").classList.add("on");
+        } else if (act === "edit") {
+          // pull current data for prefill
+          const r = await api("/api/users");
+          const u = r.data && r.data.users.find(x => x.id === uid);
+          if (!u) return;
+          editingUserId = uid;
+          $("editForm").display_name.value = u.display_name || "";
+          $("editForm").bio.value = u.bio || "";
+          $("editForm").is_admin.checked = !!u.is_admin;
+          $("editModal").classList.add("on");
+        }
+      });
+    });
+  }
+
+  // ──────── Modals ────────
+  $("newUserBtn").addEventListener("click", () => {
+    $("newUserForm").reset();
+    $("newUserModal").classList.add("on");
+  });
+  $("newUserCancel").addEventListener("click", () => $("newUserModal").classList.remove("on"));
+  $("newUserForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData($("newUserForm"));
+    const r = await api("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: fd.get("username"),
+        display_name: fd.get("display_name"),
+        password: fd.get("password"),
+        is_admin: fd.get("is_admin") === "on",
+      }),
+    });
+    if (r.ok) {
+      $("newUserModal").classList.remove("on");
+      toast("Account created");
+      refreshAll();
+    } else {
+      toast(r.data?.detail || "Failed", true);
+    }
+  });
+
+  $("pwCancel").addEventListener("click", () => $("pwModal").classList.remove("on"));
+  $("pwForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData($("pwForm"));
+    const r = await api(`/api/users/${pwUserId}/password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: fd.get("password") }),
+    });
+    if (r.ok) { $("pwModal").classList.remove("on"); toast("Password updated"); }
+    else toast(r.data?.detail || "Failed", true);
+  });
+
+  $("editCancel").addEventListener("click", () => $("editModal").classList.remove("on"));
+  $("editForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData($("editForm"));
+    const r = await api(`/api/users/${editingUserId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        display_name: fd.get("display_name"),
+        bio: fd.get("bio"),
+        is_admin: fd.get("is_admin") === "on",
+      }),
+    });
+    if (r.ok) { $("editModal").classList.remove("on"); toast("Saved"); refreshAll(); }
+    else toast(r.data?.detail || "Failed", true);
+  });
+
+  $("purgeBtn").addEventListener("click", async () => {
+    if (!confirm("Delete EVERY message and attachment record? This cannot be undone.")) return;
+    const r = await api("/api/purge_messages", { method: "POST" });
+    if (r.ok) { toast("Messages purged"); refreshAll(); }
+    else toast(r.data?.detail || "Failed", true);
+  });
+
+  // Close modals on backdrop click
+  document.querySelectorAll(".modal").forEach(m => {
+    m.addEventListener("click", (e) => { if (e.target === m) m.classList.remove("on"); });
+  });
+
+  // ──────── Boot ────────
+  async function refreshAll() {
+    await Promise.all([loadStats(), loadUsers()]);
+  }
+  checkLogin();
+})();
+</script>
+</body>
+</html>

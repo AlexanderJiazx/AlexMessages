@@ -1,0 +1,1253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AlexMessage · Calls</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="theme-color" content="#F1EFE6" />
+<link href="/fonts/fonts.css" rel="stylesheet" />
+<style>
+  :root {
+    --bg:        #F1EFE6;
+    --paper:     #FAF8F1;
+    --surface:   #FFFFFF;
+    --ink:       #1B241F;
+    --ink-2:     #344039;
+    --muted:     #6E7A72;
+    --faint:     #9AA59D;
+    --line:      #E2E4D9;
+    --line-2:    #EAEBE1;
+    --sage:      #4F7A5E;
+    --sage-deep: #355040;
+    --sage-soft: #DCE9D9;
+    --sage-mint: #C7E1C5;
+    --sage-tint: #ECF3E8;
+    --sage-glow: #B9DFB7;
+    --warn:      #C58A3B;
+    --danger:    #B85450;
+    --radius:    14px;
+    --radius-s:  10px;
+    --shadow-1:  0 1px 0 rgba(255,255,255,.7) inset, 0 1px 1px rgba(27,36,31,.04), 0 8px 24px -12px rgba(27,36,31,.10);
+    --shadow-2:  0 1px 0 rgba(255,255,255,.7) inset, 0 18px 50px -18px rgba(27,36,31,.30), 0 4px 12px -6px rgba(27,36,31,.08);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--ink); height: 100%; }
+  body {
+    margin: 0;
+    font-family: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+  button, input, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  a { color: var(--sage-deep); }
+
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: radial-gradient(rgba(85,110,90,.045) 1px, transparent 1px);
+    background-size: 3px 3px; mix-blend-mode: multiply; opacity: .55;
+  }
+  .serif { font-family: 'Instrument Serif', 'Times New Roman', serif; font-weight: 400; letter-spacing: -.005em; }
+  .mono  { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* Layout */
+  .app {
+    position: fixed; inset: 0; z-index: 2;
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    gap: 12px; padding: 12px;
+  }
+  .pane {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-1);
+    display: flex; flex-direction: column;
+    min-height: 0; min-width: 0;
+    overflow: hidden;
+  }
+
+  /* Left rail */
+  .rail-hd {
+    display:flex; align-items:center; gap:10px;
+    padding: 16px 14px 14px; border-bottom: 1px solid var(--line-2);
+  }
+  .logo {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: radial-gradient(120% 120% at 30% 20%, var(--sage-mint), var(--sage) 70%);
+    box-shadow: inset 0 0 0 1px rgba(53,80,64,.25), 0 1px 0 rgba(255,255,255,.6) inset;
+    position: relative;
+  }
+  .logo::after {
+    content:""; position:absolute; inset:6px; border-radius:50%;
+    background: radial-gradient(circle at 35% 30%, #fff 0 18%, transparent 20%),
+                conic-gradient(from 200deg, var(--sage-deep), var(--sage), var(--sage-mint), var(--sage-deep));
+    opacity:.85;
+  }
+  .ws-name { display:flex; flex-direction:column; line-height:1.15; min-width:0; }
+  .ws-name b { font-size: 14px; font-weight: 600; letter-spacing:-.01em; }
+  .ws-name .net { font-size: 10.5px; color: var(--muted); display:flex; align-items:center; gap:6px; margin-top:2px; }
+  .net .dot { width:6px; height:6px; border-radius:50%; background: var(--sage); box-shadow:0 0 0 3px rgba(79,122,94,.18); animation:pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse {
+    0%,100%{ box-shadow:0 0 0 3px rgba(79,122,94,.18); }
+    50%   { box-shadow:0 0 0 6px rgba(79,122,94,0); }
+  }
+  .me-chip {
+    margin-left:auto; display:flex; align-items:center; gap:8px;
+    background: transparent; border: 1px solid transparent; padding: 4px 6px;
+    border-radius: 9px; color: var(--ink-2);
+  }
+  .me-chip:hover { background: var(--surface); border-color: var(--line); }
+
+  .rail-section {
+    padding: 14px 14px 6px;
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--faint); font-weight: 600;
+    display:flex; justify-content:space-between; align-items:baseline;
+  }
+  .rail-section .count { letter-spacing: 0; text-transform: none; color: var(--muted); font-weight:500; }
+
+  .calls { padding: 0 8px 6px; flex:1; overflow-y:auto; }
+  .calls::-webkit-scrollbar{ width:6px } .calls::-webkit-scrollbar-thumb{ background:rgba(0,0,0,.08); border-radius:4px }
+  .call-row {
+    display:grid; grid-template-columns: 32px 1fr auto; gap:10px;
+    align-items:center; padding: 8px 10px; border-radius: 9px;
+    width:100%; text-align:left; border:0; background:transparent; color:var(--ink-2);
+  }
+  .call-row:hover { background: rgba(79,122,94,.06); }
+  .call-row .who { display:flex; flex-direction:column; min-width:0; }
+  .call-row .who b { font-size: 13px; font-weight: 600; color: var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .call-row .who .sub { font-size: 11px; color: var(--muted); display:flex; align-items:center; gap:5px; }
+  .call-row .meta { font-size: 11px; color: var(--faint); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .call-row .who .sub .ico { display:inline-flex; }
+  .call-row .who.missed b { color: var(--danger); }
+  .empty-rail { padding: 16px 18px; font-size: 12.5px; color: var(--muted); line-height:1.5; }
+
+  .av {
+    width:32px; height:32px; border-radius: 50%;
+    display:grid; place-items:center;
+    font-size: 12px; font-weight: 600; color: #fff;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.08);
+    flex-shrink: 0;
+  }
+  .av.xl { width:108px; height:108px; font-size: 38px; border-radius: 32px; }
+  .av.lg { width:64px; height:64px; font-size: 22px; border-radius: 20px; }
+  .av.sm { width:28px; height:28px; font-size: 11px; }
+
+  /* Center: stage */
+  .stage {
+    flex:1; display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start;
+    overflow: hidden;
+  }
+  .topbar {
+    display:flex; align-items:center; gap:10px;
+    padding: 14px 22px; border-bottom: 1px solid var(--line-2);
+    background: linear-gradient(180deg, rgba(255,255,255,.5), rgba(255,255,255,0));
+  }
+  .topbar .title { display:flex; flex-direction:column; line-height:1.1; min-width: 0; flex:1; }
+  .topbar .title h1 {
+    margin:0; font-size: 22px; font-weight: 400; letter-spacing:-.01em; color: var(--ink);
+    font-family: 'Instrument Serif', serif;
+  }
+  .topbar .title .sub {
+    color: var(--muted); font-size: 12.5px; margin-top: 4px;
+  }
+
+  /* Idle: dialer */
+  .stage-body { flex:1; overflow:auto; padding: 24px; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  .stage-body::-webkit-scrollbar{ width:8px } .stage-body::-webkit-scrollbar-thumb{ background:rgba(0,0,0,.08); border-radius:6px }
+
+  .dialer {
+    width: 100%; max-width: 420px; display:flex; flex-direction:column; align-items:center; gap: 18px;
+    text-align: center;
+  }
+  .dialer .emblem {
+    width: 56px; height: 56px; border-radius: 18px;
+    background: radial-gradient(120% 120% at 30% 20%, var(--sage-mint), var(--sage) 70%);
+    box-shadow: inset 0 0 0 1px rgba(53,80,64,.22), 0 1px 0 rgba(255,255,255,.55) inset, 0 8px 22px -12px rgba(53,80,64,.4);
+    display:grid; place-items:center; color:#fff;
+  }
+  .dialer h2 { margin: 4px 0 0; font-family: 'Instrument Serif', serif; font-weight: 400; font-size: 30px; letter-spacing:-.01em; line-height: 1.15; }
+  .dialer .lede { color: var(--muted); font-size: 13.5px; line-height: 1.55; max-width: 320px; margin: -6px 0 4px; }
+  .dial-row {
+    width: 100%;
+    display:flex; gap: 6px; align-items:stretch;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 5px; box-shadow: var(--shadow-1);
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .dial-row.focused { border-color: var(--sage-mint); box-shadow: 0 0 0 4px rgba(199,225,197,.4), var(--shadow-1); }
+  .dial-row .prefix { display:grid; place-items:center; padding: 0 4px 0 10px; color: var(--faint); font-family: 'JetBrains Mono', monospace; font-size: 14px; }
+  .dial-row input {
+    flex:1; min-width: 0; background: transparent; border: 0; outline: none;
+    padding: 9px 4px; font-size: 14.5px; color: var(--ink);
+  }
+  .dial-row input::placeholder { color: var(--faint); }
+  .dial-row .call-btn {
+    border: 0; padding: 0 14px; border-radius: 9px;
+    background: var(--sage); color: #fff; font-weight: 600; font-size: 13px;
+    display:inline-flex; align-items:center; gap:6px;
+    box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 1px 2px rgba(53,80,64,.4);
+  }
+  .dial-row .call-btn:disabled { background: var(--sage-soft); color: var(--sage-deep); opacity:.7; box-shadow:none; cursor:not-allowed; }
+  .dial-row .call-btn:not(:disabled):hover { background: var(--sage-deep); }
+  .dial-err { color: var(--danger); font-size: 12.5px; min-height: 1em; text-align:center; }
+
+  /* Outgoing / In-call view */
+  .call-view {
+    width: 100%; max-width: 480px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 18px;
+    padding: 30px 26px 22px; box-shadow: var(--shadow-2);
+    display:flex; flex-direction:column; align-items:center; gap: 14px;
+    position: relative; overflow: hidden;
+  }
+  .call-view::before {
+    content:""; position:absolute; inset: 0 0 auto 0; height: 140px;
+    background: radial-gradient(circle at 20% 0%, var(--sage-glow), transparent 60%),
+                linear-gradient(180deg, var(--sage-tint), transparent 80%);
+    pointer-events: none; z-index: 0;
+  }
+  .call-view > * { position: relative; z-index: 1; }
+  .ring-aura {
+    position: relative;
+    width: 132px; height: 132px;
+    display:grid; place-items:center;
+  }
+  .ring-aura::after, .ring-aura::before {
+    content:""; position:absolute; inset:0; border-radius: 50%;
+    border: 2px solid rgba(79,122,94,.35);
+    animation: ring 1.8s ease-out infinite;
+  }
+  .ring-aura::before { animation-delay: .9s; }
+  .call-view.connected .ring-aura::after,
+  .call-view.connected .ring-aura::before { display: none; }
+  @keyframes ring {
+    0%   { transform: scale(.7); opacity: 0; }
+    40%  { opacity: 1; }
+    100% { transform: scale(1.4); opacity: 0; }
+  }
+  .call-view .name {
+    margin: 4px 0 0; font-family: 'Instrument Serif', serif; font-weight: 400;
+    font-size: 28px; line-height: 1.15; text-align:center; word-break: break-word;
+  }
+  .call-view .handle { color: var(--muted); font-size: 13px; font-family: 'JetBrains Mono', monospace; }
+  .call-view .status {
+    color: var(--sage-deep); font-size: 13px;
+    background: var(--sage-tint); border: 1px solid var(--sage-mint);
+    padding: 4px 12px; border-radius: 999px;
+    display:inline-flex; align-items:center; gap:8px;
+  }
+  .call-view .status.muted { color: var(--warn); background:#FBF1DF; border-color:#EBD8AC; }
+  .call-view .timer { font-variant-numeric: tabular-nums; font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--ink-2); }
+  .ctrls {
+    margin-top: 8px; display:flex; gap: 14px; align-items:center; justify-content:center;
+  }
+  .ctrl {
+    width: 56px; height: 56px; border-radius: 50%;
+    background: var(--surface); border: 1px solid var(--line); color: var(--ink-2);
+    display:grid; place-items:center; box-shadow: var(--shadow-1);
+    transition: transform .08s ease, background .12s, color .12s, border-color .12s;
+  }
+  .ctrl:hover { background: var(--sage-tint); color: var(--sage-deep); border-color: var(--sage-mint); }
+  .ctrl:active { transform: scale(.96); }
+  .ctrl.active { background: var(--sage-deep); color:#fff; border-color: var(--sage-deep); }
+  .ctrl.end { background: var(--danger); color:#fff; border-color: var(--danger); }
+  .ctrl.end:hover { background: #962E2A; border-color:#7E2D2A; color:#fff; }
+  .ctrl.accept { background: var(--sage); color:#fff; border-color: var(--sage); }
+  .ctrl.accept:hover { background: var(--sage-deep); border-color: var(--sage-deep); color:#fff; }
+  .ctrl-row-label { font-size: 11px; color: var(--muted); text-align:center; }
+
+  /* Incoming banner */
+  .banner-wrap {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%) translateY(-200%);
+    z-index: 50; transition: transform .25s ease-out;
+    width: min(560px, calc(100% - 24px));
+  }
+  .banner-wrap.on { transform: translateX(-50%) translateY(0); }
+  .banner {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 16px;
+    box-shadow: var(--shadow-2);
+    padding: 12px 14px;
+    display:grid; grid-template-columns: auto 1fr auto auto; gap: 12px; align-items:center;
+  }
+  .banner .who { display:flex; flex-direction:column; min-width:0; }
+  .banner .who b { font-size: 14px; font-weight: 600; color: var(--ink); }
+  .banner .who .sub { font-size: 12px; color: var(--muted); display:flex; align-items:center; gap:6px; }
+  .banner .who .sub .pulse {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--sage);
+    box-shadow: 0 0 0 4px rgba(79,122,94,.18); animation: pulse 1.5s ease-in-out infinite;
+  }
+  .banner .btn-accept, .banner .btn-decline {
+    border: 0; padding: 8px 14px; border-radius: 10px; font-weight: 600; font-size: 13px;
+    display:inline-flex; align-items:center; gap:6px;
+  }
+  .banner .btn-accept { background: var(--sage); color: #fff; box-shadow: 0 1px 2px rgba(53,80,64,.4); }
+  .banner .btn-accept:hover { background: var(--sage-deep); }
+  .banner .btn-decline { background: var(--surface); border: 1px solid var(--line); color: var(--danger); }
+  .banner .btn-decline:hover { background: #FBECEA; border-color:#EBC9C5; color:#7E2D2A; }
+
+  /* Toasts */
+  .toast-stack { position: fixed; bottom: 26px; left: 50%; transform: translate(-50%, 0); z-index: 9999; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
+  .toast {
+    background: var(--ink); color: #ECF3E8;
+    padding: 9px 14px; border-radius: 999px; font-size: 12.5px;
+    box-shadow: var(--shadow-2); display:flex; align-items:center; gap:8px;
+    animation: toast-in .25s ease-out both;
+  }
+  .toast.err  { background: var(--danger); }
+  .toast.warn { background: var(--warn);   }
+  .toast.ok   { background: var(--sage-deep); }
+  @keyframes toast-in { from { opacity:0; transform: translateY(8px) } to { opacity:1; transform: translateY(0) } }
+
+  /* Backdrop — fixed/positioned so it never claims a grid slot. */
+  .backdrop {
+    position: fixed; inset: 0; background: rgba(20,28,24,.4);
+    z-index: 9; display: none; backdrop-filter: blur(2px);
+  }
+  .backdrop.on { display: block; }
+
+  /* Mobile */
+  .menu-btn {
+    display: none; width: 36px; height:36px; border-radius: 9px;
+    background: transparent; border:1px solid var(--line); color: var(--ink-2);
+    align-items:center; justify-content:center;
+  }
+  @media (max-width: 780px) {
+    .app { grid-template-columns: 1fr; gap: 0; padding: 0; }
+    .pane { border-radius: 0; border-left:0; border-right:0; }
+    .pane.left {
+      position: fixed; top:0; left:0; bottom:0; width: 84vw; max-width: 320px;
+      z-index: 10; transform: translateX(-100%); transition: transform .22s ease;
+      border-right: 1px solid var(--line); border-radius: 0 var(--radius) var(--radius) 0;
+      box-shadow: var(--shadow-2);
+    }
+    .pane.left.open { transform: translateX(0); }
+    .pane.center { height: 100vh; height: 100dvh; }
+    .menu-btn { display: inline-flex !important; }
+  }
+</style>
+</head>
+<body>
+  <div class="app">
+    <div class="backdrop" id="backdrop"></div>
+
+    <!-- LEFT RAIL: recent calls -->
+    <aside class="pane left" id="leftPane">
+      <div class="rail-hd">
+        <div class="logo"></div>
+        <div class="ws-name">
+          <b>AlexMessage Calls</b>
+          <span class="net"><span class="dot"></span><span id="netLabel">connecting…</span></span>
+        </div>
+        <button class="me-chip" id="meChip" title="Sign out">
+          <span class="av sm" id="meAv"><span>?</span></span>
+        </button>
+      </div>
+      <div class="rail-section"><span>Recent calls</span><span class="count" id="callCount"></span></div>
+      <div class="calls" id="callList">
+        <div class="empty-rail">No calls yet. Enter a username and place your first call.</div>
+      </div>
+    </aside>
+
+    <!-- CENTER STAGE -->
+    <main class="pane center stage">
+      <div class="topbar">
+        <button class="menu-btn" id="menuBtn" aria-label="Open menu">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <div class="title">
+          <h1 id="stageTitle">Place a call</h1>
+          <span class="sub" id="stageSub">Voice-only, peer-to-peer over WebRTC.</span>
+        </div>
+      </div>
+      <div class="stage-body" id="stageBody"></div>
+    </main>
+  </div>
+
+  <!-- Incoming-call banner (above all panes) -->
+  <div class="banner-wrap" id="bannerWrap">
+    <div class="banner">
+      <span class="av lg" id="bannerAv"><span>?</span></span>
+      <div class="who">
+        <b id="bannerName">Caller</b>
+        <span class="sub"><span class="pulse"></span> <span id="bannerSub">Incoming call…</span></span>
+      </div>
+      <button class="btn-decline" id="bannerDecline">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        Decline
+      </button>
+      <button class="btn-accept" id="bannerAccept">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        Answer
+      </button>
+    </div>
+  </div>
+
+  <!-- Hidden audio elements -->
+  <audio id="ringTone" src="/sound/RingTone.mp3" preload="auto" loop></audio>
+  <audio id="remoteAudio" autoplay playsinline></audio>
+
+  <div class="toast-stack" id="toasts"></div>
+
+<script>
+(() => {
+  "use strict";
+  // ──────── Constants ────────
+  const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  const PEER_COLORS = ["#4F7A5E","#7BA17F","#39604A","#A3B581","#6F8A6E","#8FAE92","#5A7773","#94A36B","#5B8A6C","#6A8E5F"];
+
+  // ──────── State ────────
+  const state = {
+    me: null,                    // {id, username, display_name}
+    ws: null,
+    wsReady: false,
+    pendingSend: [],
+    active: null,                // {call_id, peer, direction, phase} phase: 'ringing'|'connecting'|'connected'
+    incoming: null,              // {call_id, from}
+    recent: [],
+    pc: null,
+    localStream: null,
+    remoteStream: null,
+    pendingIce: [],              // ICE candidates queued before remote desc is set
+    haveRemoteDesc: false,
+    muted: false,
+    timerInterval: null,
+    callStartedAtMs: null,
+    notifPermission: (typeof Notification !== "undefined") ? Notification.permission : "denied",
+    activeNotification: null,
+  };
+
+  // ──────── DOM helpers ────────
+  const $ = (id) => document.getElementById(id);
+
+  function hash(s) {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    return Math.abs(h);
+  }
+  function colorFor(uid) {
+    const key = String(uid ?? "?");
+    return PEER_COLORS[hash(key) % PEER_COLORS.length];
+  }
+  function shade(hex, amt) {
+    const c = hex.replace("#","");
+    const r=parseInt(c.slice(0,2),16),g=parseInt(c.slice(2,4),16),b=parseInt(c.slice(4,6),16);
+    const adj = v => Math.max(0, Math.min(255, Math.round(v + (amt<0 ? v*amt : (255-v)*amt))));
+    return `#${[adj(r),adj(g),adj(b)].map(v=>v.toString(16).padStart(2,"0")).join("")}`;
+  }
+  function initialsFor(name) {
+    if (!name) return "?";
+    const parts = String(name).split(/[\s._-]+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return (parts[0] || "?").slice(0,2).toUpperCase();
+  }
+  function escapeHTML(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+  function avatarHTML(user, size = "") {
+    if (!user) return `<span class="av ${size}" style="background:#9AA59D"><span>?</span></span>`;
+    const c = colorFor(user.id);
+    const initials = initialsFor(user.display_name || user.username || "?");
+    return `<span class="av ${size}" style="background: linear-gradient(135deg, ${c}, ${shade(c,-.18)})"><span>${escapeHTML(initials)}</span></span>`;
+  }
+  function toast(text, kind = "") {
+    const el = document.createElement("div");
+    el.className = "toast " + (kind || "");
+    el.textContent = text;
+    $("toasts").appendChild(el);
+    setTimeout(() => el.remove(), 2600);
+  }
+  function fmtTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+  function fmtDuration(seconds) {
+    if (!seconds || seconds < 0) return "0:00";
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    if (m >= 60) {
+      const h = Math.floor(m / 60);
+      const mm = m % 60;
+      return `${h}:${String(mm).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+    }
+    return `${m}:${String(s).padStart(2,"0")}`;
+  }
+
+  // ──────── Network / WS ────────
+  function wsURL() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    return `${proto}://${location.host}/ws`;
+  }
+
+  let _reconnectTimer = null;
+  function scheduleReconnect(delay) {
+    if (_reconnectTimer != null) return;  // already queued — don't pile up
+    _reconnectTimer = setTimeout(() => { _reconnectTimer = null; connect(); }, delay);
+  }
+
+  function connect() {
+    // If a stale socket is still around (e.g. left over from a previous
+    // connect that errored asynchronously), strip its listeners so its
+    // late-firing close doesn't kick us into another reconnect loop.
+    if (state.ws) {
+      try { state.ws.onopen = state.ws.onmessage = state.ws.onclose = state.ws.onerror = null; } catch {}
+      try { state.ws.close(); } catch {}
+      state.ws = null;
+    }
+    setNetLabel("connecting…", true);
+    let ws;
+    try {
+      ws = new WebSocket(wsURL());
+    } catch (e) {
+      console.warn("[ws] construct failed", e);
+      setNetLabel("offline", false);
+      scheduleReconnect(2000);
+      return;
+    }
+    state.ws = ws;
+    ws.onopen = () => {
+      if (state.ws !== ws) return; // superseded
+      state.wsReady = true;
+      setNetLabel("online", true);
+      // Flush queued sends
+      state.pendingSend.forEach(p => { try { ws.send(JSON.stringify(p)); } catch {} });
+      state.pendingSend = [];
+    };
+    ws.onmessage = (e) => {
+      if (state.ws !== ws) return;
+      let data; try { data = JSON.parse(e.data); } catch { return; }
+      onWS(data);
+    };
+    ws.onclose = (e) => {
+      if (state.ws !== ws) return;  // superseded — already reconnected
+      state.wsReady = false;
+      state.ws = null;
+      console.warn(`[ws] closed code=${e.code} reason=${e.reason || "(none)"} clean=${e.wasClean}`);
+      setNetLabel("offline", false);
+      if (e.code === 4401) {
+        window.location.href = "/login";
+        return;
+      }
+      if (state.active) {
+        toast("Connection lost — call ended", "err");
+        teardownCall(state.active.call_id, "Connection lost");
+      }
+      hideBanner();
+      scheduleReconnect(1500);
+    };
+    ws.onerror = (e) => { console.warn("[ws] error", e); };
+  }
+
+  function send(payload) {
+    if (state.wsReady && state.ws) {
+      try { state.ws.send(JSON.stringify(payload)); }
+      catch { state.pendingSend.push(payload); }
+    } else {
+      state.pendingSend.push(payload);
+    }
+  }
+
+  function setNetLabel(text, ok) {
+    const el = $("netLabel");
+    if (el) el.textContent = text;
+  }
+
+  // ──────── Recent calls ────────
+  async function refreshRecent() {
+    try {
+      const r = await fetch("/api/calls/recent", { credentials: "same-origin" });
+      if (!r.ok) return;
+      const j = await r.json();
+      state.recent = j.calls || [];
+      renderRecent();
+    } catch {}
+  }
+
+  function renderRecent() {
+    const cont = $("callList");
+    cont.innerHTML = "";
+    if (!state.recent.length) {
+      cont.innerHTML = `<div class="empty-rail">No calls yet. Enter a username and place your first call.</div>`;
+      $("callCount").textContent = "";
+      return;
+    }
+    $("callCount").textContent = String(state.recent.length);
+    state.recent.forEach(c => {
+      const peer = c.peer || { id: null, username: "deleted", display_name: "Deleted user" };
+      const isMissed = c.direction === "incoming" && (c.status === "missed" || c.status === "declined" || c.status === "cancelled");
+      const directionIcon = c.direction === "outgoing"
+        ? `<svg class="ico" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17l10-10M9 7h8v8"/></svg>`
+        : `<svg class="ico" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7L7 17M15 17H7V9"/></svg>`;
+      let statusLabel = c.status;
+      if (c.status === "completed" && c.answered_at) {
+        statusLabel = fmtDuration((c.ended_at || 0) - (c.answered_at || 0));
+      }
+      const btn = document.createElement("button");
+      btn.className = "call-row";
+      btn.innerHTML = `
+        ${avatarHTML(peer)}
+        <div class="who ${isMissed ? "missed" : ""}">
+          <b>${escapeHTML(peer.display_name || peer.username)}</b>
+          <span class="sub">${directionIcon}<span>${escapeHTML(statusLabel)}</span></span>
+        </div>
+        <div class="meta">${escapeHTML(fmtTime(c.started_at))}</div>`;
+      btn.addEventListener("click", () => {
+        if (!state.active && !state.incoming && peer && peer.username) {
+          tryStartCall(peer.username);
+        }
+      });
+      cont.appendChild(btn);
+    });
+  }
+
+  // ──────── Stage rendering ────────
+  function renderStage() {
+    const body = $("stageBody");
+    body.innerHTML = "";
+    if (state.active) {
+      renderActiveCall(body);
+    } else {
+      renderDialer(body);
+    }
+  }
+
+  function renderDialer(body) {
+    $("stageTitle").textContent = "Place a call";
+    $("stageSub").textContent = "Voice-only, peer-to-peer over WebRTC.";
+    const wrap = document.createElement("div");
+    wrap.className = "dialer";
+    wrap.innerHTML = `
+      <div class="emblem">
+        <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+      </div>
+      <h2 class="serif">Who do you want to call?</h2>
+      <div class="lede">Type the username of the person you'd like to reach. They'll see a banner and can answer or decline.</div>
+      <div class="dial-row" id="dialRow">
+        <span class="prefix">@</span>
+        <input id="dialInput" placeholder="username" autocapitalize="off" autocomplete="off" spellcheck="false" />
+        <button class="call-btn" id="dialCall" disabled>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+          Call
+        </button>
+      </div>
+      <div class="dial-err" id="dialErr"></div>`;
+    body.appendChild(wrap);
+
+    const input = $("dialInput");
+    const callBtn = $("dialCall");
+    const dialRow = $("dialRow");
+    const errEl = $("dialErr");
+
+    function update() {
+      const v = input.value.trim().replace(/^@/, "");
+      callBtn.disabled = !v;
+    }
+    input.addEventListener("input", () => { update(); errEl.textContent = ""; });
+    input.addEventListener("focus", () => dialRow.classList.add("focused"));
+    input.addEventListener("blur",  () => dialRow.classList.remove("focused"));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !callBtn.disabled) { e.preventDefault(); doDial(); }
+    });
+    callBtn.addEventListener("click", doDial);
+
+    async function doDial() {
+      const raw = input.value.trim().replace(/^@/, "");
+      if (!raw) return;
+      errEl.textContent = "";
+      callBtn.disabled = true;
+      try {
+        await tryStartCall(raw);
+      } catch (e) {
+        errEl.textContent = (e && e.message) || "Unable to call.";
+        callBtn.disabled = false;
+      }
+    }
+
+    setTimeout(() => input.focus(), 0);
+  }
+
+  function renderActiveCall(body) {
+    const c = state.active;
+    if (!c) { renderStage(); return; }
+    const phase = c.phase;
+    const direction = c.direction;
+    const peer = c.peer || { id: null, username: "?", display_name: "?" };
+    let stageTitle, stageSub;
+    if (phase === "connected") {
+      stageTitle = "In call";
+      stageSub = "Talk away. Audio runs peer-to-peer.";
+    } else if (phase === "connecting") {
+      stageTitle = "Connecting";
+      stageSub = "Establishing the audio link…";
+    } else { // ringing
+      stageTitle = direction === "outgoing" ? "Outgoing call" : "Incoming call";
+      stageSub = direction === "outgoing"
+        ? "Waiting for them to pick up."
+        : "Tap answer in the banner to take the call.";
+    }
+    $("stageTitle").textContent = stageTitle;
+    $("stageSub").textContent = stageSub;
+
+    const card = document.createElement("div");
+    card.className = "call-view";
+    if (phase === "connected") card.classList.add("connected");
+
+    let statusLine = "";
+    if (phase === "ringing")     statusLine = direction === "outgoing" ? "Ringing…" : "Connecting…";
+    else if (phase === "connecting") statusLine = "Connecting…";
+    else if (phase === "connected")  statusLine = `<span class="timer" id="callTimer">0:00</span>`;
+
+    card.innerHTML = `
+      <div class="ring-aura">${avatarHTML(peer, "xl")}</div>
+      <div class="name">${escapeHTML(peer.display_name || peer.username)}</div>
+      <div class="handle">@${escapeHTML(peer.username || "?")}</div>
+      <div class="status">${statusLine || ""}</div>
+      <div class="ctrls">
+        ${phase === "connected" ? `
+          <button class="ctrl ${state.muted ? "active" : ""}" id="muteBtn" title="${state.muted ? "Unmute" : "Mute"}">
+            ${state.muted
+              ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1l22 22"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2"/><path d="M19 10v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`
+              : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`}
+          </button>` : ""}
+        <button class="ctrl end" id="endBtn" title="End call">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)"/></svg>
+        </button>
+      </div>
+      <div class="ctrl-row-label">${phase === "connected" ? "Tap to mute · tap red to hang up" : "Tap red to cancel"}</div>`;
+    body.appendChild(card);
+
+    const endBtn = $("endBtn");
+    if (endBtn) endBtn.addEventListener("click", () => userEndCall());
+
+    const muteBtn = $("muteBtn");
+    if (muteBtn) muteBtn.addEventListener("click", () => toggleMute());
+
+    if (phase === "connected") startTimerLoop();
+    else stopTimerLoop();
+  }
+
+  function startTimerLoop() {
+    stopTimerLoop();
+    if (!state.callStartedAtMs) state.callStartedAtMs = Date.now();
+    const update = () => {
+      const el = $("callTimer");
+      if (!el) return;
+      el.textContent = fmtDuration(Math.floor((Date.now() - state.callStartedAtMs) / 1000));
+    };
+    update();
+    state.timerInterval = setInterval(update, 1000);
+  }
+  function stopTimerLoop() {
+    if (state.timerInterval) { clearInterval(state.timerInterval); state.timerInterval = null; }
+  }
+
+  // ──────── Calls ────────
+  async function tryStartCall(usernameRaw) {
+    const username = String(usernameRaw || "").trim().replace(/^@/, "");
+    if (!username) throw new Error("Enter a username.");
+    if (state.active || state.incoming) {
+      throw new Error("You're already in a call.");
+    }
+    // Resolve username so we can fail fast with a clear message.
+    let lookup;
+    try {
+      const r = await fetch(`/api/users/lookup?username=${encodeURIComponent(username)}`, { credentials: "same-origin" });
+      if (r.status === 404) throw new Error("No user with that username.");
+      if (r.status === 400) throw new Error("That's your own username.");
+      if (!r.ok) throw new Error("Lookup failed — try again.");
+      lookup = await r.json();
+    } catch (e) {
+      throw e;
+    }
+    const peer = lookup.user;
+    // Optimistic active state so the UI flips instantly.
+    state.active = { call_id: null, peer, direction: "outgoing", phase: "ringing" };
+    renderStage();
+    // Ask permission for mic now, so we can react faster on accept.
+    // (We don't request the stream yet — that needs the user's actual gesture
+    // here, which we have, but capture stream lazily so we can hand it off.)
+    send({ type: "call_start", to_username: peer.username });
+    // Try to start ringback (caller side) — local mic isn't required until accept.
+    requestNotificationPermissionLazy();
+  }
+
+  async function answerIncomingCall() {
+    const inc = state.incoming;
+    if (!inc) return;
+    // Acquire mic FIRST (we have a user gesture from the click).
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (err) {
+      toast("Microphone access denied.", "err");
+      send({ type: "call_decline", call_id: inc.call_id });
+      stopRingTone();
+      hideBanner();
+      state.incoming = null;
+      return;
+    }
+    state.localStream = stream;
+    // Flip into active before telling the server, so a quick accept-ack
+    // doesn't race the UI render.
+    state.active = { call_id: inc.call_id, peer: inc.from, direction: "incoming", phase: "connecting" };
+    state.incoming = null;
+    hideBanner();
+    stopRingTone();
+    closeNotification();
+    renderStage();
+    // Callee creates the PC up front; we'll set remote desc once the caller's offer arrives.
+    try {
+      createPeerConnection(inc.call_id);
+      stream.getTracks().forEach(t => state.pc.addTrack(t, stream));
+    } catch (err) {
+      console.error("PC setup failed", err);
+      toast("WebRTC setup failed.", "err");
+      send({ type: "call_decline", call_id: inc.call_id });
+      teardownCall(inc.call_id, "Setup failed");
+      return;
+    }
+    send({ type: "call_accept", call_id: inc.call_id });
+  }
+
+  function declineIncomingCall() {
+    const inc = state.incoming;
+    if (!inc) return;
+    send({ type: "call_decline", call_id: inc.call_id });
+    stopRingTone();
+    hideBanner();
+    closeNotification();
+    state.incoming = null;
+  }
+
+  function userEndCall() {
+    if (!state.active) return;
+    const cid = state.active.call_id;
+    if (state.active.direction === "outgoing" && state.active.phase === "ringing") {
+      // Caller hung up before pickup
+      if (cid != null) send({ type: "call_cancel", call_id: cid });
+    } else if (cid != null) {
+      send({ type: "call_end", call_id: cid });
+    }
+    teardownCall(cid, state.active.phase === "connected" ? "Call ended" : "Call cancelled");
+  }
+
+  function teardownCall(callId, message) {
+    closePeerConnection();
+    stopRingTone();
+    stopTimerLoop();
+    state.callStartedAtMs = null;
+    state.muted = false;
+    state.haveRemoteDesc = false;
+    state.pendingIce = [];
+    if (state.remoteStream) {
+      try { state.remoteStream.getTracks().forEach(t => t.stop()); } catch {}
+    }
+    state.remoteStream = null;
+    if (state.localStream) {
+      try { state.localStream.getTracks().forEach(t => t.stop()); } catch {}
+    }
+    state.localStream = null;
+    state.active = null;
+    if (message) toast(message);
+    renderStage();
+    refreshRecent();
+  }
+
+  function toggleMute() {
+    if (!state.localStream) return;
+    state.muted = !state.muted;
+    state.localStream.getAudioTracks().forEach(t => { t.enabled = !state.muted; });
+    renderStage();
+  }
+
+  // ──────── Caller-side: gets the green light from the server ────────
+  async function callerOnAccepted(callId, peer) {
+    if (!state.active || state.active.call_id !== callId) {
+      // The active call we're holding may not have a call_id yet if the
+      // server's call_ringing message hasn't arrived; reconcile here.
+      if (!state.active) return;
+      state.active.call_id = callId;
+    }
+    if (peer) state.active.peer = peer;
+    state.active.phase = "connecting";
+    renderStage();
+    // Acquire mic now (we have a recent gesture from the original Call click).
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (err) {
+      toast("Microphone access denied.", "err");
+      send({ type: "call_end", call_id: callId });
+      teardownCall(callId, "Mic permission denied");
+      return;
+    }
+    state.localStream = stream;
+    try {
+      createPeerConnection(callId);
+      stream.getTracks().forEach(t => state.pc.addTrack(t, stream));
+      const offer = await state.pc.createOffer({ offerToReceiveAudio: true });
+      await state.pc.setLocalDescription(offer);
+      send({ type: "call_signal", call_id: callId, payload: { sdp: state.pc.localDescription } });
+    } catch (err) {
+      console.error("Caller negotiation failed", err);
+      toast("Negotiation failed.", "err");
+      send({ type: "call_end", call_id: callId });
+      teardownCall(callId, "Negotiation failed");
+    }
+  }
+
+  // ──────── PeerConnection plumbing ────────
+  function createPeerConnection(callId) {
+    if (state.pc) {
+      try { state.pc.close(); } catch {}
+      state.pc = null;
+    }
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        // Send minimal serialization — many browsers' .toJSON gives extra keys.
+        send({
+          type: "call_signal",
+          call_id: callId,
+          payload: { candidate: ev.candidate.toJSON() },
+        });
+      }
+    };
+    pc.ontrack = (ev) => {
+      const stream = (ev.streams && ev.streams[0]) || new MediaStream([ev.track]);
+      state.remoteStream = stream;
+      const audio = $("remoteAudio");
+      audio.srcObject = stream;
+      audio.play().catch(() => { /* autoplay may be blocked until interaction */ });
+    };
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      if (!state.active || state.active.call_id !== callId) return;
+      if (s === "connected") {
+        if (state.active.phase !== "connected") {
+          state.active.phase = "connected";
+          state.callStartedAtMs = Date.now();
+          renderStage();
+        }
+      } else if (s === "failed" || s === "closed") {
+        // Don't tear down on "disconnected" — that can be transient.
+        if (s === "failed") {
+          toast("Connection failed.", "err");
+          send({ type: "call_end", call_id: callId });
+          teardownCall(callId, "Connection failed");
+        }
+      }
+    };
+    pc.oniceconnectionstatechange = () => {
+      // Surface failures but don't double-end.
+      if (!state.active || state.active.call_id !== callId) return;
+      if (pc.iceConnectionState === "failed") {
+        toast("Network connection failed.", "err");
+      }
+    };
+    state.pc = pc;
+    state.pendingIce = [];
+    state.haveRemoteDesc = false;
+  }
+
+  function closePeerConnection() {
+    if (state.pc) {
+      try { state.pc.ontrack = null; state.pc.onicecandidate = null; state.pc.onconnectionstatechange = null; } catch {}
+      try { state.pc.close(); } catch {}
+      state.pc = null;
+    }
+    const audio = $("remoteAudio");
+    if (audio) { try { audio.srcObject = null; } catch {} }
+  }
+
+  async function handleSignal(callId, payload) {
+    if (!state.pc) return;
+    if (!state.active || state.active.call_id !== callId) return;
+    if (!payload || typeof payload !== "object") return;
+    if (payload.sdp) {
+      const sdp = payload.sdp;
+      const role = state.active.direction; // 'outgoing' = caller, 'incoming' = callee
+      try {
+        if (sdp.type === "offer" && role === "incoming") {
+          await state.pc.setRemoteDescription(sdp);
+          state.haveRemoteDesc = true;
+          await flushPendingIce();
+          const answer = await state.pc.createAnswer();
+          await state.pc.setLocalDescription(answer);
+          send({ type: "call_signal", call_id: callId, payload: { sdp: state.pc.localDescription } });
+        } else if (sdp.type === "answer" && role === "outgoing") {
+          await state.pc.setRemoteDescription(sdp);
+          state.haveRemoteDesc = true;
+          await flushPendingIce();
+        }
+      } catch (err) {
+        console.error("Signal SDP error", err);
+      }
+    } else if (payload.candidate) {
+      try {
+        if (state.haveRemoteDesc) {
+          await state.pc.addIceCandidate(payload.candidate);
+        } else {
+          state.pendingIce.push(payload.candidate);
+        }
+      } catch (err) {
+        console.warn("addIceCandidate failed", err);
+      }
+    }
+  }
+
+  async function flushPendingIce() {
+    if (!state.pc) return;
+    const q = state.pendingIce; state.pendingIce = [];
+    for (const cand of q) {
+      try { await state.pc.addIceCandidate(cand); } catch (err) { console.warn("flushPendingIce", err); }
+    }
+  }
+
+  // ──────── Ringtone ────────
+  function playRingTone() {
+    const a = $("ringTone");
+    if (!a) return;
+    try { a.currentTime = 0; } catch {}
+    const p = a.play();
+    if (p && typeof p.catch === "function") {
+      p.catch(() => {
+        // Autoplay blocked — the banner is still visible so the user can act,
+        // and the OS notification (if granted) will get their attention.
+      });
+    }
+  }
+  function stopRingTone() {
+    const a = $("ringTone");
+    if (!a) return;
+    try { a.pause(); a.currentTime = 0; } catch {}
+  }
+
+  // ──────── Incoming banner ────────
+  function showBanner(from) {
+    $("bannerAv").outerHTML = avatarHTML(from, "lg").replace(/^<span/, '<span id="bannerAv"');
+    $("bannerName").textContent = from.display_name || from.username || "Unknown";
+    $("bannerSub").textContent = `@${from.username || "?"} is calling`;
+    $("bannerWrap").classList.add("on");
+  }
+  function hideBanner() {
+    $("bannerWrap").classList.remove("on");
+  }
+  $("bannerAccept").addEventListener("click", () => { answerIncomingCall(); });
+  $("bannerDecline").addEventListener("click", () => { declineIncomingCall(); });
+
+  // ──────── Notifications ────────
+  function requestNotificationPermissionLazy() {
+    if (typeof Notification === "undefined") return;
+    if (state.notifPermission === "default") {
+      try {
+        Notification.requestPermission().then((p) => { state.notifPermission = p; }).catch(() => {});
+      } catch {}
+    }
+  }
+  function maybeShowIncomingNotification(from) {
+    // Only when the tab is hidden — otherwise the in-page banner is enough.
+    if (typeof Notification === "undefined") return;
+    if (state.notifPermission !== "granted") return;
+    if (!document.hidden) return;
+    try {
+      closeNotification();
+      const n = new Notification("Incoming call", {
+        body: `${from.display_name || from.username} is calling`,
+        tag: "voicecall-incoming",
+        requireInteraction: true,
+        silent: false,
+      });
+      n.onclick = () => {
+        try { window.focus(); } catch {}
+        try { n.close(); } catch {}
+      };
+      state.activeNotification = n;
+    } catch (err) {
+      console.warn("Notification failed", err);
+    }
+  }
+  function closeNotification() {
+    if (state.activeNotification) {
+      try { state.activeNotification.close(); } catch {}
+      state.activeNotification = null;
+    }
+  }
+  document.addEventListener("visibilitychange", () => {
+    // When the user returns to the tab, drop any pending OS notification.
+    if (!document.hidden) closeNotification();
+  });
+
+  // ──────── WS event handler ────────
+  function onWS(data) {
+    if (!data || typeof data !== "object") return;
+    switch (data.type) {
+      case "hello": {
+        state.me = data.me;
+        if (state.me) {
+          const avHTML = avatarHTML(state.me, "sm");
+          $("meAv").outerHTML = avHTML.replace(/^<span/, '<span id="meAv"');
+        }
+        // Server saw an existing active call for this user (other tab). For
+        // now we just surface a toast so the user knows; cross-tab WebRTC
+        // hand-off is intentionally out of scope.
+        if (data.active_call) {
+          toast("You have an active call in another tab", "warn");
+        }
+        refreshRecent();
+        break;
+      }
+      case "call_ringing": {
+        // Server allocated a call id for our outgoing call.
+        if (state.active && state.active.direction === "outgoing" && state.active.call_id == null) {
+          state.active.call_id = data.call_id;
+          if (data.peer) state.active.peer = data.peer;
+          renderStage();
+        }
+        break;
+      }
+      case "call_outgoing_elsewhere": {
+        toast("Outgoing call started in another tab", "warn");
+        break;
+      }
+      case "call_accepted": {
+        // Caller side: callee picked up. Start negotiation.
+        callerOnAccepted(data.call_id, data.peer);
+        break;
+      }
+      case "call_connected": {
+        // Callee-side confirmation (we already moved into 'connecting' before
+        // sending call_accept). Nothing extra to do.
+        break;
+      }
+      case "incoming_call": {
+        if (state.active || state.incoming) {
+          // Server should prevent this, but be safe.
+          send({ type: "call_decline", call_id: data.call_id });
+          break;
+        }
+        state.incoming = { call_id: data.call_id, from: data.from };
+        showBanner(data.from);
+        playRingTone();
+        maybeShowIncomingNotification(data.from);
+        requestNotificationPermissionLazy();
+        break;
+      }
+      case "call_taken": {
+        // Another tab of ours accepted the call; clear banner.
+        if (state.incoming && state.incoming.call_id === data.call_id) {
+          state.incoming = null;
+          hideBanner();
+          stopRingTone();
+          closeNotification();
+        }
+        break;
+      }
+      case "call_signal": {
+        handleSignal(data.call_id, data.payload);
+        break;
+      }
+      case "call_ended": {
+        // Either side ended.
+        const reason = data.reason || "ended";
+        if (state.incoming && state.incoming.call_id === data.call_id) {
+          state.incoming = null;
+          hideBanner();
+          stopRingTone();
+          closeNotification();
+          toast(reason === "cancelled" || reason === "caller_left" ? "Caller hung up" : "Call ended");
+        }
+        if (state.active && state.active.call_id === data.call_id) {
+          let msg = "Call ended";
+          if (reason === "declined")  msg = "Call declined";
+          if (reason === "cancelled") msg = "Call cancelled";
+          if (reason === "missed")    msg = "Missed call";
+          if (reason === "peer_left") msg = "The other side disconnected";
+          teardownCall(data.call_id, msg);
+        }
+        refreshRecent();
+        break;
+      }
+      case "call_unavailable": {
+        const peer = data.peer || {};
+        let msg = `${peer.display_name || peer.username || "User"} is unavailable`;
+        if (data.reason === "offline") msg = `${peer.display_name || peer.username} is offline`;
+        if (data.reason === "busy")    msg = `${peer.display_name || peer.username} is busy`;
+        toast(msg, "warn");
+        // We had set an optimistic 'outgoing' state; clear it.
+        if (state.active && state.active.direction === "outgoing" && state.active.call_id == null) {
+          state.active = null;
+          renderStage();
+        }
+        refreshRecent();
+        break;
+      }
+      case "call_error": {
+        toast(data.message || "Call error", "err");
+        // If we had an optimistic outgoing call without a confirmed call_id, drop it.
+        if (state.active && state.active.direction === "outgoing" && state.active.call_id == null) {
+          state.active = null;
+          renderStage();
+        }
+        break;
+      }
+      case "recent_changed": {
+        refreshRecent();
+        break;
+      }
+      case "pong":
+        break;
+      default:
+        // ignore unknown
+        break;
+    }
+  }
+
+  // ──────── Sign-out ────────
+  $("meChip").addEventListener("click", async () => {
+    if (state.active) { toast("End the call first.", "warn"); return; }
+    try { await fetch("/api/logout", { method: "POST", credentials: "same-origin" }); } catch {}
+    window.location.href = "/login";
+  });
+
+  // ──────── Mobile menu ────────
+  $("menuBtn").addEventListener("click", () => {
+    $("leftPane").classList.add("open");
+    $("backdrop").classList.add("on");
+  });
+  $("backdrop").addEventListener("click", () => {
+    $("leftPane").classList.remove("open");
+    $("backdrop").classList.remove("on");
+  });
+
+  // ──────── Unload safety ────────
+  window.addEventListener("beforeunload", () => {
+    // Best-effort: tell the server we're leaving.
+    if (state.active && state.active.call_id != null) {
+      try {
+        if (state.active.phase === "ringing" && state.active.direction === "outgoing") {
+          state.ws && state.ws.send(JSON.stringify({ type: "call_cancel", call_id: state.active.call_id }));
+        } else {
+          state.ws && state.ws.send(JSON.stringify({ type: "call_end", call_id: state.active.call_id }));
+        }
+      } catch {}
+    } else if (state.incoming) {
+      try {
+        state.ws && state.ws.send(JSON.stringify({ type: "call_decline", call_id: state.incoming.call_id }));
+      } catch {}
+    }
+  });
+
+  // ──────── Boot ────────
+  renderStage();
+  refreshRecent();
+  connect();
+
+  // Keep WS warm with periodic pings; cheap and helps spot dead sockets.
+  setInterval(() => { if (state.wsReady) send({ type: "ping" }); }, 25000);
+})();
+</script>
+</body>
+</html>

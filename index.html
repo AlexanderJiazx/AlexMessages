@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AlexMessage</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="theme-color" content="#F1EFE6" />
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png" />
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" />
+<link rel="manifest" href="/static/manifest.webmanifest" />
+<link href="/fonts/fonts.css" rel="stylesheet" />
+<link href="/static/styles.css" rel="stylesheet" />
+</head>
+<body>
+  <div class="app">
+    <div class="backdrop" id="backdrop"></div>
+    <!-- LEFT RAIL -->
+    <aside class="pane left" id="leftPane">
+      <div class="rail-hd">
+        <div class="logo"></div>
+        <div class="ws-name">
+          <b>AlexMessage</b>
+          <span class="net"><span class="dot"></span><span id="netLabel">connecting…</span></span>
+        </div>
+        <button class="rail-close" id="leftClose" aria-label="Close">✕</button>
+      </div>
+      <div class="rail-section"><span>Channels</span><span class="count" id="chCount"></span></div>
+      <div class="rooms" id="rooms"></div>
+
+      <div class="dms-scroll">
+        <div id="pinnedSection" style="display:none;">
+          <div class="rail-section"><span>Pinned</span></div>
+          <div class="dms" id="pinnedList"></div>
+        </div>
+        <div class="rail-section">
+          <span>Direct messages</span>
+          <button class="plus" id="newDmBtn" title="Start a new chat" aria-label="Start a new chat">+</button>
+        </div>
+        <div class="dms" id="dms"></div>
+      </div>
+    </aside>
+
+    <!-- CENTER -->
+    <main class="pane center">
+      <div class="topbar">
+        <button class="menu-btn" id="menuBtn" aria-label="Open menu">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <div class="title">
+          <h1><span class="hash" id="chHash">#</span><span id="chName">general</span></h1>
+          <span class="sub" id="chSub"></span>
+        </div>
+        <span class="chip" id="topbarChip"><span class="cdot"></span><span id="topbarChipText">online</span></span>
+        <button class="iconbtn profile-toggle" id="profileToggle" aria-label="Your profile" title="Your profile">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+        </button>
+      </div>
+      <div class="stream" id="stream"></div>
+      <div class="composer-wrap">
+        <div class="composer" id="composer">
+          <div class="replying-to" id="replyBar" style="display:none;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14l-5-5 5-5"/><path d="M4 9h9a7 7 0 0 1 7 7v3"/></svg>
+            <span>Replying to <b id="replyName"></b></span>
+            <span class="preview" id="replyPreview"></span>
+            <button class="x" id="cancelReply" aria-label="Cancel reply">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </div>
+          <div class="pending-attachments" id="pendingAtt" style="display:none;"></div>
+          <div class="input-row">
+            <button class="toolbtn" id="attachBtn" title="Attach file (max 20MB)" aria-label="Attach">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+            <input type="file" id="fileInput" style="display:none;" multiple />
+            <textarea id="input" class="input" placeholder="Message" rows="1"></textarea>
+            <button class="send" id="sendBtn" disabled>
+              Send
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l16-8-6 18-3-7-7-3z"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="composer-meta" id="composerMeta">
+          <span id="uploadStatus"></span>
+        </div>
+      </div>
+    </main>
+
+    <!-- RIGHT RAIL -->
+    <aside class="pane right" id="rightPane">
+      <div class="detail-hd">
+        <b id="rightTitle">Your profile</b>
+        <button class="iconbtn" id="rightClose" aria-label="Close" title="Close">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="detail-body" id="rightBody"></div>
+    </aside>
+  </div>
+
+  <div class="toast-stack" id="toasts"></div>
+  <div class="lightbox" id="lightbox"><img id="lightboxImg" alt="" /></div>
+
+  <!-- New chat modal: username-only lookup. The full user roster is intentionally not exposed. -->
+  <div class="modal" id="newDmModal">
+    <div class="card">
+      <h3 class="serif">Start a new chat</h3>
+      <div style="margin-bottom: 12px; color: var(--muted); font-size: 12.5px; line-height: 1.5;">
+        Enter the username of the person you want to message.
+      </div>
+      <input type="text" id="newDmInput" placeholder="username" autocapitalize="off" autocomplete="off" spellcheck="false"
+             style="width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--surface); font-size:14px; outline:none;" />
+      <div id="newDmError" style="color: var(--danger); font-size: 12px; margin-top: 8px; display:none;"></div>
+      <div class="btn-row" style="justify-content:flex-end; margin-top:14px;">
+        <button class="btn ghost" id="newDmCancel">Cancel</button>
+        <button class="btn primary" id="newDmSubmit">Start chat</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification opt-in modal. Surfaces once per browser; the user can dismiss. -->
+  <div class="modal" id="pushPromptModal">
+    <div class="card">
+      <div class="push-illus" aria-hidden="true">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
+      </div>
+      <h3 class="serif">Stay in the loop</h3>
+      <div style="color: var(--muted); font-size: 13px; line-height: 1.55; margin-bottom: 16px;">
+        Get a notification when someone sends you a direct message — even when AlexMessage isn't open. You can change this anytime in your browser settings.
+      </div>
+      <div class="btn-row" style="justify-content:flex-end;">
+        <button class="btn ghost" id="pushPromptDismiss">Not now</button>
+        <button class="btn primary" id="pushPromptEnable">Enable notifications</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

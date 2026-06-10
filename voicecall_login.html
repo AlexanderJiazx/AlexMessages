@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AlexMessage · Calls</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="theme-color" content="#F1EFE6" />
+<link href="/fonts/fonts.css" rel="stylesheet" />
+<style>
+  :root {
+    --bg:        #F1EFE6;
+    --paper:     #FAF8F1;
+    --surface:   #FFFFFF;
+    --ink:       #1B241F;
+    --ink-2:     #344039;
+    --muted:     #6E7A72;
+    --faint:     #9AA59D;
+    --line:      #E2E4D9;
+    --line-2:    #EAEBE1;
+    --sage:      #4F7A5E;
+    --sage-deep: #355040;
+    --sage-soft: #DCE9D9;
+    --sage-mint: #C7E1C5;
+    --sage-tint: #ECF3E8;
+    --sage-glow: #B9DFB7;
+    --warn:      #C58A3B;
+    --danger:    #B85450;
+    --radius:    14px;
+    --radius-s:  10px;
+    --shadow-1:  0 1px 0 rgba(255,255,255,.7) inset, 0 1px 1px rgba(27,36,31,.04), 0 8px 24px -12px rgba(27,36,31,.10);
+    --shadow-2:  0 1px 0 rgba(255,255,255,.7) inset, 0 18px 50px -18px rgba(27,36,31,.30), 0 4px 12px -6px rgba(27,36,31,.08);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--ink); height: 100%; margin: 0; }
+  body {
+    font-family: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    min-height: 100vh;
+    display: grid; place-items: center;
+    padding: 24px;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background-image: radial-gradient(rgba(85,110,90,.045) 1px, transparent 1px);
+    background-size: 3px 3px; mix-blend-mode: multiply; opacity: .55;
+  }
+  .serif { font-family: 'Instrument Serif', 'Times New Roman', serif; font-weight: 400; letter-spacing: -.005em; }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+
+  .card {
+    position: relative; z-index: 1;
+    width: 100%; max-width: 420px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-2);
+    padding: 28px 28px 24px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 18px;
+  }
+  .logo {
+    width: 36px; height: 36px; border-radius: 11px;
+    background: radial-gradient(120% 120% at 30% 20%, var(--sage-mint), var(--sage) 70%);
+    box-shadow: inset 0 0 0 1px rgba(53,80,64,.25), 0 1px 0 rgba(255,255,255,.6) inset;
+    position: relative;
+  }
+  .logo::after {
+    content:""; position:absolute; inset:7px; border-radius:50%;
+    background: radial-gradient(circle at 35% 30%, #fff 0 18%, transparent 20%),
+                conic-gradient(from 200deg, var(--sage-deep), var(--sage), var(--sage-mint), var(--sage-deep));
+    opacity: .85;
+  }
+  .brand h1 {
+    margin: 0; font-family: 'Instrument Serif', serif; font-weight: 400;
+    font-size: 26px; letter-spacing: -.01em;
+  }
+  .brand .net {
+    font-size: 11px; color: var(--muted); margin-top: 2px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .net .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--sage);
+              box-shadow: 0 0 0 3px rgba(79,122,94,.18); }
+
+  form { display: flex; flex-direction: column; gap: 12px; }
+  label { display: flex; flex-direction: column; gap: 5px;
+          font-size: 11px; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; font-weight: 600; }
+  input {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px; font-size: 14px; color: var(--ink);
+    outline: none; transition: border-color .15s, box-shadow .15s;
+  }
+  input:focus { border-color: var(--sage); box-shadow: 0 0 0 3px rgba(79,122,94,.16); }
+
+  .submit {
+    margin-top: 6px; background: var(--sage); color: #fff; border: 0;
+    padding: 11px 14px; border-radius: 10px; font-weight: 600; font-size: 14px;
+    box-shadow: var(--shadow-1);
+  }
+  .submit:hover { background: var(--sage-deep); }
+  .submit:disabled { opacity: .55; cursor: default; }
+
+  .msg {
+    margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+    font-size: 13px; line-height: 1.45;
+  }
+  .msg.err { background: #FBECEA; border: 1px solid #EBC9C5; color: #7E2D2A; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 14px; line-height: 1.5; }
+  .hint a { color: var(--sage-deep); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <h1 class="serif">AlexMessage Calls</h1>
+        <div class="net"><span class="dot"></span> Sign in to place voice calls</div>
+      </div>
+    </div>
+
+    <form id="form-login">
+      <label>Username
+        <input name="username" autocomplete="username" required />
+      </label>
+      <label>Password
+        <input name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button class="submit" type="submit">Sign in</button>
+    </form>
+
+    <div id="msg"></div>
+    <div class="hint">
+      Use your AlexMessage account. New accounts can be created from the main messages app.
+    </div>
+  </div>
+
+<script>
+(() => {
+  const $ = (sel) => document.querySelector(sel);
+  const msgEl = $('#msg');
+  const form = $('#form-login');
+
+  function showMsg(text) {
+    msgEl.innerHTML = '';
+    if (!text) return;
+    const d = document.createElement('div');
+    d.className = 'msg err';
+    d.textContent = text;
+    msgEl.appendChild(d);
+  }
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const fd = new FormData(form);
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    showMsg('');
+    try {
+      const r = await fetch('/api/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: fd.get('username'),
+          password: fd.get('password'),
+        }),
+      });
+      let data = null;
+      try { data = await r.json(); } catch {}
+      if (r.ok) {
+        window.location.href = '/';
+      } else {
+        showMsg((data && data.detail) || 'Sign-in failed');
+      }
+    } catch {
+      showMsg('Network error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
