@@ -1,8 +1,13 @@
 package webapp
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime"
 	"net/http"
@@ -89,13 +94,31 @@ func handleUpload(c *gin.Context) {
 		contentType = "application/octet-stream"
 	}
 
+	width, height := imageDimensions(raw, contentType)
+
 	relPath := strconv.Itoa(user.ID) + "/" + storedName
 	c.JSON(http.StatusOK, gin.H{
-		"name": original,
-		"url":  "/uploads/" + relPath,
-		"size": len(raw),
-		"mime": contentType,
+		"name":   original,
+		"url":    "/uploads/" + relPath,
+		"size":   len(raw),
+		"mime":   contentType,
+		"width":  width,
+		"height": height,
 	})
+}
+
+// imageDimensions returns the pixel size of an image upload, or (0, 0) when
+// the file isn't an image or the format isn't decodable (e.g. webp). The
+// client uses these to render a placeholder with the final layout size.
+func imageDimensions(raw []byte, contentType string) (int, int) {
+	if !strings.HasPrefix(contentType, "image/") {
+		return 0, 0
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return 0, 0
+	}
+	return cfg.Width, cfg.Height
 }
 
 // tokenHex mirrors secrets.token_hex(n): n random bytes as 2n hex chars.

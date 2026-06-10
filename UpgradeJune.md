@@ -2,11 +2,8 @@
 
 ## Problems
 
-### The name looks bad. (At least with this fonts)
-
 ### Channels is redundant and should be removed entirely.
 Just remove the entire channel feature. From both frontend and backend
-
 
 ### Photo preload still doesn’t work
 the expected behavior is to show a loading placeholder when the image is loading (and the size of the placeholder should have the same size as the actual image), curren version show nothing and display directly when finished loading

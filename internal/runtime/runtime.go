@@ -1,7 +1,7 @@
 // Package runtime holds the main app's shared in-memory state and helpers:
-// the presence tracker, the channel catalog, the visibility rules, and the
-// cross-handler broadcast helpers. Anything reached by both the WebSocket
-// handler and the REST routes lives here.
+// the presence tracker, the visibility rules, and the cross-handler broadcast
+// helpers. Anything reached by both the WebSocket handler and the REST routes
+// lives here.
 package runtime
 
 import (
@@ -14,48 +14,11 @@ import (
 )
 
 const (
-	// InitialHistoryPage is how many messages each channel ships on connect.
+	// InitialHistoryPage is how many messages each DM thread ships on connect.
 	InitialHistoryPage = 50
 	// MaxUploadBytes caps a single upload at 20 MB.
 	MaxUploadBytes = 20 * 1024 * 1024
-	// DefaultChannel is where system join/leave broadcasts land.
-	DefaultChannel = "general"
 )
-
-// Channel is one entry of the hardcoded channel catalog.
-type Channel struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Desc string `json:"desc"`
-}
-
-// Channels is the catalog. general is default.
-var Channels = []Channel{
-	{ID: "general", Name: "general", Desc: "The main room — anything goes."},
-	{ID: "sports", Name: "sports", Desc: "Games, scores, takes."},
-	{ID: "tech", Name: "tech", Desc: "Code, hardware, software."},
-	{ID: "news", Name: "news", Desc: "What's happening out there."},
-	{ID: "music", Name: "music", Desc: "Now playing."},
-	{ID: "study", Name: "study", Desc: "Heads-down focus and notes."},
-}
-
-// ChannelIDs is the set of named channel ids for O(1) membership checks.
-var ChannelIDs = func() map[string]struct{} {
-	m := make(map[string]struct{}, len(Channels))
-	for _, c := range Channels {
-		m[c.ID] = struct{}{}
-	}
-	return m
-}()
-
-// channelIDList is the catalog ids as a slice (for DB IN-queries).
-var channelIDList = func() []string {
-	out := make([]string, len(Channels))
-	for i, c := range Channels {
-		out[i] = c.ID
-	}
-	return out
-}()
 
 // ---------- presence ----------
 
@@ -192,11 +155,12 @@ type PublicUser struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
 	Bio         string `json:"bio"`
+	Avatar      string `json:"avatar"`
 }
 
 // UserPublic projects a db.User to its public view.
 func UserPublic(u *db.User) PublicUser {
-	return PublicUser{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Bio: u.Bio}
+	return PublicUser{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Bio: u.Bio, Avatar: u.Avatar}
 }
 
 // AllKnownUsers returns every approved user keyed by id, so the client can
@@ -214,8 +178,8 @@ func AllKnownUsers() (map[int]PublicUser, error) {
 }
 
 // VisibleUserIDs returns the user ids a viewer is allowed to know about: self,
-// contacts, DM partners, and authors of messages in the named channels. The
-// roster is intentionally private — this prevents leaking the full membership.
+// contacts, and DM partners. The roster is intentionally private — this
+// prevents leaking the full membership.
 func VisibleUserIDs(viewerID int) (map[int]struct{}, error) {
 	ids := map[int]struct{}{viewerID: {}}
 
@@ -232,14 +196,6 @@ func VisibleUserIDs(viewerID int) (map[int]struct{}, error) {
 		return nil, err
 	}
 	for id := range partners {
-		ids[id] = struct{}{}
-	}
-
-	authors, err := db.ChannelAuthors(channelIDList)
-	if err != nil {
-		return nil, err
-	}
-	for id := range authors {
 		ids[id] = struct{}{}
 	}
 	return ids, nil
@@ -295,11 +251,11 @@ func BroadcastPresence() {
 	}
 }
 
-// RecipientsForChannel returns the sockets a channel's messages go to: the two
-// participants for a DM, or everyone online for a named channel.
+// RecipientsForChannel returns the sockets a DM channel's messages go to: the
+// two participants. Non-DM channels no longer exist, so they get no recipients.
 func RecipientsForChannel(channel string) []*Client {
 	if a, b, ok := db.ParseDMChannel(channel); ok {
 		return presence.SocketsFor(map[int]struct{}{a: {}, b: {}})
 	}
-	return presence.AllSockets()
+	return nil
 }

@@ -332,8 +332,9 @@ func handleDeleteUser(c *gin.Context) {
 		}
 	}
 	_ = db.DeleteUserSessions(userID)
-	_ = db.DeleteUser(userID)     // cascades messages/attachments/contacts via FK
-	db.DeleteUserUploads(userID)  // remove storage directory on disk
+	_ = db.DeleteUser(userID)         // cascades messages/attachments/contacts via FK
+	db.DeleteUserUploads(userID)      // remove storage directory on disk
+	db.DeleteUserAvatarFiles(userID)  // remove profile photo files on disk
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

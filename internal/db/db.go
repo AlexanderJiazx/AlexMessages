@@ -24,6 +24,7 @@ var (
 	BaseDir    = mustBaseDir()
 	DataDir    = filepath.Join(BaseDir, "data")
 	UploadRoot = filepath.Join(DataDir, "uploads")
+	AvatarRoot = filepath.Join(DataDir, "avatars")
 	DBPath     = filepath.Join(DataDir, "alexmessage.db")
 )
 
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash   TEXT    NOT NULL,
     display_name    TEXT    NOT NULL,
     bio             TEXT    NOT NULL DEFAULT '',
+    avatar          TEXT    NOT NULL DEFAULT '',          -- /avatars/<file> or ''
     status          TEXT    NOT NULL DEFAULT 'pending',   -- pending|approved|rejected|disabled
     is_admin        INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
@@ -81,6 +83,8 @@ CREATE TABLE IF NOT EXISTS attachments (
     rel_path    TEXT    NOT NULL,
     size        INTEGER NOT NULL,
     mime        TEXT    NOT NULL,
+    width       INTEGER NOT NULL DEFAULT 0,   -- image pixel size, 0 when unknown
+    height      INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL,
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE
@@ -147,6 +151,9 @@ func InitDB() error {
 	if err := os.MkdirAll(UploadRoot, 0o755); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(AvatarRoot, 0o755); err != nil {
+		return err
+	}
 	// foreign_keys + busy_timeout are applied on every pooled connection.
 	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", DBPath)
 	p, err := sql.Open("sqlite", dsn)
@@ -157,34 +164,52 @@ func InitDB() error {
 	if _, err := pool.Exec(schema); err != nil {
 		return err
 	}
-	return ensureDMStateColumns()
+	// Back-fill columns added after the original schema shipped.
+	migrations := []struct{ table, column, ddl string }{
+		{"dm_state", "force_unread", "ALTER TABLE dm_state ADD COLUMN force_unread INTEGER NOT NULL DEFAULT 0"},
+		{"users", "avatar", "ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''"},
+		{"attachments", "width", "ALTER TABLE attachments ADD COLUMN width INTEGER NOT NULL DEFAULT 0"},
+		{"attachments", "height", "ALTER TABLE attachments ADD COLUMN height INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, m := range migrations {
+		if err := ensureColumn(m.table, m.column, m.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func ensureDMStateColumns() error {
-	rows, err := pool.Query("PRAGMA table_info(dm_state)")
+func ensureColumn(table, column, ddl string) error {
+	rows, err := pool.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	have := map[string]bool{}
 	for rows.Next() {
 		var (
-			cid        int
-			name, typ  string
-			notnull    int
-			dflt       sql.NullString
-			pk         int
+			cid       int
+			name, typ string
+			notnull   int
+			dflt      sql.NullString
+			pk        int
 		)
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
 			return err
 		}
-		have[name] = true
+		if name == column {
+			return nil
+		}
 	}
-	if !have["force_unread"] {
-		_, err = pool.Exec("ALTER TABLE dm_state ADD COLUMN force_unread INTEGER NOT NULL DEFAULT 0")
+	if err := rows.Err(); err != nil {
 		return err
 	}
-	return nil
+	_, err = pool.Exec(ddl)
+	// All three server binaries run InitDB at startup; if another process adds
+	// the column between our PRAGMA check and the ALTER, treat it as done.
+	if err != nil && strings.Contains(err.Error(), "duplicate column name") {
+		return nil
+	}
+	return err
 }
 
 // ---------- users ----------
@@ -196,6 +221,7 @@ type User struct {
 	PasswordHash string
 	DisplayName  string
 	Bio          string
+	Avatar       string
 	Status       string
 	IsAdmin      bool
 	CreatedAt    int64
@@ -209,7 +235,7 @@ func scanUser(s interface{ Scan(...any) error }) (*User, error) {
 		approvedAt sql.NullInt64
 	)
 	err := s.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.DisplayName,
-		&u.Bio, &u.Status, &isAdmin, &u.CreatedAt, &approvedAt)
+		&u.Bio, &u.Avatar, &u.Status, &isAdmin, &u.CreatedAt, &approvedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +247,7 @@ func scanUser(s interface{ Scan(...any) error }) (*User, error) {
 	return &u, nil
 }
 
-const userCols = "id, username, password_hash, display_name, bio, status, is_admin, created_at, approved_at"
+const userCols = "id, username, password_hash, display_name, bio, avatar, status, is_admin, created_at, approved_at"
 
 // CreateUser inserts a new account and returns its id.
 func CreateUser(username, passwordHash, displayName, status string, isAdmin bool) (int, error) {
@@ -316,6 +342,12 @@ func UpdateUserProfile(userID int, displayName, bio *string) error {
 	}
 	vals = append(vals, userID)
 	_, err := pool.Exec("UPDATE users SET "+strings.Join(sets, ", ")+" WHERE id = ?", vals...)
+	return err
+}
+
+// SetUserAvatar stores the public avatar URL ('' clears it).
+func SetUserAvatar(userID int, avatar string) error {
+	_, err := pool.Exec("UPDATE users SET avatar = ? WHERE id = ?", avatar, userID)
 	return err
 }
 
@@ -418,11 +450,11 @@ func InsertMessage(msgID, channel string, userID *int, text string, replyTo *str
 	return ts, err
 }
 
-func InsertAttachment(messageID string, userID int, name, relPath string, size int64, mime string) error {
+func InsertAttachment(messageID string, userID int, name, relPath string, size int64, mime string, width, height int) error {
 	_, err := pool.Exec(
-		"INSERT INTO attachments (message_id, user_id, name, rel_path, size, mime, created_at) "+
-			"VALUES (?, ?, ?, ?, ?, ?, ?)",
-		messageID, userID, name, relPath, size, mime, NowTS(),
+		"INSERT INTO attachments (message_id, user_id, name, rel_path, size, mime, width, height, created_at) "+
+			"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		messageID, userID, name, relPath, size, mime, width, height, NowTS(),
 	)
 	return err
 }
@@ -504,6 +536,21 @@ func UserUploadDir(userID int) (string, error) {
 // DeleteUserUploads best-effort removes a user's upload directory.
 func DeleteUserUploads(userID int) {
 	_ = os.RemoveAll(filepath.Join(UploadRoot, strconv.Itoa(userID)))
+}
+
+// DeleteUserAvatarFiles best-effort removes a user's avatar files on disk.
+// Avatars are stored as <uid>_<token>.<ext> so the prefix is unambiguous.
+func DeleteUserAvatarFiles(userID int) {
+	entries, err := os.ReadDir(AvatarRoot)
+	if err != nil {
+		return
+	}
+	prefix := strconv.Itoa(userID) + "_"
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+			_ = os.Remove(filepath.Join(AvatarRoot, e.Name()))
+		}
+	}
 }
 
 // ---------- calls ----------
@@ -766,11 +813,15 @@ func CountUnread(userID int, channel string, lastReadAt, clearedAt int64) (int, 
 }
 
 // Attachment is the embedded attachment view returned with history messages.
+// Width/Height are the pixel dimensions for images (0 when unknown) so the
+// client can reserve a correctly sized placeholder while the image loads.
 type Attachment struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-	Size int64  `json:"size"`
-	Mime string `json:"mime"`
+	Name   string `json:"name"`
+	URL    string `json:"url"`
+	Size   int64  `json:"size"`
+	Mime   string `json:"mime"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
 }
 
 // HistoryMessage is the message shape used by history/init payloads (no author).
@@ -855,7 +906,7 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 	}
 	byMsg := map[string][]Attachment{}
 	attRows, err := pool.Query(
-		"SELECT message_id, name, rel_path, size, mime FROM attachments WHERE message_id IN ("+
+		"SELECT message_id, name, rel_path, size, mime, width, height FROM attachments WHERE message_id IN ("+
 			strings.Join(placeholders, ",")+")", ids...,
 	)
 	if err != nil {
@@ -865,16 +916,19 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 		var (
 			msgID, name, relPath, mime string
 			size                       int64
+			width, height              int
 		)
-		if err := attRows.Scan(&msgID, &name, &relPath, &size, &mime); err != nil {
+		if err := attRows.Scan(&msgID, &name, &relPath, &size, &mime, &width, &height); err != nil {
 			attRows.Close()
 			return nil, err
 		}
 		byMsg[msgID] = append(byMsg[msgID], Attachment{
-			Name: name,
-			URL:  "/uploads/" + relPath,
-			Size: size,
-			Mime: mime,
+			Name:   name,
+			URL:    "/uploads/" + relPath,
+			Size:   size,
+			Mime:   mime,
+			Width:  width,
+			Height: height,
 		})
 	}
 	attRows.Close()
@@ -929,36 +983,6 @@ func DMPartnerIDs(viewerID int) (map[int]struct{}, error) {
 		}
 	}
 	return ids, rows.Err()
-}
-
-// ChannelAuthors returns distinct non-null author ids across the named channels.
-func ChannelAuthors(channelIDs []string) (map[int]struct{}, error) {
-	out := map[int]struct{}{}
-	if len(channelIDs) == 0 {
-		return out, nil
-	}
-	placeholders := make([]string, len(channelIDs))
-	args := make([]any, len(channelIDs))
-	for i, c := range channelIDs {
-		placeholders[i] = "?"
-		args[i] = c
-	}
-	rows, err := pool.Query(
-		"SELECT DISTINCT user_id FROM messages WHERE channel IN ("+
-			strings.Join(placeholders, ",")+") AND user_id IS NOT NULL", args...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out[id] = struct{}{}
-	}
-	return out, rows.Err()
 }
 
 // ---------- admin stats / moderation ----------

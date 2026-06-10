@@ -41,6 +41,8 @@ func NewEngine() *gin.Engine {
 
 	// Per-user upload dirs sit under data/uploads/<uid>/...; mount the root.
 	mountStatic(r, "/uploads", db.UploadRoot)
+	// Profile photos live flat under data/avatars/.
+	mountStatic(r, "/avatars", db.AvatarRoot)
 	if dir := filepath.Join(db.BaseDir, "fonts"); isDir(dir) {
 		mountStatic(r, "/fonts", dir)
 	}
@@ -52,11 +54,13 @@ func NewEngine() *gin.Engine {
 	s.registerPages(r)
 	registerAuthRoutes(r)
 	registerMeRoutes(r)
+	registerAvatarRoutes(r)
 	registerUserRoutes(r)
 	registerUploadRoutes(r)
 	registerPushRoutes(r)
 	registerDMStateRoutes(r)
 	registerHistoryRoutes(r)
+	registerLinkPreviewRoutes(r)
 	registerWS(r)
 
 	return r

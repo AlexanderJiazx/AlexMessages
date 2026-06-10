@@ -5,22 +5,22 @@
   const PUSH_DECLINED_KEY = "am_push_declined";   // user dismissed; don't ask again
   const PAGE_SIZE_DEFAULT = 50;
   const state = {
-    me: null,                // {id, username, display_name, bio}
+    me: null,                // {id, username, display_name, bio, avatar}
     isAdmin: false,
-    channels: [],            // [{id, name, desc}]
     activeChannel: null,     // null => "No conversation selected" view
-    users: {},               // id -> {id, username, display_name, bio}
+    users: {},               // id -> {id, username, display_name, bio, avatar}
     contacts: new Set(),     // user_id Set
     dmThreads: [],           // [{channel, peer_id}]
     online: new Set(),       // user_id Set
     history: {},             // channel_id -> [msg]
     historyHasMore: {},      // channel_id -> bool (more older messages available)
     historyLoading: {},      // channel_id -> bool (in-flight fetch flag)
-    dmState: {},             // channel_id -> {pinned, lastReadAt, clearedAt, unreadCount}
+    dmState: {},             // channel_id -> {pinned, lastReadAt, clearedAt, unreadCount, peerLastReadAt}
+    linkPreviews: {},        // url -> preview object | "none" (negative cache)
     pendingAtt: [],
     replyTo: null,
-    rightView: "me",         // "me" | "peer"
-    rightPeerId: null,
+    sheetView: null,         // null | "me" | "peer" (floating sheet)
+    sheetPeerId: null,
     editing: false,
     pageSize: PAGE_SIZE_DEFAULT,
     maxUpload: 20 * 1024 * 1024,
@@ -40,7 +40,6 @@
   }
   function channelExists(id) {
     if (!id) return false;
-    if (state.channels.find(c => c.id === id)) return true;
     if (state.dmThreads.find(t => t.channel === id)) return true;
     // DM channels with users we know but haven't messaged yet are also OK
     if (typeof id === "string" && id.startsWith("dm:")) {
@@ -117,13 +116,50 @@
   }
   function avatarHTML(uid, large = false) {
     const c = colorFor(uid);
-    const initials = initialsFor(uid);
     const cls = large ? "av lg" : "av";
     const online = uid != null && state.online.has(uid);
+    const u = userFor(uid);
+    const face = (u && u.avatar)
+      ? `<img class="av-photo" src="${escapeHTML(u.avatar)}" alt="" loading="lazy"/>`
+      : `<span>${escapeHTML(initialsFor(uid))}</span>`;
     return `<div class="${cls}" style="background: linear-gradient(135deg, ${c}, ${shade(c,-.18)})" title="${escapeHTML(nameFor(uid))}">
-      <span>${escapeHTML(initials)}</span>
+      ${face}
       <span class="stat${online ? "" : " offline"}"></span>
     </div>`;
+  }
+
+  // Attachment kind for previews: "image" | "video" | "file".
+  function attachmentKind(a) {
+    const mime = (a && a.mime) || "";
+    if (mime.startsWith("image/")) return "image";
+    if (mime.startsWith("video/")) return "video";
+    return "file";
+  }
+
+  // One-line preview of the latest message in a thread, for the sidebar.
+  function lastMessagePreviewFor(channel) {
+    const arr = state.history[channel] || [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const m = arr[i];
+      if (m.type === "system") continue;
+      const mine = state.me && m.user_id === state.me.id;
+      const prefix = mine ? "You: " : "";
+      if (m.text) return prefix + m.text.replace(/\s+/g, " ").slice(0, 80);
+      if (m.attachments && m.attachments.length) {
+        return prefix + "Attachment: " + attachmentKind(m.attachments[0]);
+      }
+      return "";
+    }
+    return "";
+  }
+
+  // Timestamp of the latest message in a thread (0 when empty) — sidebar sort key.
+  function lastMessageTSFor(channel) {
+    const arr = state.history[channel] || [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      if (arr[i].type !== "system") return arr[i].created_at || 0;
+    }
+    return 0;
   }
   function toast(text, isErr = false) {
     const el = document.createElement("div");
@@ -147,31 +183,12 @@
     return `dm:${lo}:${hi}`;
   }
   function activeChannelMeta() {
-    if (isDM(state.activeChannel)) {
-      const peerId = dmPeerOf(state.activeChannel);
-      return { kind: "dm", name: nameFor(peerId), desc: handleFor(peerId), peerId };
-    }
-    const ch = state.channels.find(c => c.id === state.activeChannel);
-    if (ch) return { kind: "channel", name: ch.name, desc: ch.desc };
-    return { kind: "channel", name: "?", desc: "" };
-  }
-
-  // ──────── Rendering: channels ────────
-  function renderChannels() {
-    const cont = $("rooms");
-    cont.innerHTML = "";
-    state.channels.forEach(ch => {
-      const b = document.createElement("button");
-      b.className = "room" + (ch.id === state.activeChannel ? " active" : "");
-      b.innerHTML = `<span class="hash">#</span><span>${escapeHTML(ch.name)}</span>`;
-      b.addEventListener("click", () => switchChannel(ch.id));
-      cont.appendChild(b);
-    });
-    $("chCount").textContent = state.channels.length;
+    const peerId = dmPeerOf(state.activeChannel);
+    return { kind: "dm", name: nameFor(peerId), peerId };
   }
 
   function dmStateFor(ch) {
-    return state.dmState[ch] || { pinned: false, lastReadAt: 0, clearedAt: 0, unreadCount: 0 };
+    return state.dmState[ch] || { pinned: false, lastReadAt: 0, clearedAt: 0, unreadCount: 0, peerLastReadAt: 0 };
   }
 
   function isUnread(ch) {
@@ -192,7 +209,12 @@
       seen.add(ch);
       items.push({ channel: ch, peerId: cid });
     });
-    items.sort((a, b) => nameFor(a.peerId).localeCompare(nameFor(b.peerId)));
+    // Most recent conversation first; empty threads trail, alphabetically.
+    items.sort((a, b) => {
+      const ta = lastMessageTSFor(a.channel), tb = lastMessageTSFor(b.channel);
+      if (ta !== tb) return tb - ta;
+      return nameFor(a.peerId).localeCompare(nameFor(b.peerId));
+    });
     return items;
   }
 
@@ -200,6 +222,7 @@
     const st = dmStateFor(it.channel);
     const isActive = it.channel === state.activeChannel;
     const unread = isUnread(it.channel);
+    const preview = lastMessagePreviewFor(it.channel);
     const row = document.createElement("div");
     row.className = "dm-row" + (isActive ? " active" : "") + (unread ? " unread" : "");
     row.innerHTML = `
@@ -207,7 +230,7 @@
         ${avatarHTML(it.peerId)}
         <div class="who">
           <b>${escapeHTML(nameFor(it.peerId))}</b>
-          <span class="sub">${escapeHTML(handleFor(it.peerId))}</span>
+          <span class="sub">${escapeHTML(preview)}</span>
         </div>
         <span class="unread-dot" title="Unread messages" aria-hidden="${unread ? "false" : "true"}"></span>
       </button>
@@ -389,7 +412,6 @@
   function renderTopbar() {
     const composerWrap = document.querySelector(".composer-wrap");
     if (!state.activeChannel) {
-      $("chHash").textContent = "";
       $("chName").textContent = "Messages";
       $("chSub").textContent = "";
       $("topbarChip").style.display = "none";
@@ -399,24 +421,13 @@
     }
     composerWrap?.classList.remove("hidden");
     const meta = activeChannelMeta();
-    if (meta.kind === "dm") {
-      $("chHash").textContent = "@";
-      $("chName").textContent = meta.name;
-      $("chSub").textContent = meta.desc;
-      const online = state.online.has(meta.peerId);
-      $("topbarChip").style.display = "";
-      $("topbarChipText").textContent = online ? "online" : "offline";
-      $("topbarChip").querySelector(".cdot").style.background = online ? "var(--sage)" : "var(--faint)";
-      $("input").placeholder = `Message ${meta.name}`;
-    } else {
-      $("chHash").textContent = "#";
-      $("chName").textContent = meta.name;
-      $("chSub").textContent = meta.desc || "";
-      $("topbarChip").style.display = "";
-      $("topbarChipText").textContent = "connected";
-      $("topbarChip").querySelector(".cdot").style.background = "var(--sage)";
-      $("input").placeholder = "Message";
-    }
+    $("chName").textContent = meta.name;
+    const online = state.online.has(meta.peerId);
+    $("chSub").textContent = online ? "online" : "offline";
+    $("topbarChip").style.display = "";
+    $("topbarChipText").textContent = online ? "online" : "offline";
+    $("topbarChip").querySelector(".cdot").style.background = online ? "var(--sage)" : "var(--faint)";
+    $("input").placeholder = `Message ${meta.name}`;
   }
 
   function switchChannel(id) {
@@ -426,7 +437,6 @@
     saveLastChannel(id);
     state.replyTo = null;
     renderReplyBar();
-    renderChannels();
     renderDMs();
     renderTopbar();
     renderStream();
@@ -490,7 +500,7 @@
       <div class="empty-state">
         <div class="empty-logo"></div>
         <div class="empty-title serif">No conversation selected</div>
-        <div class="empty-sub">Pick a channel or direct message from the list, or start a new chat.</div>
+        <div class="empty-sub">Pick a conversation from the list, or start a new one with the write button.</div>
       </div>`;
   }
 
@@ -516,7 +526,33 @@
       appendMessageEl(m, prev, msgs);
       if (m.type !== "system") prev = m;
     });
+    updateReadRemark();
     requestAnimationFrame(() => { stream.scrollTop = stream.scrollHeight; });
+  }
+
+  // ──────── Read remark ────────
+  // Shows "Read" under the newest own message the peer has read.
+  function updateReadRemark() {
+    const stream = $("stream");
+    stream.querySelectorAll(".read-remark").forEach(el => el.remove());
+    const ch = state.activeChannel;
+    if (!isDM(ch) || !state.me) return;
+    const st = dmStateFor(ch);
+    if (!st.peerLastReadAt) return;
+    const arr = state.history[ch] || [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const m = arr[i];
+      if (m.type === "system" || m.user_id !== state.me.id) continue;
+      if ((m.created_at || 0) > st.peerLastReadAt) continue;
+      const el = document.getElementById("msg-" + m.id);
+      if (el) {
+        const remark = document.createElement("div");
+        remark.className = "read-remark";
+        remark.textContent = "Read";
+        (el.querySelector(".msg-col") || el).appendChild(remark);
+      }
+      return;
+    }
   }
 
   async function loadOlder(channel) {
@@ -595,14 +631,12 @@
 
   function renderMessage(m, prev, allMsgs) {
     const wrap = document.createElement("div");
+    const mine = state.me && m.user_id === state.me.id;
     const isCont = prev && prev.type === "message" && prev.user_id === m.user_id && !m.reply_to
                    && Math.abs((m.created_at || 0) - (prev.created_at || 0)) < 5 * 60;
-    wrap.className = "msg" + (isCont ? " cont" : "");
+    wrap.className = "msg " + (mine ? "me" : "them") + (isCont ? " cont" : "");
     wrap.id = "msg-" + m.id;
     const c = colorFor(m.user_id);
-    const head = isCont
-      ? `<div class="av-slot"><span class="timestamp-gutter">${escapeHTML(fmtTime(m.created_at))}</span></div>`
-      : `<div class="av-slot">${avatarHTML(m.user_id)}</div>`;
 
     let replyHTML = "";
     if (m.reply_to) {
@@ -625,28 +659,35 @@
       attachHTML = '<div class="attachments">' + m.attachments.map(a => renderAttachment(a)).join("") + '</div>';
     }
     const bodyHTML = m.text ? `<div class="body">${renderBody(m.text)}</div>` : "";
-    const headBlock = isCont ? "" : `
-      <div class="head">
-        <b style="color:${c}" data-peer="${m.user_id}">${escapeHTML(nameFor(m.user_id))}</b>
-        <span class="handle mono">${escapeHTML(handleFor(m.user_id))}</span>
-        <span class="time">${escapeHTML(fmtTime(m.created_at))}</span>
-      </div>`;
+    const time = escapeHTML(fmtTime(m.created_at));
+    const headBlock = isCont ? "" : (mine
+      ? `<div class="head"><span class="time">${time}</span></div>`
+      : `<div class="head">
+          <b style="color:${c}" data-peer="${m.user_id}">${escapeHTML(nameFor(m.user_id))}</b>
+          <span class="time">${time}</span>
+        </div>`);
+    const avSlot = mine ? "" : (isCont
+      ? `<div class="av-slot"><span class="timestamp-gutter">${time}</span></div>`
+      : `<div class="av-slot" data-peer="${m.user_id}">${avatarHTML(m.user_id)}</div>`);
 
     wrap.innerHTML = `
-      ${head}
-      <div>
+      ${avSlot}
+      <div class="msg-col">
         ${headBlock}
-        ${replyHTML}
-        ${bodyHTML}
-        ${attachHTML}
-        <div class="actions">
-          <button data-act="reply" title="Reply">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14l-5-5 5-5"/><path d="M4 9h9a7 7 0 0 1 7 7v3"/></svg>
-          </button>
-          <button data-act="copy" title="Copy">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
-          </button>
+        <div class="bubble" title="${time}">
+          ${replyHTML}
+          ${bodyHTML}
+          ${attachHTML}
         </div>
+        <div class="link-previews"></div>
+      </div>
+      <div class="actions">
+        <button data-act="reply" title="Reply">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14l-5-5 5-5"/><path d="M4 9h9a7 7 0 0 1 7 7v3"/></svg>
+        </button>
+        <button data-act="copy" title="Copy">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
+        </button>
       </div>`;
 
     wrap.querySelectorAll("[data-act]").forEach(btn => {
@@ -674,13 +715,31 @@
     wrap.querySelectorAll(".att-img").forEach(img => {
       img.addEventListener("click", () => openLightbox(img.src));
     });
+    wireImagePlaceholders(wrap);
+    hydrateLinkPreview(wrap.querySelector(".link-previews"), m);
     return wrap;
   }
 
   function renderAttachment(a) {
     const isImg = (a.mime || "").startsWith("image/");
     if (isImg) {
-      return `<img class="att-img" src="${escapeHTML(a.url)}" alt="${escapeHTML(a.name)}" loading="lazy"/>`;
+      // Reserve the final layout box up front (same constraints as the CSS
+      // max sizes), so a loading placeholder occupies exactly the space the
+      // image will: no reflow, no pop-in.
+      const w = a.width | 0, h = a.height | 0;
+      let cls = "att-img-wrap loading", style = "";
+      if (w > 0 && h > 0) {
+        const scale = Math.min(1, 360 / w, 320 / h);
+        const dw = Math.max(1, Math.round(w * scale));
+        const dh = Math.max(1, Math.round(h * scale));
+        style = `width:${dw}px;aspect-ratio:${dw} / ${dh};`;
+      } else {
+        cls += " unknown"; // legacy upload without stored dimensions
+      }
+      return `<div class="${cls}" style="${style}">
+        <span class="spinner"></span>
+        <img class="att-img" src="${escapeHTML(a.url)}" alt="${escapeHTML(a.name)}" loading="lazy"/>
+      </div>`;
     }
     return `<a class="att-file" href="${escapeHTML(a.url)}" target="_blank" rel="noopener" download="${escapeHTML(a.name)}">
       <span class="ico">
@@ -688,6 +747,71 @@
       </span>
       <span class="meta"><b>${escapeHTML(a.name)}</b><span>${fmtSize(a.size)}</span></span>
     </a>`;
+  }
+
+  // Reveal images once loaded; placeholders keep the reserved box meanwhile.
+  function wireImagePlaceholders(scope) {
+    scope.querySelectorAll(".att-img-wrap").forEach(wrapEl => {
+      const img = wrapEl.querySelector("img");
+      if (!img) return;
+      const done = (ok) => {
+        wrapEl.classList.remove("loading");
+        if (wrapEl.classList.contains("unknown")) {
+          // No stored dimensions: let the loaded image size itself.
+          wrapEl.classList.remove("unknown");
+          wrapEl.classList.add("natural");
+        }
+        if (!ok) wrapEl.classList.add("err");
+      };
+      if (img.complete && img.naturalWidth > 0) { done(true); return; }
+      img.addEventListener("load", () => {
+        const stream = $("stream");
+        const stick = nearBottom(stream);
+        done(true);
+        if (stick) requestAnimationFrame(() => { stream.scrollTop = stream.scrollHeight; });
+      });
+      img.addEventListener("error", () => done(false));
+    });
+  }
+
+  // ──────── Link previews ────────
+  const FIRST_URL_RE = /(https?:\/\/[^\s<]+)/;
+
+  function linkPreviewCardHTML(p) {
+    if (!p || (!p.title && !p.image)) return "";
+    let host = ""; try { host = new URL(p.url).host; } catch {}
+    return `<a class="link-preview" href="${escapeHTML(p.url)}" target="_blank" rel="noopener">
+      ${p.image ? `<img class="lp-img" src="${escapeHTML(p.image)}" alt="" loading="lazy"/>` : ""}
+      <span class="lp-meta">
+        <span class="lp-site">${escapeHTML(p.site_name || host)}</span>
+        ${p.title ? `<b class="lp-title">${escapeHTML(p.title)}</b>` : ""}
+        ${p.description ? `<span class="lp-desc">${escapeHTML(p.description)}</span>` : ""}
+      </span>
+    </a>`;
+  }
+
+  // Fetches (and caches) the preview for the first URL in a message, then
+  // fills the message's link-previews slot.
+  function hydrateLinkPreview(slot, m) {
+    if (!slot || m.type === "system") return;
+    const match = (m.text || "").match(FIRST_URL_RE);
+    if (!match) return;
+    const url = match[1];
+    const cached = state.linkPreviews[url];
+    if (cached === "none") return;
+    if (cached) { slot.innerHTML = linkPreviewCardHTML(cached); return; }
+    fetch(`/api/link-preview?url=${encodeURIComponent(url)}`, { credentials: "same-origin" })
+      .then(r => r.ok ? r.json() : null)
+      .then(p => {
+        if (!p || (!p.title && !p.image)) { state.linkPreviews[url] = "none"; return; }
+        state.linkPreviews[url] = p;
+        if (!slot.isConnected) return;
+        const stream = $("stream");
+        const stick = nearBottom(stream);
+        slot.innerHTML = linkPreviewCardHTML(p);
+        if (stick) requestAnimationFrame(() => { stream.scrollTop = stream.scrollHeight; });
+      })
+      .catch(() => { /* leave uncached so a later render can retry */ });
   }
 
   function jumpTo(id) {
@@ -729,14 +853,27 @@
     });
   }
 
-  // ──────── Right rail (profile) ────────
+  // ──────── Settings / profile floating sheet ────────
   function openProfile(view, uid) {
-    state.rightView = view;
-    state.rightPeerId = uid ?? null;
+    state.sheetView = view;
+    state.sheetPeerId = uid ?? null;
     state.editing = false;
-    renderRight();
-    openRight();
+    renderSheet();
+    $("profileSheet").classList.add("on");
   }
+  function closeSheet() {
+    state.sheetView = null;
+    state.sheetPeerId = null;
+    state.editing = false;
+    $("profileSheet").classList.remove("on");
+  }
+  $("sheetClose").addEventListener("click", closeSheet);
+  $("profileSheet").addEventListener("click", (e) => {
+    if (e.target === $("profileSheet")) closeSheet();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.sheetView) closeSheet();
+  });
 
   function pushSettingsHTML() {
     if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
@@ -766,11 +903,11 @@
       </div>`;
   }
 
-  function renderRight() {
-    const title = $("rightTitle");
-    const body = $("rightBody");
-    if (state.rightView === "me" && state.me) {
-      title.textContent = "Your profile";
+  function renderSheet() {
+    const title = $("sheetTitle");
+    const body = $("sheetBody");
+    if (state.sheetView === "me" && state.me) {
+      title.textContent = "Settings & account";
       const me = state.me;
       body.innerHTML = `
         <div class="profile-banner"></div>
@@ -778,8 +915,14 @@
           ${avatarHTML(me.id, true)}
           <div class="name-block">
             <div class="name">${escapeHTML(me.display_name)}</div>
-            <div class="handle">@${escapeHTML(me.username)}</div>
           </div>
+        </div>
+        <div class="btn-row" style="margin-bottom:14px">
+          <button class="btn" id="avatarChange">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            ${me.avatar ? "Change photo" : "Add photo"}
+          </button>
+          ${me.avatar ? `<button class="btn ghost" id="avatarRemove">Remove photo</button>` : ""}
         </div>
         ${state.editing ? `
           <div class="field">
@@ -820,15 +963,17 @@
 
       if (state.editing) {
         $("saveProfile").addEventListener("click", saveProfile);
-        $("cancelEdit").addEventListener("click", () => { state.editing = false; renderRight(); });
+        $("cancelEdit").addEventListener("click", () => { state.editing = false; renderSheet(); });
       } else {
-        $("editProfile").addEventListener("click", () => { state.editing = true; renderRight(); setTimeout(() => $("editName")?.focus(), 0); });
+        $("editProfile").addEventListener("click", () => { state.editing = true; renderSheet(); setTimeout(() => $("editName")?.focus(), 0); });
         $("logoutBtn").addEventListener("click", doLogout);
       }
+      $("avatarChange").addEventListener("click", () => $("avatarInput").click());
+      $("avatarRemove")?.addEventListener("click", removeAvatar);
       $("notifEnable")?.addEventListener("click", () => enablePushFlow());
       $("notifDisable")?.addEventListener("click", () => disablePushFlow());
-    } else if (state.rightView === "peer" && state.rightPeerId != null) {
-      const uid = state.rightPeerId;
+    } else if (state.sheetView === "peer" && state.sheetPeerId != null) {
+      const uid = state.sheetPeerId;
       const u = userFor(uid) || { id: uid, username: "?", display_name: "?", bio: "" };
       const online = state.online.has(uid);
       const isContact = state.contacts.has(uid);
@@ -839,7 +984,6 @@
           ${avatarHTML(uid, true)}
           <div class="name-block">
             <div class="name">${escapeHTML(u.display_name)}</div>
-            <div class="handle">@${escapeHTML(u.username)}</div>
           </div>
         </div>
         <div class="field">
@@ -863,12 +1007,57 @@
             <div class="row"><span class="k">Status</span><span class="v" style="color:${online ? "var(--sage-deep)" : "var(--muted)"}">${online ? "online" : "offline"}</span></div>
           </div>
         </div>`;
-      $("dmBtn").addEventListener("click", () => { openDM(uid); });
-      $("contactBtn").addEventListener("click", () => { toggleContact(uid).then(renderRight); });
+      $("dmBtn").addEventListener("click", () => { closeSheet(); openDM(uid); });
+      $("contactBtn").addEventListener("click", () => { toggleContact(uid).then(renderSheet); });
     } else {
       title.textContent = "—";
       body.innerHTML = "";
     }
+  }
+
+  // ──────── Profile photo upload ────────
+  $("avatarInput").addEventListener("change", async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { toast("Photo exceeds 5MB", true); return; }
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await fetch("/api/me/avatar", { method: "POST", credentials: "same-origin", body: fd });
+      if (!r.ok) {
+        const j = await r.json().catch(() => null);
+        toast((j && j.detail) || "Couldn't update photo", true);
+        return;
+      }
+      const j = await r.json();
+      applyOwnProfile(j.user);
+      toast("Photo updated");
+    } catch {
+      toast("Couldn't update photo", true);
+    }
+  });
+
+  async function removeAvatar() {
+    try {
+      const r = await fetch("/api/me/avatar", { method: "DELETE", credentials: "same-origin" });
+      if (!r.ok) throw new Error();
+      const j = await r.json();
+      applyOwnProfile(j.user);
+      toast("Photo removed");
+    } catch {
+      toast("Couldn't remove photo", true);
+    }
+  }
+
+  // applyOwnProfile merges a fresh own profile into state and re-renders.
+  function applyOwnProfile(user) {
+    state.me = { ...state.me, ...user };
+    state.users[state.me.id] = { ...(state.users[state.me.id] || {}), ...user };
+    if (state.sheetView) renderSheet();
+    renderDMs();
+    renderStream();
+    renderTopbar();
   }
 
   function adminUrl() {
@@ -888,13 +1077,8 @@
       });
       if (!r.ok) throw new Error();
       const j = await r.json();
-      state.me = { ...state.me, ...j.user };
-      state.users[state.me.id] = j.user;
       state.editing = false;
-      renderRight();
-      renderDMs();
-      renderStream();
-      renderTopbar();
+      applyOwnProfile(j.user);
       toast("Profile saved");
     } catch {
       toast("Save failed", true);
@@ -952,27 +1136,11 @@
 
   // ──────── Mobile panels ────────
   function openLeft()  { $("leftPane").classList.add("open"); $("backdrop").classList.add("on"); }
-  function closeLeft() { $("leftPane").classList.remove("open"); maybeCloseBackdrop(); }
-  function openRight() { $("rightPane").classList.add("open"); if (isMobile()) $("backdrop").classList.add("on"); }
-  function closeRight(){ $("rightPane").classList.remove("open"); maybeCloseBackdrop(); }
-  function maybeCloseBackdrop() {
-    if (!$("leftPane").classList.contains("open") && !$("rightPane").classList.contains("open")) {
-      $("backdrop").classList.remove("on");
-    }
-  }
-  function isMobile() { return window.matchMedia("(max-width: 920px)").matches; }
-  const appEl = document.querySelector(".app");
+  function closeLeft() { $("leftPane").classList.remove("open"); $("backdrop").classList.remove("on"); }
   $("menuBtn").addEventListener("click", openLeft);
   $("leftClose").addEventListener("click", closeLeft);
-  $("rightClose").addEventListener("click", () => {
-    if (isMobile()) closeRight();
-    else appEl.classList.add("right-collapsed");
-  });
-  $("profileToggle").addEventListener("click", () => {
-    if (!isMobile()) appEl.classList.remove("right-collapsed");
-    openProfile("me");
-  });
-  $("backdrop").addEventListener("click", () => { closeLeft(); closeRight(); });
+  $("profileToggle").addEventListener("click", () => openProfile("me"));
+  $("backdrop").addEventListener("click", closeLeft);
 
   // ──────── Lightbox ────────
   function openLightbox(src) {
@@ -1040,7 +1208,10 @@
       const res = await fetch("/api/upload", { method: "POST", credentials: "same-origin", body: fd });
       if (!res.ok) throw new Error(await res.text());
       const j = await res.json();
-      state.pendingAtt.push({ name: j.name, url: j.url, size: j.size, mime: j.mime });
+      state.pendingAtt.push({
+        name: j.name, url: j.url, size: j.size, mime: j.mime,
+        width: j.width || 0, height: j.height || 0,
+      });
       renderPendingAtt();
     } catch (err) {
       toast(`Upload failed: ${file.name}`, true);
@@ -1104,7 +1275,6 @@
   function onMessage(data) {
     if (data.type === "init") {
       state.me = data.me;
-      state.channels = data.channels;
       state.users = {};
       (data.users || []).forEach(u => state.users[u.id] = u);
       if (state.me) state.users[state.me.id] = state.me;
@@ -1123,20 +1293,20 @@
           lastReadAt: s.last_read_at || 0,
           clearedAt: s.cleared_at || 0,
           unreadCount: s.unread_count || 0,
+          peerLastReadAt: s.peer_last_read_at || 0,
         };
       });
       const saved = loadLastChannel();
       state.activeChannel = channelExists(saved) ? saved : null;
       fetch("/api/me", { credentials: "same-origin" })
         .then(r => r.ok ? r.json() : null)
-        .then(j => { state.isAdmin = !!(j && j.is_admin); if (state.rightView === "me") renderRight(); })
+        .then(j => { state.isAdmin = !!(j && j.is_admin); if (state.sheetView === "me") renderSheet(); })
         .catch(() => {});
       renderNetLabel();
-      renderChannels();
       renderDMs();
       renderTopbar();
       renderStream();
-      renderRight();
+      if (state.sheetView) renderSheet();
       if (state.activeChannel) {
         send({ type: "switch", channel: state.activeChannel });
         if (isDM(state.activeChannel) && isUnread(state.activeChannel)) {
@@ -1202,8 +1372,20 @@
       renderDMs();
       renderTopbar();
       renderStream();
-      if (state.rightView === "peer" && state.rightPeerId === p.id) renderRight();
-      if (state.rightView === "me" && isSelf && !state.editing) renderRight();
+      if (state.sheetView === "peer" && state.sheetPeerId === p.id) renderSheet();
+      if (state.sheetView === "me" && isSelf && !state.editing) renderSheet();
+    } else if (data.type === "dm_read") {
+      // Read receipt: the reader is data.user_id.
+      const ch = data.channel;
+      const st = dmStateFor(ch);
+      if (state.me && data.user_id === state.me.id) {
+        // Our own read action (possibly from another tab) — clear unread.
+        state.dmState[ch] = { ...st, lastReadAt: data.last_read_at || st.lastReadAt, unreadCount: 0 };
+        renderDMs();
+      } else {
+        state.dmState[ch] = { ...st, peerLastReadAt: data.last_read_at || 0 };
+        if (ch === state.activeChannel) updateReadRemark();
+      }
     } else if (data.type === "dm_opened") {
       state.history[data.channel] = data.history || [];
       state.historyHasMore[data.channel] = !!data.has_more;
@@ -1217,6 +1399,7 @@
           lastReadAt: data.state.last_read_at ?? cur.lastReadAt,
           clearedAt: data.state.cleared_at ?? cur.clearedAt,
           unreadCount: data.state.unread_count ?? 0,
+          peerLastReadAt: data.state.peer_last_read_at ?? cur.peerLastReadAt,
         };
       }
       renderDMs();
@@ -1340,7 +1523,7 @@
           ? "Notifications are blocked — enable them in your browser settings"
           : "Notifications were declined");
         state.pushSubscribed = false;
-        if (state.rightView === "me") renderRight();
+        if (state.sheetView === "me") renderSheet();
         return false;
       }
       const keyRes = await fetch("/api/push/public-key", { credentials: "same-origin" });
@@ -1351,7 +1534,7 @@
       try { localStorage.removeItem(PUSH_DECLINED_KEY); } catch (_) {}
       state.pushSubscribed = true;
       toast("Notifications enabled");
-      if (state.rightView === "me") renderRight();
+      if (state.sheetView === "me") renderSheet();
       return true;
     } catch (err) {
       console.error("[push] enable flow failed", err);
@@ -1379,7 +1562,7 @@
       state.pushSubscribed = false;
       try { localStorage.setItem(PUSH_DECLINED_KEY, "1"); } catch (_) {}
       toast("Notifications disabled");
-      if (state.rightView === "me") renderRight();
+      if (state.sheetView === "me") renderSheet();
     } catch (err) {
       console.error("[push] disable flow failed", err);
     }
@@ -1424,7 +1607,7 @@
       const sub = await getOrCreateSubscription(reg, vapidKey);
       await postSubscriptionToServer(sub);
       state.pushSubscribed = true;
-      if (state.rightView === "me") renderRight();
+      if (state.sheetView === "me") renderSheet();
     } catch (err) {
       console.warn("[push] reconcile failed", err);
     }

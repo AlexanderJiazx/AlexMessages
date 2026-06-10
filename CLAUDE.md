@@ -4,15 +4,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**AlexMessage (Go edition)** — an internet-hosted messaging app, a faithful Go/Gin
-port of the original Python/FastAPI project at `~/Code/ChatRoom`. The behavior,
-wire protocol, HTTP responses, database schema, and frontend are **identical** to
-the Python version; only the backend language and web framework changed
+**AlexMessage (Go edition)** — an internet-hosted messaging app, originally a
+faithful Go/Gin port of the Python/FastAPI project at `~/Code/ChatRoom`
 (FastAPI → [Gin](https://github.com/gin-gonic/gin)).
 
-The frontend (HTML / CSS / vanilla JS under `static/`, plus `index.html`,
-`login.html`, `admin.html`, `voicecall.html`, `voicecall_login.html`, the
-`fonts/` and `sound/` asset trees) was copied over unchanged.
+Since the June 2026 upgrade (`UpgradeJune.md`) the app has **diverged** from the
+Python original:
+- **Channels were removed entirely.** The app is DM-only: every conversation is
+  a `dm:<min>:<max>` thread. No channel catalog, no default channel.
+- **Profile photos** — `POST`/`DELETE /api/me/avatar`, files stored at
+  `data/avatars/<uid>_<token>.<ext>`, served under `/avatars/`;
+  `runtime.PublicUser` carries an `avatar` URL field.
+- **Read receipts** — marking a DM read broadcasts a `dm_read` WS event to both
+  participants; init/`dm_opened` `dm_state` payloads include `peer_last_read_at`.
+- **Image dimensions** — `/api/upload` decodes images and returns
+  `width`/`height`, persisted on `attachments`, so the client reserves a
+  correctly sized loading placeholder.
+- **Link previews** — `GET /api/link-preview?url=` fetches OpenGraph metadata
+  server-side (SSRF-guarded dialer, in-memory TTL cache) for preview cards.
+- **UI refresh** — message bubbles (own messages right-aligned), sidebar rows
+  show avatar + name + last-message preview (attachments as
+  `Attachment: image|video|file`), settings/account in a floating sheet (the
+  right rail is gone), compose icon in the rail header starts a new chat.
+
+The frontend is HTML / CSS / vanilla JS under `static/`, plus `index.html`,
+`login.html`, `admin.html`, `voicecall.html`, `voicecall_login.html`, and the
+`fonts/` and `sound/` asset trees.
 
 There are **three independent server binaries** that share one SQLite database,
 exactly like the three Python processes:
@@ -34,7 +51,7 @@ internal/
   db/        SQLite schema + every query helper (was db.py)
   auth/      scrypt hashing, session tokens, admin bootstrap (was auth.py)
   push/      VAPID bootstrap + Web Push delivery (was push.py)
-  runtime/   main-app shared state: presence, channels, visibility, broadcasts (was runtime.py)
+  runtime/   main-app shared state: presence, visibility, broadcasts (was runtime.py)
   httpx/     tiny shared HTTP helpers: {"detail": …} errors + session cookies (was deps.py)
   webapp/    the user app: engine + one file per Python route module
   adminapp/  the admin panel (was admin.py)
@@ -43,7 +60,8 @@ internal/
 
 The Python `routes/` modules map one-to-one onto files in `internal/webapp/`:
 `pages.go`, `auth_routes.go`, `me.go`, `users.go`, `uploads.go`, `push_routes.go`,
-`dm_state.go`, `history.go`, `ws.go`.
+`dm_state.go`, `history.go`, `ws.go`. Post-upgrade additions with no Python
+counterpart: `avatar.go` (profile photos) and `linkpreview.go` (link previews).
 
 ## Run / develop
 
@@ -76,19 +94,19 @@ Environment variables (same semantics as the Python version):
 
 ### Testing
 
-There is no automated test suite yet — the Python end-to-end harness (`smoke.py`)
-was **not** ported. Verify changes by running the binaries and exercising the
-flow by hand: register → admin approve → login → channel/DM message (over `/ws`)
-→ upload → contacts → logout → admin delete. The user app and admin panel must
-both be running (they share `data/alexmessage.db`); the voice-call server is
-independent. A fresh `data/` is created on first run, so tests start from a clean
-database. If you add a test harness, prefer a Go program under `cmd/` or a
-`*_test.go` that spins the binaries up as subprocesses, mirroring `smoke.py`.
+Unit tests live next to the code (`internal/db/db_test.go`,
+`internal/webapp/linkpreview_test.go`, `internal/webapp/uploads_test.go`) and
+cover the DB layer (DM state, read receipts, attachment dimensions, paging),
+the link-preview parser/SSRF guard, and image-dimension extraction. Run with
+`go test ./...`. The DB tests point the package-level path vars at a temp dir.
+
+For end-to-end checks, run the binaries and exercise the flow by hand:
+register → admin approve → login → DM message (over `/ws`) → upload → contacts
+→ logout → admin delete. The user app and admin panel must both be running
+(they share `data/alexmessage.db`); the voice-call server is independent. A
+fresh `data/` is created on first run.
 
 ## Architecture notes specific to the Go port
-
-These are the only places the implementation differs from a literal transcription;
-the observable behavior is unchanged.
 
 ### Concurrency
 
@@ -124,9 +142,9 @@ Responses are byte-compatible with FastAPI where it matters:
   distinct Python dict shapes. Nullable fields (`user_id`, `author`, `reply_to`)
   serialize as JSON `null`, not omitted.
 - The three different public-user views are preserved: `runtime.PublicUser`
-  (`{id, username, display_name, bio}`), `db.UserToPublic` (admin: adds `status`,
-  `is_admin`, `created_at`), and `voicecall.vcUser` (`{id, username, display_name}`,
-  no bio).
+  (`{id, username, display_name, bio, avatar}`), `db.UserToPublic` (admin: adds
+  `status`, `is_admin`, `created_at`), and `voicecall.vcUser`
+  (`{id, username, display_name}`, no bio).
 
 ### Web Push / VAPID
 
@@ -145,15 +163,16 @@ is completed regardless so the server can send `close(4401)` — the client list
 for code 4401 to redirect to `/login`. WS origin is not enforced (matching
 Starlette).
 
-### Identity, DMs, per-user DM state, lazy history, channels
+### Identity, DMs, per-user DM state, lazy history
 
-Unchanged from the original design — see the data model below. A DM thread between
-users *a* and *b* lives at synthetic channel `dm:<min>:<max>` (`db.DMChannelID` /
-`db.ParseDMChannel`). `dm_state` rows carry `pinned` / `last_read_at` /
-`force_unread` / `cleared_at` per `(user_id, channel)`. Each channel ships only the
-most recent 50 messages on connect with a `history_has_more` flag; older messages
-load via `GET /api/history/{channel}?before=`. Channels are the hardcoded catalog
-in `runtime.Channels`.
+A DM thread between users *a* and *b* lives at synthetic channel `dm:<min>:<max>`
+(`db.DMChannelID` / `db.ParseDMChannel`); these are the only channels that exist.
+`dm_state` rows carry `pinned` / `last_read_at` / `force_unread` / `cleared_at`
+per `(user_id, channel)`. Each thread ships only the most recent 50 messages on
+connect with a `history_has_more` flag; older messages load via
+`GET /api/history/{channel}?before=`. The DB schema migrates added columns
+(`users.avatar`, `attachments.width/height`, `dm_state.force_unread`) on startup
+via `ensureColumn`, tolerant of the three binaries racing the same ALTER.
 
 ## Data / runtime state
 
@@ -162,12 +181,14 @@ Lives under `data/` (gitignored), created on first run:
   calls, push_subscriptions, dm_state).
 - `data/uploads/<user_id>/<token>_<filename>` — per-user uploads; account deletion
   removes the directory.
+- `data/avatars/<user_id>_<token>.<ext>` — profile photos; replaced on change,
+  removed on account deletion.
 - `data/vapid_private.pem` / `data/vapid_public.txt` — VAPID key pair.
 
 ## Endpoints
 
-Identical to the Python version. See the route files under `internal/webapp/`
-(user app), `internal/adminapp/adminapp.go` (admin), and `internal/voicecall/`
-(auth + `/api/calls/recent` + `/ws` signaling). The WebSocket protocol — client
-`message`/`switch`/`open_dm`/`ping`, server `init`/`message`/`presence`/
-`profile_update`/`dm_opened` — is unchanged.
+See the route files under `internal/webapp/` (user app),
+`internal/adminapp/adminapp.go` (admin), and `internal/voicecall/` (auth +
+`/api/calls/recent` + `/ws` signaling). The WebSocket protocol: client sends
+`message`/`switch`/`open_dm`/`ping`; server sends `init`/`message`/`presence`/
+`profile_update`/`dm_opened`/`dm_read`.

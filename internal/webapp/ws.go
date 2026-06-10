@@ -36,18 +36,17 @@ type dmThread struct {
 }
 
 type dmStatePayload struct {
-	Pinned      bool  `json:"pinned"`
-	LastReadAt  int64 `json:"last_read_at"`
-	ClearedAt   int64 `json:"cleared_at"`
-	ForceUnread bool  `json:"force_unread"`
-	UnreadCount int   `json:"unread_count"`
+	Pinned         bool  `json:"pinned"`
+	LastReadAt     int64 `json:"last_read_at"`
+	ClearedAt      int64 `json:"cleared_at"`
+	ForceUnread    bool  `json:"force_unread"`
+	UnreadCount    int   `json:"unread_count"`
+	PeerLastReadAt int64 `json:"peer_last_read_at"`
 }
 
 type initPayload struct {
 	Type           string                         `json:"type"`
 	Me             runtime.PublicUser             `json:"me"`
-	Channels       []runtime.Channel              `json:"channels"`
-	DefaultChannel string                         `json:"default_channel"`
 	Users          []runtime.PublicUser           `json:"users"`
 	Contacts       []int                          `json:"contacts"`
 	Online         []int                          `json:"online"`
@@ -94,7 +93,6 @@ func handleWS(c *gin.Context) {
 
 	presence := runtime.PresenceTracker()
 	client := &runtime.Client{Conn: conn, UserID: user.ID}
-	client.SetChannel(runtime.DefaultChannel)
 	presence.Add(client)
 
 	runtime.SendJSON(client, buildInitPayload(user))
@@ -153,11 +151,6 @@ func buildInitPayload(user *db.User) initPayload {
 
 	history := map[string][]db.HistoryMessage{}
 	historyHasMore := map[string]bool{}
-	for _, ch := range runtime.Channels {
-		msgs, _ := db.FetchChannelWindow(ch.ID, runtime.InitialHistoryPage, nil, nil)
-		history[ch.ID] = msgs
-		historyHasMore[ch.ID] = len(msgs) == runtime.InitialHistoryPage
-	}
 
 	dmThreads := []dmThread{}
 	dmStateOut := map[string]dmStatePayload{}
@@ -178,12 +171,14 @@ func buildInitPayload(user *db.User) initPayload {
 		if state.ForceUnread && unread == 0 {
 			unread = 1
 		}
+		peerState, _ := db.GetDMState(pid, ch)
 		dmStateOut[ch] = dmStatePayload{
-			Pinned:      state.Pinned,
-			LastReadAt:  state.LastReadAt,
-			ClearedAt:   clearedAt,
-			ForceUnread: state.ForceUnread,
-			UnreadCount: unread,
+			Pinned:         state.Pinned,
+			LastReadAt:     state.LastReadAt,
+			ClearedAt:      clearedAt,
+			ForceUnread:    state.ForceUnread,
+			UnreadCount:    unread,
+			PeerLastReadAt: peerState.LastReadAt,
 		}
 		dmThreads = append(dmThreads, dmThread{Channel: ch, PeerID: pid})
 	}
@@ -208,8 +203,6 @@ func buildInitPayload(user *db.User) initPayload {
 	return initPayload{
 		Type:           "init",
 		Me:             runtime.UserPublic(user),
-		Channels:       runtime.Channels,
-		DefaultChannel: runtime.DefaultChannel,
 		Users:          visibleUsers,
 		Contacts:       contacts,
 		Online:         visibleOnline,
@@ -246,7 +239,7 @@ func makeMessagePayload(userID *int, channel, text string, replyTo *string, atta
 		if userID != nil {
 			owner = *userID
 		}
-		_ = db.InsertAttachment(msgID, owner, a.Name, rel, a.Size, a.Mime)
+		_ = db.InsertAttachment(msgID, owner, a.Name, rel, a.Size, a.Mime, a.Width, a.Height)
 	}
 	var author *runtime.PublicUser
 	if userID != nil {
@@ -272,22 +265,17 @@ func makeMessagePayload(userID *int, channel, text string, replyTo *string, atta
 
 func handleWSMessage(userID int, data map[string]any) {
 	channel, _ := data["channel"].(string)
-	if channel == "" {
-		channel = runtime.DefaultChannel
+	a, b, ok := db.ParseDMChannel(channel)
+	if !ok || (a != userID && b != userID) {
+		return
 	}
-	if _, named := runtime.ChannelIDs[channel]; !named {
-		a, b, ok := db.ParseDMChannel(channel)
-		if !ok || (a != userID && b != userID) {
-			return
-		}
-		other := a
-		if b != userID {
-			other = b
-		}
-		target, _ := db.GetUserByID(other)
-		if target == nil || target.Status != "approved" {
-			return
-		}
+	other := a
+	if b != userID {
+		other = b
+	}
+	target, _ := db.GetUserByID(other)
+	if target == nil || target.Status != "approved" {
+		return
 	}
 
 	text, _ := data["text"].(string)
@@ -312,10 +300,12 @@ func handleWSMessage(userID int, data map[string]any) {
 			continue
 		}
 		cleanAtts = append(cleanAtts, db.Attachment{
-			Name: truncateRunes(strOrDefault(am, "name", "file"), 120),
-			URL:  url,
-			Size: floatToInt64(am["size"]),
-			Mime: truncateRunes(strOrDefault(am, "mime", "application/octet-stream"), 100),
+			Name:   truncateRunes(strOrDefault(am, "name", "file"), 120),
+			URL:    url,
+			Size:   floatToInt64(am["size"]),
+			Mime:   truncateRunes(strOrDefault(am, "mime", "application/octet-stream"), 100),
+			Width:  clampDimension(am["width"]),
+			Height: clampDimension(am["height"]),
 		})
 	}
 
@@ -352,6 +342,7 @@ func handleWSOpenDM(client *runtime.Client, userID int, data map[string]any) {
 	}
 	ch := db.DMChannelID(userID, peerID)
 	state, _ := db.GetDMState(userID, ch)
+	peerState, _ := db.GetDMState(peerID, ch)
 	hist, _ := db.FetchChannelWindow(ch, runtime.InitialHistoryPage, nil, afterPtr(state.ClearedAt))
 	runtime.SendJSON(client, gin.H{
 		"type":     "dm_opened",
@@ -360,19 +351,19 @@ func handleWSOpenDM(client *runtime.Client, userID int, data map[string]any) {
 		"history":  hist,
 		"has_more": len(hist) == runtime.InitialHistoryPage,
 		"state": dmStatePayload{
-			Pinned:      state.Pinned,
-			LastReadAt:  state.LastReadAt,
-			ClearedAt:   state.ClearedAt,
-			ForceUnread: state.ForceUnread,
-			UnreadCount: 0,
+			Pinned:         state.Pinned,
+			LastReadAt:     state.LastReadAt,
+			ClearedAt:      state.ClearedAt,
+			ForceUnread:    state.ForceUnread,
+			UnreadCount:    0,
+			PeerLastReadAt: peerState.LastReadAt,
 		},
 	})
 }
 
 func handleWSSwitch(client *runtime.Client, data map[string]any) {
 	channel, _ := data["channel"].(string)
-	_, named := runtime.ChannelIDs[channel]
-	if _, _, isDM := db.ParseDMChannel(channel); named || isDM {
+	if _, _, isDM := db.ParseDMChannel(channel); isDM {
 		client.SetChannel(channel)
 	}
 }
@@ -445,6 +436,16 @@ func floatToInt64(v any) int64 {
 		return int64(f)
 	}
 	return 0
+}
+
+// clampDimension sanitizes a client-supplied pixel dimension: non-numeric,
+// negative, or absurd values collapse to 0 (unknown).
+func clampDimension(v any) int {
+	f, ok := v.(float64)
+	if !ok || f < 0 || f > 20000 {
+		return 0
+	}
+	return int(f)
 }
 
 // parsePeerID mirrors int(data.get("peer_id")) with its TypeError/ValueError guard.

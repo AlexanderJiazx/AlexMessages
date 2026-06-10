@@ -3,13 +3,11 @@ package webapp
 import (
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"alexmessage/internal/db"
 	"alexmessage/internal/httpx"
-	"alexmessage/internal/runtime"
 )
 
 const (
@@ -29,12 +27,10 @@ func handleHistory(c *gin.Context) {
 	}
 	channel := c.Param("channel")
 
-	if _, named := runtime.ChannelIDs[channel]; !named {
-		a, b, ok := db.ParseDMChannel(channel)
-		if !ok || (a != user.ID && b != user.ID) {
-			httpx.Error(c, http.StatusNotFound, "Channel not found")
-			return
-		}
+	a, b, okDM := db.ParseDMChannel(channel)
+	if !okDM || (a != user.ID && b != user.ID) {
+		httpx.Error(c, http.StatusNotFound, "Channel not found")
+		return
 	}
 
 	limit := historyPageLimit
@@ -58,12 +54,10 @@ func handleHistory(c *gin.Context) {
 	}
 
 	var afterTS *int64
-	if strings.HasPrefix(channel, "dm:") {
-		state, _ := db.GetDMState(user.ID, channel)
-		if state.ClearedAt != 0 {
-			cleared := state.ClearedAt
-			afterTS = &cleared
-		}
+	state, _ := db.GetDMState(user.ID, channel)
+	if state.ClearedAt != 0 {
+		cleared := state.ClearedAt
+		afterTS = &cleared
 	}
 
 	messages, err := db.FetchChannelWindow(channel, limit, before, afterTS)
