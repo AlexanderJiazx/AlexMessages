@@ -1423,7 +1423,12 @@
       return;
     }
     const track = await acquireTrack("video", deviceId, true);
-    if (track) { track.enabled = state.camOn; refreshSelfPreview(); toast("Camera switched", "ok"); }
+    if (track) {
+      track.enabled = state.camOn;
+      refreshSelfPreview();
+      applyQuality(); // the fresh track starts at default resolution
+      toast("Camera switched", "ok");
+    }
     else toast("Couldn't switch camera", "err");
   }
 
@@ -1800,6 +1805,37 @@
   }
 
   // ──────── Streaming quality ────────
+  // cameraMaxRes reads the camera's resolution ceiling — from the live track
+  // when we have one (mesh), else from the device list (volc captures
+  // internally). Capabilities need a granted permission; null = unknown.
+  async function cameraMaxRes(track) {
+    let caps = null;
+    try { if (track && track.getCapabilities) caps = track.getCapabilities(); } catch {}
+    if (!caps || !caps.width || !caps.height) {
+      try {
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const d = devs.find(d => d.kind === "videoinput"
+          && (state.camDevice ? d.deviceId === state.camDevice : !!d.deviceId));
+        if (d && d.getCapabilities) caps = d.getCapabilities();
+      } catch {}
+    }
+    if (!caps || !caps.width || !caps.height) return null;
+    const w = (caps.width.max ?? caps.width) | 0;
+    const h = (caps.height.max ?? caps.height) | 0;
+    return w && h ? { w, h } : null;
+  }
+
+  // fitTierToCamera shrinks the tier into the camera's ceiling *keeping the
+  // 16:9 shape*. Asking for more than the camera can do (typically Premium 4K
+  // on a 1080p webcam) otherwise makes the browser fall back to the sensor's
+  // largest native mode — usually a taller 4:3 frame, which then renders as a
+  // pillarboxed "vertical" tile.
+  function fitTierToCamera(tier, max) {
+    if (!max) return { w: tier.w, h: tier.h };
+    const scale = Math.min(1, max.w / tier.w, max.h / tier.h);
+    return { w: Math.round(tier.w * scale) & ~1, h: Math.round(tier.h * scale) & ~1 };
+  }
+
   // Applies the user's tier to their *outgoing* stream. Mesh: capture
   // constraints on the camera track plus per-sender bitrate caps. Volc:
   // capture/encoder config plus an audio profile. "Auto" lifts the caps and
@@ -1811,8 +1847,9 @@
       if (!eng || !window.VERTC) return;
       try {
         const v = conf || { w: 1280, h: 720, fps: 24, kbps: 0 };
-        try { await eng.setVideoCaptureConfig({ width: v.w, height: v.h, frameRate: v.fps }); } catch {}
-        const encCfg = { width: v.w, height: v.h, frameRate: v.fps };
+        const fit = fitTierToCamera(v, await cameraMaxRes(null));
+        try { await eng.setVideoCaptureConfig({ width: fit.w, height: fit.h, frameRate: v.fps }); } catch {}
+        const encCfg = { width: fit.w, height: fit.h, frameRate: v.fps };
         if (v.kbps) encCfg.maxKbps = v.kbps;
         await eng.setVideoEncoderConfig(encCfg);
         const profiles = VERTC.AudioProfileType || {};
@@ -1824,9 +1861,14 @@
     } else {
       const cam = state.localStream?.getVideoTracks()[0];
       if (cam) {
-        const want = conf
-          ? { width: { ideal: conf.w }, height: { ideal: conf.h }, frameRate: { ideal: conf.fps } }
-          : { width: { ideal: 1280 }, height: { ideal: 720 } };
+        const tier = conf || { w: 1280, h: 720 };
+        const fit = fitTierToCamera(tier, await cameraMaxRes(cam));
+        const want = {
+          width: { ideal: fit.w },
+          height: { ideal: fit.h },
+          aspectRatio: { ideal: 16 / 9 },
+        };
+        if (conf) want.frameRate = { ideal: conf.fps };
         try { await cam.applyConstraints(want); } catch {}
       }
       for (const peer of state.pcs.values()) meshApplyPeerQuality(peer);
