@@ -1,0 +1,1677 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Alex Meet</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="theme-color" content="#F1EFE6" />
+<link href="/fonts/fonts.css" rel="stylesheet" />
+<style>
+  :root {
+    --bg:        #F1EFE6;
+    --paper:     #FAF8F1;
+    --surface:   #FFFFFF;
+    --ink:       #1B241F;
+    --ink-2:     #344039;
+    --muted:     #6E7A72;
+    --faint:     #9AA59D;
+    --line:      #E2E4D9;
+    --line-2:    #EAEBE1;
+    --sage:      #4F7A5E;
+    --sage-deep: #355040;
+    --sage-soft: #DCE9D9;
+    --sage-mint: #C7E1C5;
+    --sage-tint: #ECF3E8;
+    --sage-glow: #B9DFB7;
+    --warn:      #C58A3B;
+    --danger:    #B85450;
+    --video-bg:  #15201A;
+    --radius:    14px;
+    --radius-s:  10px;
+    --shadow-1:  0 1px 0 rgba(255,255,255,.7) inset, 0 1px 1px rgba(27,36,31,.04), 0 8px 24px -12px rgba(27,36,31,.10);
+    --shadow-2:  0 1px 0 rgba(255,255,255,.7) inset, 0 18px 50px -18px rgba(27,36,31,.30), 0 4px 12px -6px rgba(27,36,31,.08);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--ink); height: 100%; }
+  body {
+    margin: 0;
+    font-family: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  a { color: var(--sage-deep); }
+  [hidden] { display: none !important; }
+
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: radial-gradient(rgba(85,110,90,.045) 1px, transparent 1px);
+    background-size: 3px 3px; mix-blend-mode: multiply; opacity: .55;
+  }
+  .serif { font-family: 'Instrument Serif', 'Times New Roman', serif; font-weight: 400; letter-spacing: -.005em; }
+  .mono  { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .view { position: fixed; inset: 0; z-index: 2; display: flex; flex-direction: column; }
+
+  /* ───── shared bits ───── */
+  .logo {
+    width: 32px; height: 32px; border-radius: 10px;
+    background: radial-gradient(120% 120% at 30% 20%, var(--sage-mint), var(--sage) 70%);
+    box-shadow: inset 0 0 0 1px rgba(53,80,64,.25), 0 1px 0 rgba(255,255,255,.6) inset;
+    position: relative; flex-shrink: 0;
+  }
+  .logo::after {
+    content:""; position:absolute; inset:6px; border-radius:50%;
+    background: radial-gradient(circle at 35% 30%, #fff 0 18%, transparent 20%),
+                conic-gradient(from 200deg, var(--sage-deep), var(--sage), var(--sage-mint), var(--sage-deep));
+    opacity:.85;
+  }
+  .av {
+    border-radius: 50%; display:grid; place-items:center; position: relative;
+    font-weight: 600; color: #fff; flex-shrink: 0; overflow: hidden;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.08);
+  }
+  .av img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .toast-stack { position: fixed; bottom: 26px; left: 50%; transform: translate(-50%, 0); z-index: 9999; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
+  .toast {
+    background: var(--ink); color: #ECF3E8;
+    padding: 9px 14px; border-radius: 999px; font-size: 12.5px;
+    box-shadow: var(--shadow-2); display:flex; align-items:center; gap:8px;
+    animation: toast-in .25s ease-out both;
+  }
+  .toast.err  { background: var(--danger); }
+  .toast.warn { background: var(--warn); }
+  .toast.ok   { background: var(--sage-deep); }
+  @keyframes toast-in { from { opacity:0; transform: translateY(8px) } to { opacity:1; transform: translateY(0) } }
+
+  /* ───── lobby ───── */
+  .lobby-top {
+    display:flex; align-items:center; gap:12px; padding: 18px 24px;
+  }
+  .lobby-top .name { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+  .lobby-top .spacer { flex:1; }
+  .me-chip {
+    display:flex; align-items:center; gap:9px;
+    background: transparent; border: 1px solid transparent; padding: 5px 8px;
+    border-radius: 999px; color: var(--ink-2); font-size: 13px;
+  }
+  .me-chip:hover { background: var(--surface); border-color: var(--line); }
+  .lobby-body {
+    flex:1; overflow:auto; display:flex; align-items:center; justify-content:center; padding: 24px;
+  }
+  .lobby-hero {
+    width: 100%; max-width: 440px; display:flex; flex-direction:column; align-items:center;
+    gap: 16px; text-align:center;
+  }
+  .emblem {
+    width: 64px; height: 64px; border-radius: 20px;
+    background: radial-gradient(120% 120% at 30% 20%, var(--sage-mint), var(--sage) 70%);
+    box-shadow: inset 0 0 0 1px rgba(53,80,64,.22), 0 1px 0 rgba(255,255,255,.55) inset, 0 8px 22px -12px rgba(53,80,64,.4);
+    display:grid; place-items:center; color:#fff;
+  }
+  .lobby-hero h2 { margin: 0; font-family:'Instrument Serif',serif; font-weight:400; font-size: 34px; letter-spacing:-.01em; line-height:1.12; }
+  .lobby-hero .lede { color: var(--muted); font-size: 13.5px; line-height: 1.55; max-width: 340px; margin-top: -6px; }
+  .lobby-card {
+    width: 100%; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 18px; box-shadow: var(--shadow-1);
+    padding: 18px; display:flex; flex-direction:column; gap: 14px; text-align:left;
+  }
+  .field-label {
+    font-size: 10.5px; letter-spacing:.08em; text-transform:uppercase; font-weight:600;
+    color: var(--faint); margin-bottom: 6px; display:block;
+  }
+  .select-wrap { position: relative; }
+  .select-wrap select {
+    width: 100%; appearance: none; -webkit-appearance: none;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 38px 10px 12px; font-size: 13.5px; color: var(--ink); outline: none;
+    cursor: pointer;
+  }
+  .select-wrap select:focus { border-color: var(--sage-mint); box-shadow: 0 0 0 3px rgba(199,225,197,.4); }
+  .select-wrap svg { position:absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events:none; color: var(--muted); }
+  .backend-hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+  .btn-new {
+    display:flex; align-items:center; justify-content:center; gap:9px;
+    background: var(--sage); color:#fff; border:0; border-radius: 12px;
+    padding: 12px 16px; font-weight:600; font-size: 14px;
+    box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 1px 2px rgba(53,80,64,.4);
+  }
+  .btn-new:hover { background: var(--sage-deep); }
+  .btn-new:disabled { opacity:.6; cursor: default; }
+  .or-row { display:flex; align-items:center; gap: 12px; color: var(--faint); font-size: 11px; letter-spacing:.08em; text-transform:uppercase; }
+  .or-row::before, .or-row::after { content:""; flex:1; height:1px; background: var(--line-2); }
+  .join-row {
+    display:flex; gap:6px; align-items:stretch;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 5px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .join-row.focused { border-color: var(--sage-mint); box-shadow: 0 0 0 3px rgba(199,225,197,.4); }
+  .join-row input {
+    flex:1; min-width:0; background:transparent; border:0; outline:none;
+    padding: 8px 4px 8px 9px; font-size: 13.5px; color: var(--ink);
+  }
+  .join-row input::placeholder { color: var(--faint); }
+  .join-row button {
+    border:0; border-radius: 9px; padding: 0 16px; font-weight: 600; font-size: 13px;
+    background: var(--sage-tint); color: var(--sage-deep);
+  }
+  .join-row button:not(:disabled):hover { background: var(--sage-mint); }
+  .join-row button:disabled { color: var(--faint); background: transparent; cursor: default; }
+  .lobby-err { color: var(--danger); font-size: 12.5px; min-height: 1.2em; }
+
+  /* ───── pre-join gate / interstitials ───── */
+  .center-body { flex:1; display:flex; align-items:center; justify-content:center; padding: 24px; }
+  .gate-card {
+    width: 100%; max-width: 420px; text-align: center;
+    background: var(--surface); border:1px solid var(--line); border-radius: 18px;
+    box-shadow: var(--shadow-2); padding: 30px 26px 26px;
+    display:flex; flex-direction:column; align-items:center; gap: 14px;
+  }
+  .gate-card h2 { margin:0; font-family:'Instrument Serif',serif; font-weight:400; font-size: 28px; }
+  .gate-card .code-line { font-family:'JetBrains Mono',monospace; font-size: 13px; color: var(--muted); }
+  .gate-toggles { display:flex; gap: 14px; margin: 6px 0 2px; }
+  .gate-note { font-size: 12px; color: var(--muted); line-height: 1.5; max-width: 300px; }
+  .btn-join {
+    display:inline-flex; align-items:center; gap:9px;
+    background: var(--sage); color:#fff; border:0; border-radius: 999px;
+    padding: 12px 34px; font-weight:600; font-size: 14.5px;
+    box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 1px 2px rgba(53,80,64,.4);
+  }
+  .btn-join:hover { background: var(--sage-deep); }
+  .btn-join:disabled { opacity:.6; cursor:default; }
+  .ghost-link { background:none; border:0; color: var(--muted); font-size: 13px; }
+  .ghost-link:hover { color: var(--sage-deep); text-decoration: underline; }
+  .inter-actions { display:flex; gap:10px; justify-content:center; }
+
+  /* ───── meeting ───── */
+  .meet-top {
+    display:flex; align-items:center; gap:10px; padding: 14px 18px 10px;
+  }
+  .meet-code {
+    font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--ink-2);
+    background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+    padding: 6px 14px; cursor: pointer;
+  }
+  .meet-code:hover { border-color: var(--sage-mint); background: var(--sage-tint); color: var(--sage-deep); }
+  .meet-top .spacer { flex: 1; }
+  .ppl-badge {
+    position:absolute; top:-3px; right:-3px; min-width: 17px; height: 17px;
+    background: var(--sage); color:#fff; font-size: 10px; font-weight:700;
+    border-radius: 999px; display:grid; place-items:center; padding: 0 4px;
+    border: 2px solid var(--bg);
+  }
+
+  .meet-body { flex:1; display:flex; gap:14px; padding: 0 18px; min-height: 0; }
+  .main-wrap { flex:1; min-width:0; display:flex; }
+  .main-view {
+    flex:1; min-width:0; position:relative;
+    border-radius: 18px; overflow:hidden;
+    background: var(--video-bg);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow-1);
+  }
+  .main-view:empty::after {
+    content: "Waiting for others to join…";
+    position:absolute; inset:0; display:grid; place-items:center;
+    color: rgba(255,255,255,.45); font-size: 14px;
+  }
+
+  /* participant stack on the right */
+  .stack {
+    width: 218px; flex-shrink: 0;
+    overflow-y: auto; overflow-x: hidden;
+    display:flex; flex-direction:column; gap: 10px; padding: 2px;
+  }
+  .stack::-webkit-scrollbar{ width:6px } .stack::-webkit-scrollbar-thumb{ background:rgba(0,0,0,.08); border-radius:4px }
+  .stack .tile { aspect-ratio: 16 / 9; flex-shrink: 0; }
+
+  /* grid (group view) */
+  .grid-area { flex:1; min-width:0; display:flex; align-items:center; gap: 6px; }
+  .grid-pages {
+    flex:1; height: 100%;
+    display:flex; flex-wrap:wrap; align-content:center; justify-content:center;
+    gap: 12px; padding: 2px;
+  }
+  .grid-pages .tile { aspect-ratio: 16 / 9; }
+  .pager {
+    width: 34px; height: 56px; border-radius: 12px; flex-shrink:0;
+    background: var(--surface); border:1px solid var(--line); color: var(--ink-2);
+    display:grid; place-items:center;
+  }
+  .pager:hover { background: var(--sage-tint); color: var(--sage-deep); border-color: var(--sage-mint); }
+  .pager:disabled { opacity:.35; cursor: default; }
+
+  /* tiles */
+  .tile {
+    position: relative; border-radius: 14px; overflow: hidden;
+    background: var(--video-bg); cursor: pointer;
+    border: 1px solid rgba(27,36,31,.18);
+    width: 100%; height: 100%;
+  }
+  .main-view .tile { border: 0; border-radius: 18px; cursor: default; }
+  .tile video { width:100%; height:100%; object-fit: cover; display:block; background: var(--video-bg); }
+  .tile .vbox { position:absolute; inset:0; }
+  .tile .vbox video { position:absolute; inset:0; }
+  .tile .v-main, .tile .v-screen { position:absolute; inset:0; }
+  .tile .v-screen { display:none; background: #0D1411; }
+  .tile.sharing .v-screen { display:block; }
+  .tile.sharing video { object-fit: contain; background:#0D1411; }
+  .tile.mirror video { transform: scaleX(-1); }
+  .tile.sharing.mirror video { transform: none; }
+  .tile .ph {
+    position:absolute; inset:0; display:none; place-items:center;
+    background: linear-gradient(160deg, #233129, #18231D 70%);
+  }
+  .tile.cam-off .ph { display:grid; }
+  .tile .ph .av { width: 64px; height: 64px; font-size: 22px; }
+  .main-view .tile .ph .av { width: 104px; height: 104px; font-size: 36px; }
+  .tile .tag {
+    position:absolute; left: 8px; bottom: 8px; z-index: 3;
+    display:flex; align-items:center; gap: 6px; max-width: calc(100% - 16px);
+    background: rgba(13,20,17,.55); color: #fff; backdrop-filter: blur(4px);
+    border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-weight: 500;
+  }
+  .tile .tag .nm { white-space: nowrap; overflow:hidden; text-overflow: ellipsis; }
+  .tile .tag .mic-ind { display:none; color: #F2A09C; flex-shrink: 0; }
+  .tile.is-muted .tag .mic-ind { display:inline-flex; }
+  .tile .pin-ind {
+    position:absolute; top: 8px; right: 8px; z-index: 3; display:none;
+    width: 24px; height: 24px; border-radius: 50%;
+    background: rgba(13,20,17,.55); color:#fff; place-items:center; backdrop-filter: blur(4px);
+  }
+  .tile.pinned .pin-ind { display: grid; }
+
+  /* bottom control bar */
+  .meet-bottom {
+    display:flex; align-items:center; gap: 12px; padding: 14px 18px 16px;
+  }
+  .meet-bottom .spacer { flex:1; }
+  .mbtn {
+    height: 48px; border: 1px solid var(--line); background: var(--surface);
+    color: var(--ink-2); display:inline-flex; align-items:center; justify-content:center;
+    border-radius: 999px; box-shadow: var(--shadow-1); flex-shrink: 0;
+    transition: background .12s, color .12s, border-color .12s, transform .08s;
+  }
+  .mbtn:active { transform: scale(.96); }
+  .mbtn.round { width: 48px; }
+  .mbtn.small { width: 40px; height: 40px; }
+  .mbtn.pill { padding: 0 22px; }
+  .mbtn:hover { background: var(--sage-tint); color: var(--sage-deep); border-color: var(--sage-mint); }
+  .mbtn.off { background: var(--danger); color: #fff; border-color: var(--danger); }
+  .mbtn.off:hover { background: #9E433F; border-color:#9E433F; color:#fff; }
+  .mbtn.on { background: var(--sage-deep); color: #fff; border-color: var(--sage-deep); }
+  .mbtn.on:hover { background: var(--sage); border-color: var(--sage); color:#fff; }
+  .mbtn.end { background: var(--danger); color:#fff; border-color: var(--danger); padding: 0 28px; }
+  .mbtn.end:hover { background: #962E2A; border-color: #7E2D2A; color: #fff; }
+  .split {
+    display:inline-flex; align-items:stretch; border: 1px solid var(--line);
+    border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-1);
+    overflow: hidden; flex-shrink: 0;
+  }
+  .split > button {
+    border: 0; background: transparent; color: var(--ink-2);
+    display:inline-flex; align-items:center; justify-content:center;
+    transition: background .12s, color .12s;
+  }
+  .split > button:hover { background: var(--sage-tint); color: var(--sage-deep); }
+  .split .main-t { width: 52px; height: 46px; }
+  .split .chev { width: 30px; height: 46px; border-left: 1px solid var(--line-2); color: var(--muted); }
+  .split.off { background: var(--danger); border-color: var(--danger); }
+  .split.off > button { color: #fff; }
+  .split.off > button:hover { background: rgba(0,0,0,.12); color: #fff; }
+  .split.off .chev { border-left-color: rgba(255,255,255,.25); }
+
+  /* device picker / people panel */
+  .float-menu {
+    position: fixed; z-index: 300;
+    background: var(--paper); border: 1px solid var(--line);
+    border-radius: var(--radius-s); box-shadow: var(--shadow-2);
+    padding: 5px; min-width: 230px; max-width: 320px;
+    display:flex; flex-direction:column;
+    animation: menu-in .12s ease-out;
+  }
+  @keyframes menu-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  .float-menu .hd { padding: 7px 10px 5px; font-size: 10.5px; letter-spacing:.08em; text-transform: uppercase; color: var(--faint); font-weight:600; }
+  .float-menu button.item {
+    border:0; background:transparent; text-align:left; border-radius: 7px;
+    padding: 8px 10px; font-size: 13px; color: var(--ink-2);
+    display:flex; align-items:center; gap: 8px;
+  }
+  .float-menu button.item:hover { background: var(--sage-tint); color: var(--sage-deep); }
+  .float-menu button.item .chk { width: 14px; flex-shrink:0; color: var(--sage); visibility: hidden; }
+  .float-menu button.item.cur .chk { visibility: visible; }
+  .float-menu button.item span.lbl { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  .people-panel {
+    position: fixed; top: 64px; right: 18px; z-index: 200;
+    width: 300px; max-height: min(64vh, 480px);
+    background: var(--paper); border: 1px solid var(--line);
+    border-radius: 16px; box-shadow: var(--shadow-2);
+    display:flex; flex-direction:column; overflow:hidden;
+    animation: menu-in .14s ease-out;
+  }
+  .people-panel .pp-hd {
+    padding: 13px 16px; border-bottom: 1px solid var(--line-2);
+    font-size: 11px; letter-spacing:.08em; text-transform:uppercase; color: var(--faint); font-weight:600;
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .people-panel .pp-hd button { border:0; background:transparent; color:var(--muted); width:24px; height:24px; border-radius: 7px; display:grid; place-items:center; }
+  .people-panel .pp-hd button:hover { background: var(--surface); color: var(--ink); }
+  .pp-list { overflow-y:auto; padding: 7px; display:flex; flex-direction:column; gap:2px; }
+  .pp-row {
+    display:flex; align-items:center; gap: 10px; padding: 7px 9px; border-radius: 9px;
+  }
+  .pp-row:hover { background: rgba(79,122,94,.06); }
+  .pp-row .av { width: 30px; height: 30px; font-size: 11.5px; }
+  .pp-row .who { flex:1; min-width:0; display:flex; flex-direction:column; line-height:1.25; }
+  .pp-row .who b { font-size: 13px; font-weight: 500; color: var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pp-row .who .sub { font-size: 10.5px; color: var(--muted); display:flex; align-items:center; gap:4px; }
+  .pp-row .host-badge { color: var(--warn); display:inline-flex; }
+  .pp-row .mic-state { color: var(--faint); display:inline-flex; flex-shrink:0; }
+  .pp-row .mic-state.muted { color: var(--danger); }
+  .pp-act {
+    width: 26px; height: 26px; border-radius: 7px; border: 0; background: transparent;
+    color: var(--muted); display:grid; place-items:center; flex-shrink: 0;
+  }
+  .pp-act:hover { background: var(--sage-tint); color: var(--sage-deep); }
+
+  /* keep off-screen tiles alive without display:none jank */
+  #park { position: fixed; left: -10000px; top: 0; width: 320px; height: 180px; overflow: hidden; opacity: 0; pointer-events: none; }
+
+  @media (max-width: 860px) {
+    .meet-body { flex-direction: column; padding: 0 10px; }
+    .stack { width: 100%; flex-direction: row; overflow-x:auto; overflow-y:hidden; }
+    .stack .tile { width: 152px; height: 86px; aspect-ratio: auto; }
+    .meet-top, .meet-bottom { padding-left: 10px; padding-right: 10px; }
+    .mbtn.pill { padding: 0 16px; }
+    .mbtn.end { padding: 0 18px; }
+    .people-panel { right: 10px; left: 10px; width: auto; }
+  }
+</style>
+</head>
+<body>
+
+  <!-- ───────── LOBBY ───────── -->
+  <div class="view" id="lobbyView" hidden>
+    <div class="lobby-top">
+      <div class="logo"></div>
+      <div class="name">Alex Meet</div>
+      <div class="spacer"></div>
+      <button class="me-chip" id="meChip" title="Sign out">
+        <span class="av" id="meAv" style="width:26px;height:26px;font-size:10.5px;background:#9AA59D"><span>?</span></span>
+        <span id="meName"></span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+      </button>
+    </div>
+    <div class="lobby-body">
+      <div class="lobby-hero">
+        <div class="emblem">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
+        </div>
+        <h2>Meet, face to face.</h2>
+        <div class="lede">Start a video meeting and share the link, or join one with a code. Up to nine people per page, audio and video.</div>
+        <div class="lobby-card">
+          <div>
+            <label class="field-label" for="backendSel">Call backend</label>
+            <div class="select-wrap">
+              <select id="backendSel">
+                <option value="mesh">Standard WebRTC — Default experience</option>
+                <option value="volc">VolcEngine WebRTC — Better performance in China</option>
+              </select>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+            <div class="backend-hint" id="backendHint"></div>
+          </div>
+          <button class="btn-new" id="newMeetingBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
+            New meeting
+          </button>
+          <div class="or-row">or join</div>
+          <div class="join-row" id="joinRow">
+            <input id="joinInput" placeholder="Enter a code or link" autocapitalize="off" autocomplete="off" spellcheck="false" />
+            <button id="joinBtn" disabled>Join</button>
+          </div>
+          <div class="lobby-err" id="lobbyErr"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ───────── PRE-JOIN GATE ───────── -->
+  <div class="view" id="gateView" hidden>
+    <div class="center-body">
+      <div class="gate-card">
+        <div class="logo"></div>
+        <h2 class="serif">Ready to join?</h2>
+        <div class="code-line" id="gateCode"></div>
+        <div class="gate-toggles">
+          <button class="mbtn round" id="gateMic" title="Microphone">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+          </button>
+          <button class="mbtn round" id="gateCam" title="Camera">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
+          </button>
+        </div>
+        <div class="gate-note" id="gateNote">Your mic and camera start on. Toggle them here or any time in the meeting.</div>
+        <button class="btn-join" id="gateJoin">Join now</button>
+        <button class="ghost-link" id="gateBack">Back to home</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ───────── INTERSTITIAL (left / error / not found) ───────── -->
+  <div class="view" id="interView" hidden>
+    <div class="center-body">
+      <div class="gate-card">
+        <div class="logo"></div>
+        <h2 class="serif" id="interTitle">You left the meeting</h2>
+        <div class="gate-note" id="interNote"></div>
+        <div class="inter-actions">
+          <button class="btn-join" id="interRejoin">Rejoin</button>
+          <button class="ghost-link" id="interHome">Back to home</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ───────── MEETING ───────── -->
+  <div class="view" id="meetView" hidden>
+    <div class="meet-top">
+      <button class="mbtn round small" id="copyLinkBtn" title="Copy meeting link" aria-label="Copy meeting link">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+      </button>
+      <span class="meet-code" id="meetCode" title="Copy meeting link"></span>
+      <span class="spacer"></span>
+      <button class="mbtn round small" id="peopleBtn" title="People" aria-label="People" style="position:relative">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span class="ppl-badge" id="pplBadge">1</span>
+      </button>
+    </div>
+
+    <div class="meet-body">
+      <div class="main-wrap" id="mainWrap">
+        <div class="main-view" id="mainView"></div>
+      </div>
+      <div class="grid-area" id="gridArea" hidden>
+        <button class="pager" id="gridPrev" aria-label="Previous page">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
+        <div class="grid-pages" id="gridPages"></div>
+        <button class="pager" id="gridNext" aria-label="Next page">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      </div>
+      <div class="stack" id="stack"></div>
+    </div>
+
+    <div class="meet-bottom">
+      <div class="split" id="micSplit">
+        <button class="main-t" id="micBtn" title="Toggle microphone" aria-label="Toggle microphone"></button>
+        <button class="chev" id="micPick" title="Choose microphone" aria-label="Choose microphone">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+        </button>
+      </div>
+      <div class="split" id="camSplit">
+        <button class="main-t" id="camBtn" title="Toggle camera" aria-label="Toggle camera"></button>
+        <button class="chev" id="camPick" title="Choose camera" aria-label="Choose camera">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+        </button>
+      </div>
+      <button class="mbtn pill" id="shareBtn" title="Share screen" aria-label="Share screen">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 10 3-3 3 3"/><path d="M12 13V7"/><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M12 17v4"/><path d="M8 21h8"/></svg>
+      </button>
+      <button class="mbtn round" id="gridBtn" title="Grid view" aria-label="Grid view">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+      </button>
+      <span class="spacer"></span>
+      <button class="mbtn end" id="endBtn" title="Leave meeting" aria-label="Leave meeting">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)"/></svg>
+      </button>
+    </div>
+
+    <!-- People panel -->
+    <div class="people-panel" id="peoplePanel" hidden>
+      <div class="pp-hd">
+        <span>In this meeting · <span id="ppCount"></span></span>
+        <button id="ppClose" aria-label="Close">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="pp-list" id="ppList"></div>
+    </div>
+  </div>
+
+  <div id="park"></div>
+  <div id="audioPool" style="display:none"></div>
+  <div class="toast-stack" id="toasts"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ──────── Constants ────────
+  const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  const PEER_COLORS = ["#4F7A5E","#7BA17F","#39604A","#A3B581","#6F8A6E","#8FAE92","#5A7773","#94A36B","#5B8A6C","#6A8E5F"];
+  const BACKEND_KEY = "meet_backend";
+  const GRID_PAGE_SIZE = 9;
+  const VOLC_SDK_SRC = "/static/vendor/volc-rtc-4.68.5.min.js";
+
+  const ICONS = {
+    mic: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
+    micOff: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 4.3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
+    cam: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>`,
+    camOff: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.66 6H14a2 2 0 0 1 2 2v2.5l5.248-3.062A.5.5 0 0 1 22 7.87v8.196"/><path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2"/><line x1="2" x2="22" y1="2" y2="22"/></svg>`,
+    micOffSmall: `<svg class="mic-ind" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M5 10v2a7 7 0 0 0 12 4.3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
+    crown: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.735H5.81a1 1 0 0 1-.957-.735L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z"/><path d="M5 21h14"/></svg>`,
+    pin: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>`,
+    check: `<svg class="chk" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`,
+    micTiny: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
+    micTinyOff: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M5 10v2a7 7 0 0 0 12 4.3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
+  };
+
+  // ──────── DOM / small helpers ────────
+  const $ = (id) => document.getElementById(id);
+
+  function hash(s) {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    return Math.abs(h);
+  }
+  function colorFor(uid) { return PEER_COLORS[hash(String(uid ?? "?")) % PEER_COLORS.length]; }
+  function shade(hex, amt) {
+    const c = hex.replace("#","");
+    const r=parseInt(c.slice(0,2),16),g=parseInt(c.slice(2,4),16),b=parseInt(c.slice(4,6),16);
+    const adj = v => Math.max(0, Math.min(255, Math.round(v + (amt<0 ? v*amt : (255-v)*amt))));
+    return `#${[adj(r),adj(g),adj(b)].map(v=>v.toString(16).padStart(2,"0")).join("")}`;
+  }
+  function initialsFor(name) {
+    if (!name) return "?";
+    const parts = String(name).split(/[\s._-]+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return (parts[0] || "?").slice(0,2).toUpperCase();
+  }
+  function escapeHTML(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+  function avatarHTML(user, sizePx, fontPx) {
+    const c = colorFor(user && user.id);
+    const img = (user && user.avatar) ? `<img src="${escapeHTML(user.avatar)}" alt=""/>` : "";
+    const initials = escapeHTML(initialsFor(user && (user.display_name || user.username)));
+    return `<span class="av" style="width:${sizePx}px;height:${sizePx}px;font-size:${fontPx}px;background:linear-gradient(135deg, ${c}, ${shade(c,-.18)})"><span>${initials}</span>${img}</span>`;
+  }
+  function toast(text, kind = "") {
+    const el = document.createElement("div");
+    el.className = "toast " + kind;
+    el.textContent = text;
+    $("toasts").appendChild(el);
+    setTimeout(() => el.remove(), 2800);
+  }
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error("failed to load " + src));
+      document.head.appendChild(s);
+    });
+  }
+
+  // ──────── State ────────
+  const state = {
+    me: null,
+    code: null,          // meeting code when on /m/<code>
+    mode: null,          // "mesh" | "volc"
+    phase: "idle",       // idle | gate | joining | inmeeting | left
+    selfPid: null,
+    hostPid: null,
+    roster: new Map(),   // pid -> {pid, user, muted, camOn, sharing}
+    order: [],           // pids in join order
+    pinned: null,        // pid pinned as main view, null = auto
+    grid: false,
+    gridPage: 0,
+    micOn: true,
+    camOn: true,
+    sharing: false,
+    micDevice: null,
+    camDevice: null,
+    // mesh
+    localStream: null,
+    screenStream: null,
+    pcs: new Map(),      // pid -> {pc, audioTx, videoTx, makingOffer, ignoreOffer, srdAnswerPending, polite}
+    // volc
+    volc: null,          // join payload {app_id, room_id, user_id, token}
+    volcEngine: null,
+    ws: null,
+    wsReady: false,
+    pendingSend: [],
+    openMenu: null,
+  };
+
+  const tiles = new Map(); // pid -> {el, vbox, video, vMain, vScreen, phAv, nameEl}
+  const audioEls = new Map(); // pid -> <audio> (mesh only)
+
+  // ──────── Views ────────
+  const VIEWS = ["lobbyView", "gateView", "interView", "meetView"];
+  function showView(id) {
+    VIEWS.forEach(v => { $(v).hidden = v !== id; });
+  }
+  function showInterstitial(title, note, canRejoin = true) {
+    $("interTitle").textContent = title;
+    $("interNote").textContent = note || "";
+    $("interRejoin").hidden = !canRejoin;
+    showView("interView");
+  }
+
+  // ──────── WS plumbing ────────
+  function wsURL() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    return `${proto}://${location.host}/ws`;
+  }
+  function connectWS() {
+    let ws;
+    try { ws = new WebSocket(wsURL()); } catch { return; }
+    state.ws = ws;
+    ws.onopen = () => {
+      if (state.ws !== ws) return;
+      state.wsReady = true;
+      state.pendingSend.forEach(p => { try { ws.send(JSON.stringify(p)); } catch {} });
+      state.pendingSend = [];
+    };
+    ws.onmessage = (e) => {
+      if (state.ws !== ws) return;
+      let data; try { data = JSON.parse(e.data); } catch { return; }
+      onWS(data);
+    };
+    ws.onclose = (e) => {
+      if (state.ws !== ws) return;
+      state.wsReady = false;
+      state.ws = null;
+      if (e.code === 4401) {
+        const next = location.pathname.startsWith("/m/") ? "?next=" + encodeURIComponent(location.pathname) : "";
+        location.href = "/login" + next;
+        return;
+      }
+      if (state.phase === "inmeeting" || state.phase === "joining") {
+        teardownMedia();
+        state.phase = "left";
+        showInterstitial("Connection lost", "The connection to the meeting server dropped.");
+      }
+    };
+    ws.onerror = () => {};
+  }
+  function send(payload) {
+    if (state.wsReady && state.ws) {
+      try { state.ws.send(JSON.stringify(payload)); } catch { state.pendingSend.push(payload); }
+    } else {
+      state.pendingSend.push(payload);
+    }
+  }
+  setInterval(() => { if (state.wsReady) send({ type: "ping" }); }, 25000);
+
+  function sendState() {
+    send({ type: "state", muted: !state.micOn, cam_on: state.camOn, sharing: state.sharing });
+  }
+
+  // ──────── WS events ────────
+  function onWS(data) {
+    if (!data || typeof data !== "object") return;
+    switch (data.type) {
+      case "hello": {
+        state.me = data.me;
+        renderMeChip();
+        break;
+      }
+      case "joined": {
+        state.mode = data.mode;
+        state.selfPid = data.self_pid;
+        state.hostPid = data.host_pid;
+        state.roster.clear();
+        state.order = [];
+        (data.participants || []).forEach(p => {
+          state.roster.set(p.pid, normPart(p));
+          state.order.push(p.pid);
+        });
+        state.volc = data.volc || null;
+        state.phase = "inmeeting";
+        showView("meetView");
+        syncTiles();
+        startMedia().catch(err => {
+          console.error("[meet] media start failed", err);
+          toast("Couldn't start audio/video", "err");
+        });
+        sendState();
+        break;
+      }
+      case "peer_joined": {
+        const p = normPart(data.participant);
+        if (p.pid === state.selfPid) break;
+        state.roster.set(p.pid, p);
+        if (!state.order.includes(p.pid)) state.order.push(p.pid);
+        syncTiles();
+        toast(`${p.user.display_name || p.user.username} joined`);
+        if (state.mode === "mesh") meshEnsurePeer(p.pid);
+        break;
+      }
+      case "peer_left": {
+        const p = state.roster.get(data.pid);
+        state.roster.delete(data.pid);
+        state.order = state.order.filter(x => x !== data.pid);
+        if (state.pinned === data.pid) state.pinned = null;
+        meshDropPeer(data.pid);
+        syncTiles();
+        if (p) toast(`${p.user.display_name || p.user.username} left`);
+        break;
+      }
+      case "peer_state": {
+        const p = state.roster.get(data.pid);
+        if (!p) break;
+        p.muted = !!data.muted;
+        p.camOn = !!data.cam_on;
+        p.sharing = !!data.sharing;
+        updateTile(data.pid);
+        layout(); // sharing may change the auto main view
+        renderPeople();
+        break;
+      }
+      case "signal": {
+        meshOnSignal(data.from, data.payload);
+        break;
+      }
+      case "host_changed": {
+        state.hostPid = data.host_pid;
+        if (state.hostPid === state.selfPid) toast("You are now the host", "ok");
+        renderPeople();
+        break;
+      }
+      case "force_mute": {
+        if (state.micOn) {
+          setMic(false);
+          toast("The host muted your microphone", "warn");
+        }
+        break;
+      }
+      case "error": {
+        if (state.phase === "joining") {
+          state.phase = "left";
+          showInterstitial("Can't join", data.message || "Something went wrong.", false);
+        } else {
+          toast(data.message || "Error", "err");
+        }
+        break;
+      }
+      case "pong":
+        break;
+    }
+  }
+
+  function normPart(p) {
+    return {
+      pid: p.pid,
+      user: p.user || { id: null, username: "?", display_name: "?" },
+      muted: !!p.muted,
+      camOn: !!p.cam_on,
+      sharing: !!p.sharing,
+    };
+  }
+
+  function renderMeChip() {
+    if (!state.me) return;
+    $("meAv").outerHTML = avatarHTML(state.me, 26, 10.5).replace("<span class=\"av\"", "<span class=\"av\" id=\"meAv\"");
+    $("meName").textContent = state.me.display_name || state.me.username;
+  }
+
+  // ──────── Tiles ────────
+  function makeTile(p) {
+    const el = document.createElement("div");
+    el.className = "tile cam-off";
+    el.dataset.pid = p.pid;
+    const isSelf = p.pid === state.selfPid;
+    el.innerHTML = `
+      <div class="vbox">${state.mode === "volc" ? `<div class="v-main"></div><div class="v-screen"></div>` : ""}</div>
+      <div class="ph">${avatarHTML(p.user, 64, 22).replace("class=\"av\"", "class=\"av ph-av\"")}</div>
+      <div class="tag">
+        ${ICONS.micOffSmall}
+        <span class="nm"></span>
+      </div>
+      <div class="pin-ind">${ICONS.pin}</div>`;
+    const t = {
+      el,
+      vbox: el.querySelector(".vbox"),
+      vMain: el.querySelector(".v-main"),
+      vScreen: el.querySelector(".v-screen"),
+      nameEl: el.querySelector(".nm"),
+      video: null,
+    };
+    if (state.mode === "mesh") {
+      const v = document.createElement("video");
+      v.autoplay = true; v.playsInline = true; v.muted = true;
+      t.vbox.appendChild(v);
+      t.video = v;
+    }
+    el.addEventListener("click", () => onTileClick(p.pid));
+    tiles.set(p.pid, t);
+    updateTile(p.pid);
+    return t;
+  }
+
+  function updateTile(pid) {
+    const t = tiles.get(pid);
+    const p = state.roster.get(pid);
+    if (!t || !p) return;
+    const isSelf = pid === state.selfPid;
+    t.nameEl.textContent = (p.user.display_name || p.user.username) + (isSelf ? " (You)" : "");
+    t.el.classList.toggle("is-muted", !!p.muted);
+    t.el.classList.toggle("sharing", !!p.sharing);
+    t.el.classList.toggle("cam-off", !p.camOn && !p.sharing);
+    t.el.classList.toggle("mirror", isSelf && state.mode === "mesh" && !p.sharing);
+    t.el.classList.toggle("pinned", state.pinned === pid);
+  }
+
+  // Create/remove tile elements to match the roster, then lay out.
+  function syncTiles() {
+    for (const pid of state.order) {
+      const p = state.roster.get(pid);
+      if (p && !tiles.has(pid)) makeTile(p);
+    }
+    for (const [pid, t] of tiles) {
+      if (!state.roster.has(pid)) {
+        t.el.remove();
+        tiles.delete(pid);
+      }
+      else updateTile(pid);
+    }
+    for (const [pid, a] of audioEls) {
+      if (!state.roster.has(pid)) { a.remove(); audioEls.delete(pid); }
+    }
+    $("pplBadge").textContent = String(state.roster.size);
+    layout();
+    renderPeople();
+  }
+
+  function autoMainPid() {
+    // Prefer whoever shares a screen, then the first remote, then self.
+    for (const pid of state.order) {
+      const p = state.roster.get(pid);
+      if (p && p.sharing) return pid;
+    }
+    for (const pid of state.order) {
+      if (pid !== state.selfPid) return pid;
+    }
+    return state.selfPid;
+  }
+
+  function onTileClick(pid) {
+    const t = tiles.get(pid);
+    if (!t) return;
+    if (t.el.parentElement === $("mainView")) {
+      state.pinned = null; // clicking the main view unpins
+    } else {
+      state.pinned = pid;
+      state.grid = false;
+    }
+    layout();
+  }
+
+  // layout moves tile elements between the main view, the right stack, the
+  // grid pages, and the off-screen park (media keeps playing when parked).
+  function layout() {
+    const main = $("mainView"), stack = $("stack"), gridPages = $("gridPages"), park = $("park");
+    const pids = state.order.filter(pid => state.roster.has(pid));
+    const useGrid = state.grid && pids.length > 0;
+
+    $("mainWrap").hidden = useGrid;
+    stack.hidden = useGrid;
+    $("gridArea").hidden = !useGrid;
+    $("gridBtn").classList.toggle("on", state.grid);
+
+    if (useGrid) {
+      const pages = Math.max(1, Math.ceil(pids.length / GRID_PAGE_SIZE));
+      state.gridPage = Math.min(state.gridPage, pages - 1);
+      const start = state.gridPage * GRID_PAGE_SIZE;
+      const visible = pids.slice(start, start + GRID_PAGE_SIZE);
+      const cols = Math.ceil(Math.sqrt(visible.length));
+      const pct = Math.floor(100 / cols);
+      for (const pid of pids) {
+        const t = tiles.get(pid);
+        if (!t) continue;
+        if (visible.includes(pid)) {
+          t.el.style.width = `calc(${pct}% - 12px)`;
+          if (t.el.parentElement !== gridPages) gridPages.appendChild(t.el);
+        } else {
+          t.el.style.width = "";
+          if (t.el.parentElement !== park) park.appendChild(t.el);
+        }
+      }
+      // Keep page order stable.
+      visible.forEach(pid => { const t = tiles.get(pid); if (t) gridPages.appendChild(t.el); });
+      $("gridPrev").disabled = state.gridPage <= 0;
+      $("gridNext").disabled = state.gridPage >= pages - 1;
+      $("gridPrev").parentElement.querySelectorAll(".pager").forEach(b => b.hidden = pages <= 1);
+    } else {
+      const mainPid = (state.pinned != null && state.roster.has(state.pinned)) ? state.pinned : autoMainPid();
+      for (const pid of pids) {
+        const t = tiles.get(pid);
+        if (!t) continue;
+        t.el.style.width = "";
+        if (pid === mainPid) {
+          if (t.el.parentElement !== main) main.appendChild(t.el);
+        } else if (t.el.parentElement !== stack) {
+          stack.appendChild(t.el);
+        }
+      }
+      // Stable stack order (join order, skipping the main tile).
+      pids.forEach(pid => {
+        if (pid === mainPid) return;
+        const t = tiles.get(pid);
+        if (t) stack.appendChild(t.el);
+      });
+    }
+    pids.forEach(updateTile);
+  }
+
+  $("gridBtn").addEventListener("click", () => { state.grid = !state.grid; state.gridPage = 0; layout(); });
+  $("gridPrev").addEventListener("click", () => { state.gridPage = Math.max(0, state.gridPage - 1); layout(); });
+  $("gridNext").addEventListener("click", () => { state.gridPage = state.gridPage + 1; layout(); });
+
+  // ──────── People panel ────────
+  $("peopleBtn").addEventListener("click", () => {
+    const panel = $("peoplePanel");
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) renderPeople();
+  });
+  $("ppClose").addEventListener("click", () => { $("peoplePanel").hidden = true; });
+
+  function renderPeople() {
+    const panel = $("peoplePanel");
+    if (panel.hidden) return;
+    $("ppCount").textContent = String(state.roster.size);
+    const list = $("ppList");
+    list.innerHTML = "";
+    const meHost = state.hostPid === state.selfPid;
+    for (const pid of state.order) {
+      const p = state.roster.get(pid);
+      if (!p) continue;
+      const isSelf = pid === state.selfPid;
+      const row = document.createElement("div");
+      row.className = "pp-row";
+      row.innerHTML = `
+        ${avatarHTML(p.user, 30, 11.5)}
+        <div class="who">
+          <b>${escapeHTML(p.user.display_name || p.user.username)}${isSelf ? " (You)" : ""}</b>
+          <span class="sub">
+            ${state.hostPid === pid ? `<span class="host-badge" title="Host">${ICONS.crown}</span> Host ·` : ""}
+            @${escapeHTML(p.user.username)}
+          </span>
+        </div>
+        <span class="mic-state ${p.muted ? "muted" : ""}">${p.muted ? ICONS.micTinyOff : ICONS.micTiny}</span>
+        ${meHost && !isSelf && !p.muted ? `<button class="pp-act" data-act="mute" title="Mute">${ICONS.micTinyOff}</button>` : ""}
+        ${meHost && !isSelf ? `<button class="pp-act" data-act="host" title="Make host">${ICONS.crown}</button>` : ""}`;
+      row.querySelectorAll(".pp-act").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const act = btn.getAttribute("data-act");
+          if (act === "mute") send({ type: "host_mute", pid });
+          if (act === "host") send({ type: "host_transfer", pid });
+        });
+      });
+      list.appendChild(row);
+    }
+  }
+
+  // ──────── Copy link ────────
+  function copyLink() {
+    const url = `${location.origin}/m/${state.code}`;
+    (navigator.clipboard?.writeText(url) || Promise.reject())
+      .then(() => toast("Meeting link copied", "ok"))
+      .catch(() => toast(url, "warn"));
+  }
+  $("copyLinkBtn").addEventListener("click", copyLink);
+  $("meetCode").addEventListener("click", copyLink);
+
+  // ──────── Controls ────────
+  function updateControls() {
+    $("micBtn").innerHTML = state.micOn ? ICONS.mic : ICONS.micOff;
+    $("camBtn").innerHTML = state.camOn ? ICONS.cam : ICONS.camOff;
+    $("micSplit").classList.toggle("off", !state.micOn);
+    $("camSplit").classList.toggle("off", !state.camOn);
+    $("shareBtn").classList.toggle("on", state.sharing);
+    $("micBtn").title = state.micOn ? "Turn off microphone" : "Turn on microphone";
+    $("camBtn").title = state.camOn ? "Turn off camera" : "Turn on camera";
+  }
+
+  function updateSelfRoster() {
+    const p = state.roster.get(state.selfPid);
+    if (p) { p.muted = !state.micOn; p.camOn = state.camOn; p.sharing = state.sharing; }
+    updateControls();
+    if (state.selfPid != null) updateTile(state.selfPid);
+    layout();
+    renderPeople();
+    sendState();
+  }
+
+  async function setMic(on) {
+    if (state.mode === "volc") {
+      try {
+        if (on) await state.volcEngine.startAudioCapture(state.micDevice || undefined);
+        else await state.volcEngine.stopAudioCapture();
+        state.micOn = on;
+      } catch (err) {
+        console.warn("[volc] mic toggle failed", err);
+        toast("Microphone unavailable", "err");
+        state.micOn = false;
+      }
+    } else {
+      let track = state.localStream?.getAudioTracks()[0];
+      if (on && !track) {
+        track = await acquireTrack("audio", state.micDevice);
+        if (!track) { toast("Microphone unavailable", "err"); state.micOn = false; updateSelfRoster(); return; }
+      }
+      if (track) track.enabled = on;
+      state.micOn = on && !!track;
+    }
+    updateSelfRoster();
+  }
+
+  async function setCam(on) {
+    if (state.mode === "volc") {
+      try {
+        if (on) {
+          await state.volcEngine.startVideoCapture(state.camDevice || undefined);
+          attachVolcLocalMain();
+        } else {
+          await state.volcEngine.stopVideoCapture();
+        }
+        state.camOn = on;
+      } catch (err) {
+        console.warn("[volc] cam toggle failed", err);
+        toast("Camera unavailable", "err");
+        state.camOn = false;
+      }
+    } else {
+      let track = state.localStream?.getVideoTracks()[0];
+      if (on && !track) {
+        track = await acquireTrack("video", state.camDevice);
+        if (!track) { toast("Camera unavailable", "err"); state.camOn = false; updateSelfRoster(); return; }
+      }
+      if (track) track.enabled = on;
+      state.camOn = on && !!track;
+      refreshSelfPreview();
+    }
+    updateSelfRoster();
+  }
+
+  $("micBtn").addEventListener("click", () => setMic(!state.micOn));
+  $("camBtn").addEventListener("click", () => setCam(!state.camOn));
+  $("shareBtn").addEventListener("click", () => state.sharing ? stopShare() : startShare());
+  $("endBtn").addEventListener("click", leaveMeeting);
+
+  function leaveMeeting() {
+    send({ type: "leave" });
+    teardownMedia();
+    state.phase = "left";
+    showInterstitial("You left the meeting", "The meeting continues for the other participants.");
+  }
+  $("interRejoin").addEventListener("click", () => location.reload());
+  $("interHome").addEventListener("click", () => { location.href = "/"; });
+
+  window.addEventListener("pagehide", () => {
+    if (state.phase === "inmeeting") {
+      try { state.ws && state.ws.send(JSON.stringify({ type: "leave" })); } catch {}
+    }
+  });
+
+  // ──────── Device pickers ────────
+  function closeMenu() {
+    if (state.openMenu) { state.openMenu.remove(); state.openMenu = null; }
+  }
+  document.addEventListener("click", (e) => {
+    if (state.openMenu && !e.target.closest(".float-menu") && !e.target.closest(".chev")) closeMenu();
+  });
+
+  async function listDevices(kind) {
+    if (state.mode === "volc") {
+      try {
+        return kind === "audioinput"
+          ? await VERTC.enumerateAudioCaptureDevices()
+          : await VERTC.enumerateVideoCaptureDevices();
+      } catch { return []; }
+    }
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      return all.filter(d => d.kind === kind);
+    } catch { return []; }
+  }
+
+  async function showDevicePicker(anchor, kind) {
+    closeMenu();
+    const devices = (await listDevices(kind)).filter(d => d.deviceId);
+    const menu = document.createElement("div");
+    menu.className = "float-menu";
+    const current = kind === "audioinput" ? state.micDevice : state.camDevice;
+    menu.innerHTML = `<div class="hd">${kind === "audioinput" ? "Microphone" : "Camera"}</div>`;
+    if (!devices.length) {
+      menu.innerHTML += `<button class="item" disabled><span class="lbl">No devices found</span></button>`;
+    }
+    devices.forEach((d, i) => {
+      const btn = document.createElement("button");
+      btn.className = "item" + ((current ? d.deviceId === current : i === 0) ? " cur" : "");
+      btn.innerHTML = `${ICONS.check}<span class="lbl">${escapeHTML(d.label || `Device ${i + 1}`)}</span>`;
+      btn.addEventListener("click", () => {
+        closeMenu();
+        if (kind === "audioinput") setMicDevice(d.deviceId);
+        else setCamDevice(d.deviceId);
+      });
+      menu.appendChild(btn);
+    });
+    document.body.appendChild(menu);
+    const r = anchor.getBoundingClientRect();
+    const mr = menu.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - mr.width - 8)) + "px";
+    menu.style.top = (r.top - mr.height - 8) + "px";
+    state.openMenu = menu;
+  }
+  $("micPick").addEventListener("click", (e) => { e.stopPropagation(); showDevicePicker(e.currentTarget, "audioinput"); });
+  $("camPick").addEventListener("click", (e) => { e.stopPropagation(); showDevicePicker(e.currentTarget, "videoinput"); });
+
+  async function setMicDevice(deviceId) {
+    state.micDevice = deviceId;
+    if (state.mode === "volc") {
+      try { await state.volcEngine.setAudioCaptureDevice(deviceId); toast("Microphone switched", "ok"); }
+      catch { toast("Couldn't switch microphone", "err"); }
+      return;
+    }
+    const track = await acquireTrack("audio", deviceId, true);
+    if (track) { track.enabled = state.micOn; toast("Microphone switched", "ok"); }
+    else toast("Couldn't switch microphone", "err");
+  }
+
+  async function setCamDevice(deviceId) {
+    state.camDevice = deviceId;
+    if (state.mode === "volc") {
+      try { await state.volcEngine.setVideoCaptureDevice(deviceId); toast("Camera switched", "ok"); }
+      catch { toast("Couldn't switch camera", "err"); }
+      return;
+    }
+    const track = await acquireTrack("video", deviceId, true);
+    if (track) { track.enabled = state.camOn; refreshSelfPreview(); toast("Camera switched", "ok"); }
+    else toast("Couldn't switch camera", "err");
+  }
+
+  // ──────── Mesh media ────────
+  // acquireTrack gets a fresh audio/video track (optionally a specific
+  // device), installs it into localStream and every sender, and returns it.
+  async function acquireTrack(kind, deviceId, replaceExisting = false) {
+    const constraint = deviceId ? { deviceId: { exact: deviceId } } : true;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(kind === "audio" ? { audio: constraint } : { video: constraint });
+    } catch (err) {
+      console.warn("[mesh] getUserMedia failed", err);
+      return null;
+    }
+    const track = kind === "audio" ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0];
+    if (!track) return null;
+    if (!state.localStream) state.localStream = new MediaStream();
+    const old = kind === "audio" ? state.localStream.getAudioTracks()[0] : state.localStream.getVideoTracks()[0];
+    if (old) {
+      state.localStream.removeTrack(old);
+      try { old.stop(); } catch {}
+    }
+    state.localStream.addTrack(track);
+    // Push the new track to every peer connection (replaceTrack avoids renegotiation).
+    for (const peer of state.pcs.values()) {
+      const tx = kind === "audio" ? peer.audioTx : peer.videoTx;
+      // While screen-sharing the video sender carries the screen track.
+      if (kind === "video" && state.sharing) continue;
+      if (tx) tx.sender.replaceTrack(track).catch(() => {});
+    }
+    if (kind === "video") refreshSelfPreview();
+    return track;
+  }
+
+  async function ensureLocalMedia() {
+    if (state.localStream) return;
+    const want = { audio: state.micOn, video: state.camOn };
+    state.localStream = new MediaStream();
+    if (!want.audio && !want.video) return;
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: want.audio, video: want.video });
+      s.getTracks().forEach(t => state.localStream.addTrack(t));
+    } catch (err) {
+      // Retry audio-only before giving up (camera may be missing/blocked).
+      if (want.video && want.audio) {
+        try {
+          const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+          s.getTracks().forEach(t => state.localStream.addTrack(t));
+        } catch {}
+      }
+    }
+    state.micOn = state.micOn && state.localStream.getAudioTracks().length > 0;
+    state.camOn = state.camOn && state.localStream.getVideoTracks().length > 0;
+    if (!state.micOn && !state.camOn) toast("Joined without mic and camera", "warn");
+  }
+
+  function refreshSelfPreview() {
+    const t = tiles.get(state.selfPid);
+    if (!t || !t.video) return;
+    const src = state.sharing && state.screenStream ? state.screenStream : state.localStream;
+    if (t.video.srcObject !== src) t.video.srcObject = src;
+  }
+
+  function meshEnsurePeer(pid) {
+    if (state.mode !== "mesh" || pid === state.selfPid || state.pcs.has(pid)) return;
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const peer = {
+      pc,
+      polite: state.selfPid > pid, // newcomer (higher pid) yields on glare
+      makingOffer: false,
+      ignoreOffer: false,
+      srdAnswerPending: false,
+      audioTx: null,
+      videoTx: null,
+    };
+    const stream = state.localStream || new MediaStream();
+    const at = stream.getAudioTracks()[0] || null;
+    const shareTrack = state.sharing && state.screenStream ? state.screenStream.getVideoTracks()[0] : null;
+    const vt = shareTrack || stream.getVideoTracks()[0] || null;
+    // Transceivers are created up-front in sendrecv so toggling devices later
+    // is always replaceTrack — never a renegotiation.
+    peer.audioTx = at ? pc.addTransceiver(at, { streams: [stream] }) : pc.addTransceiver("audio");
+    peer.videoTx = vt ? pc.addTransceiver(vt, { streams: [stream] }) : pc.addTransceiver("video");
+
+    pc.onnegotiationneeded = async () => {
+      try {
+        peer.makingOffer = true;
+        await pc.setLocalDescription();
+        send({ type: "signal", to: pid, payload: { description: pc.localDescription } });
+      } catch (err) {
+        console.warn("[mesh] negotiation failed", err);
+      } finally {
+        peer.makingOffer = false;
+      }
+    };
+    pc.onicecandidate = ({ candidate }) => {
+      send({ type: "signal", to: pid, payload: { candidate } });
+    };
+    pc.ontrack = (ev) => {
+      const t = tiles.get(pid);
+      const remote = (ev.streams && ev.streams[0]) || new MediaStream([ev.track]);
+      if (t && t.video && t.video.srcObject !== remote) t.video.srcObject = remote;
+      if (ev.track.kind === "audio") {
+        let a = audioEls.get(pid);
+        if (!a) {
+          a = document.createElement("audio");
+          a.autoplay = true;
+          $("audioPool").appendChild(a);
+          audioEls.set(pid, a);
+        }
+        if (a.srcObject !== remote) a.srcObject = remote;
+        a.play().catch(() => {});
+      }
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed") {
+        try { pc.restartIce(); } catch {}
+      }
+    };
+    state.pcs.set(pid, peer);
+  }
+
+  function meshDropPeer(pid) {
+    const peer = state.pcs.get(pid);
+    if (!peer) return;
+    try { peer.pc.close(); } catch {}
+    state.pcs.delete(pid);
+  }
+
+  // Perfect negotiation (MDN pattern) — keeps the mesh stable under glare.
+  async function meshOnSignal(from, payload) {
+    if (state.mode !== "mesh" || !payload) return;
+    meshEnsurePeer(from);
+    const peer = state.pcs.get(from);
+    if (!peer) return;
+    const pc = peer.pc;
+    try {
+      if (payload.description) {
+        const description = payload.description;
+        const readyForOffer = !peer.makingOffer && (pc.signalingState === "stable" || peer.srdAnswerPending);
+        const offerCollision = description.type === "offer" && !readyForOffer;
+        peer.ignoreOffer = !peer.polite && offerCollision;
+        if (peer.ignoreOffer) return;
+        peer.srdAnswerPending = description.type === "answer";
+        await pc.setRemoteDescription(description);
+        peer.srdAnswerPending = false;
+        if (description.type === "offer") {
+          await pc.setLocalDescription();
+          send({ type: "signal", to: from, payload: { description: pc.localDescription } });
+        }
+      } else if (payload.candidate !== undefined) {
+        try {
+          await pc.addIceCandidate(payload.candidate || undefined);
+        } catch (err) {
+          if (!peer.ignoreOffer) console.warn("[mesh] addIceCandidate", err);
+        }
+      }
+    } catch (err) {
+      console.warn("[mesh] signal handling failed", err);
+    }
+  }
+
+  // ──────── Screen share ────────
+  async function startShare() {
+    if (state.mode === "volc") {
+      // The SDK runs its own capture flow (one picker dialog).
+      try {
+        await state.volcEngine.startScreenCapture();
+        await state.volcEngine.publishScreen(VERTC.MediaType.VIDEO);
+        const t = tiles.get(state.selfPid);
+        if (t) {
+          state.volcEngine.setLocalVideoPlayer(VERTC.StreamIndex.STREAM_INDEX_SCREEN, {
+            renderDom: t.vScreen, userId: state.volc.user_id,
+          });
+        }
+        state.sharing = true;
+      } catch (err) {
+        console.warn("[volc] screen share failed", err);
+        return; // user cancelled the picker, or capture failed
+      }
+    } else {
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        toast("Screen sharing isn't supported here", "err");
+        return;
+      }
+      let ds;
+      try {
+        ds = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      } catch { return; } // user cancelled the picker
+      const track = ds.getVideoTracks()[0];
+      if (!track) return;
+      state.screenStream = ds;
+      for (const peer of state.pcs.values()) {
+        if (peer.videoTx) peer.videoTx.sender.replaceTrack(track).catch(() => {});
+      }
+      state.sharing = true;
+      refreshSelfPreview();
+      track.onended = () => stopShare();
+    }
+    updateSelfRoster();
+  }
+
+  async function stopShare() {
+    if (!state.sharing) return;
+    if (state.mode === "volc") {
+      try { await state.volcEngine.unpublishScreen(VERTC.MediaType.VIDEO); } catch {}
+      try { await state.volcEngine.stopScreenCapture(); } catch {}
+      const t = tiles.get(state.selfPid);
+      if (t && t.vScreen) t.vScreen.innerHTML = "";
+    } else {
+      if (state.screenStream) {
+        try { state.screenStream.getTracks().forEach(t => t.stop()); } catch {}
+      }
+      state.screenStream = null;
+      const cam = state.localStream?.getVideoTracks()[0] || null;
+      for (const peer of state.pcs.values()) {
+        if (peer.videoTx) peer.videoTx.sender.replaceTrack(cam).catch(() => {});
+      }
+    }
+    state.sharing = false;
+    refreshSelfPreview();
+    updateSelfRoster();
+  }
+
+  // ──────── VolcEngine media ────────
+  function pidFromVolcUid(uid) {
+    const n = parseInt(String(uid || "").replace(/^p/, ""), 10);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function attachVolcLocalMain() {
+    const t = tiles.get(state.selfPid);
+    if (!t || !state.volcEngine) return;
+    try {
+      state.volcEngine.setLocalVideoPlayer(VERTC.StreamIndex.STREAM_INDEX_MAIN, {
+        renderDom: t.vMain, userId: state.volc.user_id,
+      });
+    } catch (err) { console.warn("[volc] local player failed", err); }
+  }
+
+  function attachVolcRemote(pid, screen) {
+    const t = tiles.get(pid);
+    if (!t || !state.volcEngine) return;
+    try {
+      state.volcEngine.setRemoteVideoPlayer(
+        screen ? VERTC.StreamIndex.STREAM_INDEX_SCREEN : VERTC.StreamIndex.STREAM_INDEX_MAIN,
+        { renderDom: screen ? t.vScreen : t.vMain, userId: "p" + pid },
+      );
+    } catch (err) { console.warn("[volc] remote player failed", err); }
+  }
+
+  async function volcStart(info) {
+    await loadScript(VOLC_SDK_SRC);
+    const engine = VERTC.createEngine(info.app_id);
+    state.volcEngine = engine;
+    // Defensive: only register events this SDK build actually exposes.
+    const on = (name, fn) => { const ev = VERTC.events && VERTC.events[name]; if (ev) engine.on(ev, fn); };
+
+    on("onUserPublishStream", (e) => {
+      const pid = pidFromVolcUid(e.userId);
+      if (pid != null && (e.mediaType & VERTC.MediaType.VIDEO)) attachVolcRemote(pid, false);
+    });
+    on("onUserPublishScreen", (e) => {
+      const pid = pidFromVolcUid(e.userId);
+      if (pid != null) attachVolcRemote(pid, true);
+    });
+    on("onUserUnpublishScreen", (e) => {
+      const pid = pidFromVolcUid(e.userId);
+      const t = pid != null && tiles.get(pid);
+      if (t && t.vScreen) t.vScreen.innerHTML = "";
+    });
+    on("onTrackEnded", (e) => {
+      // Browser-level "Stop sharing" while we publish a screen stream.
+      if (state.sharing && e && (e.streamIndex === VERTC.StreamIndex.STREAM_INDEX_SCREEN
+          || /screen/i.test(String(e.trackKind || "")))) {
+        stopShare();
+      }
+    });
+    on("onAutoplayFailed", () => {
+      toast("Click anywhere to enable audio", "warn");
+      const resume = () => { try { engine.play && engine.play(); } catch {} document.removeEventListener("click", resume); };
+      document.addEventListener("click", resume);
+    });
+    on("onError", (e) => {
+      console.error("[volc] engine error", e);
+    });
+
+    await engine.joinRoom(info.token, info.room_id, { userId: info.user_id }, {
+      isAutoPublish: true,
+      isAutoSubscribeAudio: true,
+      isAutoSubscribeVideo: true,
+    });
+
+    if (state.micOn) {
+      try { await engine.startAudioCapture(); } catch (err) { console.warn("[volc] mic", err); state.micOn = false; }
+    }
+    if (state.camOn) {
+      try { await engine.startVideoCapture(); attachVolcLocalMain(); } catch (err) { console.warn("[volc] cam", err); state.camOn = false; }
+    }
+    if (!state.micOn && !state.camOn) toast("Joined without mic and camera", "warn");
+    updateSelfRoster();
+  }
+
+  // ──────── Media lifecycle ────────
+  async function startMedia() {
+    if (state.mode === "volc") {
+      await volcStart(state.volc);
+    } else {
+      await ensureLocalMedia();
+      refreshSelfPreview();
+      for (const pid of state.order) {
+        if (pid !== state.selfPid) meshEnsurePeer(pid);
+      }
+      updateSelfRoster();
+    }
+  }
+
+  function teardownMedia() {
+    for (const [pid, peer] of state.pcs) {
+      try { peer.pc.close(); } catch {}
+    }
+    state.pcs.clear();
+    for (const [, a] of audioEls) a.remove();
+    audioEls.clear();
+    if (state.screenStream) { try { state.screenStream.getTracks().forEach(t => t.stop()); } catch {} }
+    state.screenStream = null;
+    if (state.localStream) { try { state.localStream.getTracks().forEach(t => t.stop()); } catch {} }
+    state.localStream = null;
+    if (state.volcEngine) {
+      const eng = state.volcEngine;
+      state.volcEngine = null;
+      (async () => {
+        try { await eng.stopScreenCapture(); } catch {}
+        try { await eng.stopAudioCapture(); } catch {}
+        try { await eng.stopVideoCapture(); } catch {}
+        try { await eng.leaveRoom(); } catch {}
+        try { VERTC.destroyEngine(eng); } catch {}
+      })();
+    }
+    state.sharing = false;
+  }
+
+  // ──────── Lobby ────────
+  const BACKEND_HINTS = {
+    mesh: "Peer-to-peer media between participants. Best for small calls outside China.",
+    volc: "Media is carried by VolcEngine's network — smoother when participants are in China.",
+  };
+  function initLobby() {
+    showView("lobbyView");
+    const sel = $("backendSel");
+    try { sel.value = localStorage.getItem(BACKEND_KEY) || "mesh"; } catch {}
+    if (!sel.value) sel.value = "mesh";
+    $("backendHint").textContent = BACKEND_HINTS[sel.value];
+    sel.addEventListener("change", () => {
+      try { localStorage.setItem(BACKEND_KEY, sel.value); } catch {}
+      $("backendHint").textContent = BACKEND_HINTS[sel.value];
+    });
+
+    $("newMeetingBtn").addEventListener("click", async () => {
+      const btn = $("newMeetingBtn");
+      btn.disabled = true;
+      $("lobbyErr").textContent = "";
+      try {
+        const r = await fetch("/api/meetings", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: sel.value }),
+        });
+        if (!r.ok) throw new Error();
+        const j = await r.json();
+        location.href = "/m/" + j.code;
+      } catch {
+        $("lobbyErr").textContent = "Couldn't create the meeting. Try again.";
+        btn.disabled = false;
+      }
+    });
+
+    const input = $("joinInput"), joinBtn = $("joinBtn"), row = $("joinRow");
+    const extractCode = (raw) => {
+      const m = String(raw).toLowerCase().match(/([a-z]{3}-[a-z]{4}-[a-z]{3})/);
+      return m ? m[1] : String(raw).trim().toLowerCase();
+    };
+    input.addEventListener("input", () => { joinBtn.disabled = !input.value.trim(); $("lobbyErr").textContent = ""; });
+    input.addEventListener("focus", () => row.classList.add("focused"));
+    input.addEventListener("blur",  () => row.classList.remove("focused"));
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !joinBtn.disabled) doJoin(); });
+    joinBtn.addEventListener("click", doJoin);
+    async function doJoin() {
+      const code = extractCode(input.value);
+      if (!code) return;
+      joinBtn.disabled = true;
+      try {
+        const r = await fetch("/api/meetings/" + encodeURIComponent(code), { credentials: "same-origin" });
+        if (r.status === 404) { $("lobbyErr").textContent = "No meeting with that code."; joinBtn.disabled = false; return; }
+        if (!r.ok) throw new Error();
+        location.href = "/m/" + code;
+      } catch {
+        $("lobbyErr").textContent = "Couldn't check the code. Try again.";
+        joinBtn.disabled = false;
+      }
+    }
+
+    $("meChip").addEventListener("click", async () => {
+      try { await fetch("/api/logout", { method: "POST", credentials: "same-origin" }); } catch {}
+      location.href = "/login";
+    });
+
+    fetch("/api/me", { credentials: "same-origin" })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (j && j.user) { state.me = j.user; renderMeChip(); } })
+      .catch(() => {});
+  }
+
+  // ──────── Meeting boot ────────
+  async function initMeeting(code) {
+    state.code = code;
+    $("gateCode").textContent = code;
+    $("meetCode").textContent = code;
+
+    let info;
+    try {
+      const r = await fetch("/api/meetings/" + encodeURIComponent(code), { credentials: "same-origin" });
+      if (r.status === 404) {
+        showInterstitial("Meeting not found", "This meeting may have ended, or the link is wrong.", false);
+        return;
+      }
+      if (!r.ok) throw new Error();
+      info = await r.json();
+    } catch {
+      showInterstitial("Something went wrong", "Couldn't reach the meeting server.", true);
+      return;
+    }
+    state.mode = info.mode;
+    connectWS();
+
+    // Pre-join gate — also supplies the user gesture autoplay policies want.
+    showView("gateView");
+    state.phase = "gate";
+    const gateNoteFor = () => {
+      const n = info.participants | 0;
+      return n === 0 ? "No one else is here yet." : n === 1 ? "1 person is in this meeting." : `${n} people are in this meeting.`;
+    };
+    $("gateNote").textContent = gateNoteFor();
+    const syncGate = () => {
+      $("gateMic").classList.toggle("off", !state.micOn);
+      $("gateCam").classList.toggle("off", !state.camOn);
+      $("gateMic").innerHTML = state.micOn ? ICONS.mic : ICONS.micOff;
+      $("gateCam").innerHTML = state.camOn ? ICONS.cam : ICONS.camOff;
+    };
+    $("gateMic").addEventListener("click", () => { state.micOn = !state.micOn; syncGate(); });
+    $("gateCam").addEventListener("click", () => { state.camOn = !state.camOn; syncGate(); });
+    syncGate();
+    $("gateBack").addEventListener("click", () => { location.href = "/"; });
+    $("gateJoin").addEventListener("click", async () => {
+      $("gateJoin").disabled = true;
+      state.phase = "joining";
+      if (state.mode === "mesh") {
+        await ensureLocalMedia(); // ask for devices inside the click gesture
+      }
+      updateControls();
+      send({ type: "join", code });
+    });
+    updateControls();
+  }
+
+  // ──────── Boot ────────
+  const path = location.pathname;
+  const mMatch = path.match(/^\/m\/([a-z0-9-]+)\/?$/i);
+  if (mMatch) {
+    initMeeting(mMatch[1].toLowerCase());
+  } else {
+    initLobby();
+  }
+})();
+</script>
+</body>
+</html>

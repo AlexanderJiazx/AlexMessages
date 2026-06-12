@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>AlexMessage · Calls</title>
+<title>Alex Meet</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <meta name="theme-color" content="#F1EFE6" />
 <link href="/fonts/fonts.css" rel="stylesheet" />
@@ -116,8 +116,8 @@
     <div class="brand">
       <div class="logo"></div>
       <div>
-        <h1 class="serif">AlexMessage Calls</h1>
-        <div class="net"><span class="dot"></span> Sign in to place voice calls</div>
+        <h1 class="serif">Alex Meet</h1>
+        <div class="net"><span class="dot"></span> Sign in to start or join meetings</div>
       </div>
     </div>
 
@@ -133,7 +133,7 @@
 
     <div id="msg"></div>
     <div class="hint">
-      Use your AlexMessage account. New accounts can be created from the main messages app.
+      Use your Alex Messages account. New accounts can be created from the main messages app.
     </div>
   </div>
 
@@ -142,6 +142,12 @@
   const $ = (sel) => document.querySelector(sel);
   const msgEl = $('#msg');
   const form = $('#form-login');
+
+  // Same-site path the server told us to return to (e.g. a meeting link).
+  function nextPath() {
+    const next = new URLSearchParams(location.search).get('next') || '/';
+    return next.startsWith('/') && !next.startsWith('//') ? next : '/';
+  }
 
   function showMsg(text) {
     msgEl.innerHTML = '';
@@ -171,7 +177,7 @@
       let data = null;
       try { data = await r.json(); } catch {}
       if (r.ok) {
-        window.location.href = '/';
+        window.location.href = nextPath();
       } else {
         showMsg((data && data.detail) || 'Sign-in failed');
       }

@@ -70,6 +70,7 @@ type broadcastMessage struct {
 	ReplyTo     *string             `json:"reply_to"`
 	Attachments []db.Attachment     `json:"attachments"`
 	CreatedAt   int64               `json:"created_at"`
+	EditedAt    *int64              `json:"edited_at"`
 }
 
 // ---------- handler ----------
@@ -116,6 +117,8 @@ func handleWS(c *gin.Context) {
 		switch kind {
 		case "message":
 			handleWSMessage(user.ID, data)
+		case "edit":
+			handleWSEdit(user.ID, data)
 		case "switch":
 			handleWSSwitch(client, data)
 		case "open_dm":
@@ -329,6 +332,37 @@ func handleWSMessage(userID int, data map[string]any) {
 		}
 		go maybeSendDMPush(userID, other, channel, msg)
 	}
+}
+
+// handleWSEdit rewrites the body of the user's own message and notifies both
+// DM participants. Only plain "message" rows with a non-empty new text can be
+// edited; attachments are untouched.
+func handleWSEdit(userID int, data map[string]any) {
+	msgID, _ := data["id"].(string)
+	text, _ := data["text"].(string)
+	text = truncateRunes(trimSpace(text), 4000)
+	if msgID == "" || text == "" {
+		return
+	}
+	meta, _ := db.GetMessageMeta(msgID)
+	if meta == nil || meta.Type != "message" {
+		return
+	}
+	if meta.UserID == nil || *meta.UserID != userID {
+		return
+	}
+	a, b, ok := db.ParseDMChannel(meta.Channel)
+	if !ok || (a != userID && b != userID) {
+		return
+	}
+	ts := db.NowTS()
+	if err := db.UpdateMessageText(msgID, text, ts); err != nil {
+		return
+	}
+	runtime.Broadcast(
+		gin.H{"type": "message_edited", "channel": meta.Channel, "id": msgID, "text": text, "edited_at": ts},
+		runtime.RecipientsForChannel(meta.Channel),
+	)
 }
 
 func handleWSOpenDM(client *runtime.Client, userID int, data map[string]any) {

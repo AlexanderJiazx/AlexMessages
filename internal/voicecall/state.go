@@ -1,19 +1,24 @@
-// Package voicecall is the AlexMessage WebRTC signaling server (mirrors
-// voicecall.py). It runs on its own port, shares the account database, and
-// relays opaque SDP/ICE between two participants while policing the
-// "one active call per user" invariant.
+// Package voicecall is the Alex Meet server: Google Meet-style multi-party
+// meetings on top of the shared AlexMessage account database. It serves the
+// lobby/meeting pages and runs the WebSocket control plane that every meeting
+// participant stays connected to, regardless of which media backend the
+// meeting uses:
 //
-// Concurrency model: the original kept all call state under a single asyncio
-// lock and `await`-ed sends while holding it. We reproduce that with callMu —
-// a single mutex guarding `calls`, `userToCall`, and per-call fields — and
-// hold it across the sends in each handler, exactly as the Python did. The one
-// exception is signaling relay, which sends after releasing the lock. Because
-// Go has true concurrency (unlike the single-threaded event loop), every
-// socket additionally carries its own write mutex so concurrent fan-outs never
+//   - "mesh"  — standard WebRTC full mesh; the control plane relays opaque
+//     SDP/ICE between participant pairs.
+//   - "volc"  — VolcEngine RTC; media flows through the VolcEngine SDK and the
+//     server only mints room tokens and keeps the roster/host state.
+//
+// Concurrency model: one goroutine per WebSocket read loop. A single mutex
+// (meetMu) guards the room registry and all room/participant fields; handlers
+// mutate under the lock, snapshot the recipients, then send after releasing
+// it. Each socket carries its own write mutex so concurrent fan-outs never
 // interleave a frame on the same connection.
 package voicecall
 
 import (
+	"crypto/rand"
+	"math/big"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -21,7 +26,7 @@ import (
 	"alexmessage/internal/db"
 )
 
-// conn wraps one voice-call WebSocket with a write mutex.
+// conn wraps one WebSocket with a write mutex.
 type conn struct {
 	ws *websocket.Conn
 	mu sync.Mutex
@@ -34,152 +39,105 @@ func (c *conn) send(payload any) bool {
 	return c.ws.WriteJSON(payload) == nil
 }
 
-// Call is a live (ringing or accepted) call. Once it resolves it is removed
-// from the registry and persisted into the calls table via finalizeCall.
-type Call struct {
-	id         int
-	callerID   int
-	calleeID   int
-	callerWS   *conn
-	calleeWS   *conn
-	state      string // "ringing" | "accepted"
-	startedAt  int64
-	answeredAt *int64
+// participant is one connection inside a room. The same account joining from
+// two tabs is two participants with distinct pids.
+type participant struct {
+	pid      int
+	user     vcUser
+	c        *conn
+	joinedAt int64
+	muted    bool
+	camOn    bool
+	sharing  bool
 }
 
-// presence tracks all open voice-call sockets, indexed by user. It guards its
-// own state with prMu, independent of callMu.
-type presenceTracker struct {
-	prMu    sync.Mutex
-	sockets map[*conn]int
-	byUser  map[int]map[*conn]struct{}
+// room is a live meeting. Rooms are in-memory only: they are created from the
+// lobby, survive briefly while empty (so a refresh doesn't kill a meeting),
+// and are pruned afterwards.
+type room struct {
+	code       string
+	mode       string // "mesh" | "volc"
+	hostPid    int    // 0 while nobody has joined yet
+	parts      map[int]*participant
+	order      []int // join order; the head inherits the host role
+	createdAt  int64
+	emptySince int64 // 0 while occupied
 }
 
-func newPresence() *presenceTracker {
-	return &presenceTracker{
-		sockets: map[*conn]int{},
-		byUser:  map[int]map[*conn]struct{}{},
-	}
-}
+const (
+	modeMesh = "mesh"
+	modeVolc = "volc"
 
-func (p *presenceTracker) add(c *conn, userID int) {
-	p.prMu.Lock()
-	defer p.prMu.Unlock()
-	p.sockets[c] = userID
-	if p.byUser[userID] == nil {
-		p.byUser[userID] = map[*conn]struct{}{}
-	}
-	p.byUser[userID][c] = struct{}{}
-}
-
-func (p *presenceTracker) remove(c *conn) (int, bool) {
-	p.prMu.Lock()
-	defer p.prMu.Unlock()
-	uid, ok := p.sockets[c]
-	if !ok {
-		return 0, false
-	}
-	delete(p.sockets, c)
-	if bucket := p.byUser[uid]; bucket != nil {
-		delete(bucket, c)
-		if len(bucket) == 0 {
-			delete(p.byUser, uid)
-		}
-	}
-	return uid, true
-}
-
-func (p *presenceTracker) socketsFor(userID int) []*conn {
-	p.prMu.Lock()
-	defer p.prMu.Unlock()
-	var out []*conn
-	for c := range p.byUser[userID] {
-		out = append(out, c)
-	}
-	return out
-}
-
-func (p *presenceTracker) isOnline(userID int) bool {
-	p.prMu.Lock()
-	defer p.prMu.Unlock()
-	return len(p.byUser[userID]) > 0
-}
-
-// ---------- process-wide state ----------
-
-var (
-	presence   = newPresence()
-	calls      = map[int]*Call{}
-	userToCall = map[int]int{}
-	callSeq    int
-	callMu     sync.Mutex // guards calls, userToCall, callSeq, and Call fields
+	// emptyRoomGraceSecs keeps an empty room joinable after the last
+	// participant leaves (covers page refreshes of a solo participant).
+	emptyRoomGraceSecs = 5 * 60
+	// unusedRoomMaxAgeSecs prunes rooms that were created but never joined.
+	unusedRoomMaxAgeSecs = 60 * 60
 )
 
-// allocCallID returns the next call id. Caller MUST hold callMu.
-func allocCallID() int {
-	callSeq++
-	return callSeq
+var (
+	meetMu   sync.Mutex // guards rooms, pidSeq, connPart and room/participant fields
+	rooms    = map[string]*room{}
+	pidSeq   int
+	connRoom = map[*conn]*room{}
+	connPart = map[*conn]*participant{}
+)
+
+// allocPid returns the next participant id. Caller MUST hold meetMu.
+func allocPid() int {
+	pidSeq++
+	return pidSeq
 }
 
-// ---------- send helpers ----------
-
-// sendToUser fans out to every open socket of a user, dropping any that fail.
-func sendToUser(userID int, payload any, exclude *conn) {
-	var dead []*conn
-	for _, c := range presence.socketsFor(userID) {
-		if c == exclude {
+// pruneRoomsLocked drops stale rooms. Caller MUST hold meetMu.
+func pruneRoomsLocked() {
+	now := db.NowTS()
+	for code, rm := range rooms {
+		if len(rm.parts) > 0 {
 			continue
 		}
-		if !c.send(payload) {
-			dead = append(dead, c)
+		if rm.emptySince != 0 && now-rm.emptySince > emptyRoomGraceSecs {
+			delete(rooms, code)
+		} else if rm.emptySince == 0 && now-rm.createdAt > unusedRoomMaxAgeSecs {
+			delete(rooms, code)
 		}
 	}
-	for _, c := range dead {
-		presence.remove(c)
+}
+
+// roomChars deliberately omits i/l/o to keep codes unambiguous when spoken.
+const roomChars = "abcdefghjkmnpqrstuvwxyz"
+
+func randLetters(n int) string {
+	out := make([]byte, n)
+	max := big.NewInt(int64(len(roomChars)))
+	for i := range out {
+		idx, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			out[i] = roomChars[0]
+			continue
+		}
+		out[i] = roomChars[idx.Int64()]
+	}
+	return string(out)
+}
+
+// newRoomCode returns an unused xxx-xxxx-xxx code. Caller MUST hold meetMu.
+func newRoomCode() string {
+	for {
+		code := randLetters(3) + "-" + randLetters(4) + "-" + randLetters(3)
+		if _, taken := rooms[code]; !taken {
+			return code
+		}
 	}
 }
 
-// persistCall writes a finalized call into the calls table. Never panics.
-func persistCall(call *Call, status string) {
-	caller := call.callerID
-	callee := call.calleeID
-	_, _ = db.InsertCall(&caller, &callee, call.startedAt, call.answeredAt, db.NowTS(), status)
-}
-
-// pushRecentCalls tells a user's open tabs that their recent-calls list changed.
-func pushRecentCalls(userID int) {
-	if !presence.isOnline(userID) {
-		return
+// participantPayload is the wire shape of one roster entry.
+func participantPayload(p *participant) map[string]any {
+	return map[string]any{
+		"pid":     p.pid,
+		"user":    p.user,
+		"muted":   p.muted,
+		"cam_on":  p.camOn,
+		"sharing": p.sharing,
 	}
-	sendToUser(userID, map[string]any{"type": "recent_changed"}, nil)
-}
-
-// finalizeCall removes a call from the registry, persists it, and notifies both
-// sides. Caller MUST hold callMu.
-func finalizeCall(call *Call, status, reason string) {
-	if _, ok := calls[call.id]; !ok {
-		return // already finalized
-	}
-	delete(calls, call.id)
-	if userToCall[call.callerID] == call.id {
-		delete(userToCall, call.callerID)
-	}
-	if userToCall[call.calleeID] == call.id {
-		delete(userToCall, call.calleeID)
-	}
-
-	persistCall(call, status)
-
-	if reason == "" {
-		reason = status
-	}
-	endPayload := map[string]any{
-		"type":    "call_ended",
-		"call_id": call.id,
-		"reason":  reason,
-	}
-	sendToUser(call.callerID, endPayload, nil)
-	sendToUser(call.calleeID, endPayload, nil)
-	pushRecentCalls(call.callerID)
-	pushRecentCalls(call.calleeID)
 }

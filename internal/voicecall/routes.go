@@ -2,9 +2,12 @@ package voicecall
 
 import (
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,27 +16,29 @@ import (
 	"alexmessage/internal/httpx"
 )
 
-// vcUser is the voice-call public user view (no bio, unlike the chat app).
+// vcUser is the Alex Meet public user view (no bio, unlike the chat app, but
+// with the avatar URL so meeting tiles can show profile photos).
 type vcUser struct {
 	ID          int    `json:"id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
+	Avatar      string `json:"avatar"`
 }
 
 func userPublic(u *db.User) vcUser {
-	return vcUser{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName}
+	return vcUser{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Avatar: u.Avatar}
 }
 
 type vcServer struct {
-	indexHTML string
+	meetHTML  string
 	loginHTML string
 }
 
-// NewEngine builds the fully wired Gin engine for the voice-call server.
+// NewEngine builds the fully wired Gin engine for the Alex Meet server.
 func NewEngine() *gin.Engine {
 	s := &vcServer{
-		indexHTML: loadHTML("voicecall.html"),
-		loginHTML: loadHTML("voicecall_login.html"),
+		meetHTML:  loadHTML("meet.html"),
+		loginHTML: loadHTML("meet_login.html"),
 	}
 
 	r := gin.New()
@@ -45,17 +50,54 @@ func NewEngine() *gin.Engine {
 	if dir := filepath.Join(db.BaseDir, "sound"); isDir(dir) {
 		mountStatic(r, "/sound", dir)
 	}
+	if dir := filepath.Join(db.BaseDir, "static"); isDir(dir) {
+		mountStatic(r, "/static", dir)
+	}
+	// Profile photos are written by the main app; serve them here too so
+	// meeting tiles can use the same /avatars/... URLs.
+	mountStatic(r, "/avatars", db.AvatarRoot)
 
 	r.GET("/", s.handleRoot)
+	r.GET("/m/:code", s.handleMeetingPage)
 	r.GET("/login", s.handleLoginPage)
 	r.POST("/api/login", handleLogin)
 	r.POST("/api/logout", handleLogout)
 	r.GET("/api/me", handleMe)
-	r.GET("/api/users/lookup", handleUsersLookup)
-	r.GET("/api/calls/recent", handleRecentCalls)
+	r.POST("/api/meetings", handleCreateMeeting)
+	r.GET("/api/meetings/:code", handleMeetingInfo)
 	r.GET("/ws", handleWS)
 
 	return r
+}
+
+// ---------- VolcEngine RTC configuration ----------
+
+func volcAppID() string  { return envOr("VOLC_RTC_APP_ID", "6a2b39c655bc950177ce22c0") }
+func volcAppKey() string { return envOr("VOLC_RTC_APP_KEY", "41353f9216a74e3fb1869164910dd5c6") }
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// volcJoinPayload mints the per-participant join credentials for a VolcEngine
+// meeting. The VolcEngine user id is "p<pid>" so clients can map media streams
+// back to roster entries.
+func volcJoinPayload(roomID string, pid int) gin.H {
+	uid := "p" + strconv.Itoa(pid)
+	exp := uint32(time.Now().Add(24 * time.Hour).Unix())
+	t := newVolcToken(volcAppID(), volcAppKey(), roomID, uid)
+	t.expireTime(exp)
+	t.addPrivilege(volcPrivPublishStream, exp)
+	t.addPrivilege(volcPrivSubscribeStream, exp)
+	return gin.H{
+		"app_id":  volcAppID(),
+		"room_id": roomID,
+		"user_id": uid,
+		"token":   t.serialize(),
+	}
 }
 
 // ---------- HTML routes ----------
@@ -66,16 +108,34 @@ func (s *vcServer) handleRoot(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/login")
 		return
 	}
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.indexHTML))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.meetHTML))
+}
+
+func (s *vcServer) handleMeetingPage(c *gin.Context) {
+	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
+	if user == nil {
+		// Send the user back to this meeting after signing in.
+		c.Redirect(http.StatusFound, "/login?next="+url.QueryEscape(c.Request.URL.Path))
+		return
+	}
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.meetHTML))
 }
 
 func (s *vcServer) handleLoginPage(c *gin.Context) {
 	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
 	if user != nil {
-		c.Redirect(http.StatusFound, "/")
+		c.Redirect(http.StatusFound, safeNext(c.Query("next")))
 		return
 	}
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.loginHTML))
+}
+
+// safeNext only allows same-site paths so /login?next= can't open-redirect.
+func safeNext(next string) string {
+	if strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") {
+		return next
+	}
+	return "/"
 }
 
 // ---------- auth ----------
@@ -132,74 +192,52 @@ func handleMe(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"user": userPublic(user), "is_admin": user.IsAdmin})
 }
 
-func handleUsersLookup(c *gin.Context) {
-	user, ok := requireUser(c)
-	if !ok {
+// ---------- meetings ----------
+
+func handleCreateMeeting(c *gin.Context) {
+	if _, ok := requireUser(c); !ok {
 		return
 	}
-	target, _ := db.GetUserByUsername(auth.NormalizeUsername(c.Query("username")))
-	if target == nil || target.Status != "approved" {
-		httpx.Error(c, http.StatusNotFound, "No user with that username")
-		return
+	m := bindJSON(c)
+	mode := strField(m, "mode")
+	if mode != modeVolc {
+		mode = modeMesh
 	}
-	if target.ID == user.ID {
-		httpx.Error(c, http.StatusBadRequest, "That's you")
-		return
+	meetMu.Lock()
+	pruneRoomsLocked()
+	code := newRoomCode()
+	rooms[code] = &room{
+		code:      code,
+		mode:      mode,
+		parts:     map[int]*participant{},
+		createdAt: db.NowTS(),
 	}
-	c.JSON(http.StatusOK, gin.H{"user": userPublic(target)})
+	meetMu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"code": code, "mode": mode})
 }
 
-// recentCall embeds db.Call and adds the resolved "other" party.
-type recentCall struct {
-	db.Call
-	Peer *vcUser `json:"peer"`
-}
-
-func handleRecentCalls(c *gin.Context) {
-	user, ok := requireUser(c)
-	if !ok {
+func handleMeetingInfo(c *gin.Context) {
+	if _, ok := requireUser(c); !ok {
 		return
 	}
-	rows, err := db.ListRecentCalls(user.ID, 50)
-	if err != nil {
-		httpx.Error(c, http.StatusInternalServerError, "internal error")
+	code := strings.ToLower(strings.TrimSpace(c.Param("code")))
+	meetMu.Lock()
+	pruneRoomsLocked()
+	rm := rooms[code]
+	var (
+		mode  string
+		count int
+	)
+	if rm != nil {
+		mode = rm.mode
+		count = len(rm.parts)
+	}
+	meetMu.Unlock()
+	if rm == nil {
+		httpx.Error(c, http.StatusNotFound, "Meeting not found")
 		return
 	}
-
-	// otherID for a row: the callee for outgoing calls, else the caller.
-	otherOf := func(r db.Call) *int {
-		if r.Direction == "outgoing" {
-			return r.CalleeID
-		}
-		return r.CallerID
-	}
-
-	others := map[int]vcUser{}
-	for _, r := range rows {
-		oid := otherOf(r)
-		if oid == nil {
-			continue
-		}
-		if _, seen := others[*oid]; seen {
-			continue
-		}
-		if u, _ := db.GetUserByID(*oid); u != nil {
-			others[*oid] = userPublic(u)
-		}
-	}
-
-	enriched := make([]recentCall, 0, len(rows))
-	for _, r := range rows {
-		var peer *vcUser
-		if oid := otherOf(r); oid != nil {
-			if u, found := others[*oid]; found {
-				p := u
-				peer = &p
-			}
-		}
-		enriched = append(enriched, recentCall{Call: r, Peer: peer})
-	}
-	c.JSON(http.StatusOK, gin.H{"calls": enriched})
+	c.JSON(http.StatusOK, gin.H{"code": code, "mode": mode, "participants": count})
 }
 
 // ---------- shared small helpers ----------
@@ -219,8 +257,6 @@ func strField(m map[string]any, key string) string {
 	}
 	return ""
 }
-
-func trimSpace(s string) string { return strings.TrimSpace(s) }
 
 func loadHTML(name string) string {
 	b, err := os.ReadFile(filepath.Join(db.BaseDir, name))

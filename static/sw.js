@@ -1,4 +1,4 @@
-// AlexMessage service worker.
+// Alex Messages service worker.
 //
 // Three responsibilities, in order of importance:
 //
@@ -51,7 +51,7 @@ function absolutize(maybePath) {
 
 self.addEventListener("push", (event) => {
   const data = safeParsePush(event);
-  const title = data.title || "AlexMessage";
+  const title = data.title || "Alex Messages";
   const body = data.body || "New message";
   const icon = absolutize(data.icon) || self.location.origin + ICON_FALLBACK;
   const badge = absolutize(data.badge) || self.location.origin + BADGE_FALLBACK;

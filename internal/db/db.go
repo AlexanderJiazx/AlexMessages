@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS messages (
     text        TEXT    NOT NULL DEFAULT '',
     reply_to    TEXT,
     created_at  INTEGER NOT NULL,
+    edited_at   INTEGER,            -- null until the author edits the message
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_msg_chan_time ON messages(channel, created_at);
@@ -170,6 +171,7 @@ func InitDB() error {
 		{"users", "avatar", "ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''"},
 		{"attachments", "width", "ALTER TABLE attachments ADD COLUMN width INTEGER NOT NULL DEFAULT 0"},
 		{"attachments", "height", "ALTER TABLE attachments ADD COLUMN height INTEGER NOT NULL DEFAULT 0"},
+		{"messages", "edited_at", "ALTER TABLE messages ADD COLUMN edited_at INTEGER"},
 	}
 	for _, m := range migrations {
 		if err := ensureColumn(m.table, m.column, m.ddl); err != nil {
@@ -448,6 +450,39 @@ func InsertMessage(msgID, channel string, userID *int, text string, replyTo *str
 		msgID, channel, nullableInt(userID), msgType, text, nullableStr(replyTo), ts,
 	)
 	return ts, err
+}
+
+// MessageMeta is the slice of a message row the edit path needs to authorize
+// and route a change.
+type MessageMeta struct {
+	ID      string
+	Channel string
+	UserID  *int
+	Type    string
+}
+
+// GetMessageMeta returns id/channel/author/type for a message, or nil if absent.
+func GetMessageMeta(msgID string) (*MessageMeta, error) {
+	row := pool.QueryRow("SELECT id, channel, user_id, type FROM messages WHERE id = ?", msgID)
+	var (
+		m      MessageMeta
+		userID sql.NullInt64
+	)
+	err := row.Scan(&m.ID, &m.Channel, &userID, &m.Type)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.UserID = nullInt64ToPtr(userID)
+	return &m, nil
+}
+
+// UpdateMessageText rewrites a message body and stamps edited_at.
+func UpdateMessageText(msgID, text string, editedAt int64) error {
+	_, err := pool.Exec("UPDATE messages SET text = ?, edited_at = ? WHERE id = ?", text, editedAt, msgID)
+	return err
 }
 
 func InsertAttachment(messageID string, userID int, name, relPath string, size int64, mime string, width, height int) error {
@@ -833,6 +868,7 @@ type HistoryMessage struct {
 	Text        string       `json:"text"`
 	ReplyTo     *string      `json:"reply_to"`
 	CreatedAt   int64        `json:"created_at"`
+	EditedAt    *int64       `json:"edited_at"`
 	Attachments []Attachment `json:"attachments"`
 }
 
@@ -851,7 +887,7 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 		args = append(args, *afterTS)
 	}
 	args = append(args, limit)
-	query := "SELECT id, channel, user_id, type, text, reply_to, created_at FROM messages WHERE " +
+	query := "SELECT id, channel, user_id, type, text, reply_to, created_at, edited_at FROM messages WHERE " +
 		strings.Join(where, " AND ") + " ORDER BY created_at DESC LIMIT ?"
 
 	rows, err := pool.Query(query, args...)
@@ -863,15 +899,17 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 		userID                 *int
 		replyTo                *string
 		createdAt              int64
+		editedAt               *int64
 	}
 	var msgs []rawMsg
 	for rows.Next() {
 		var (
-			m       rawMsg
-			userID  sql.NullInt64
-			replyTo sql.NullString
+			m        rawMsg
+			userID   sql.NullInt64
+			replyTo  sql.NullString
+			editedAt sql.NullInt64
 		)
-		if err := rows.Scan(&m.id, &m.channel, &userID, &m.typ, &m.text, &replyTo, &m.createdAt); err != nil {
+		if err := rows.Scan(&m.id, &m.channel, &userID, &m.typ, &m.text, &replyTo, &m.createdAt, &editedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -883,6 +921,7 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 			v := replyTo.String
 			m.replyTo = &v
 		}
+		m.editedAt = nullInt64ToPtrI64(editedAt)
 		msgs = append(msgs, m)
 	}
 	rows.Close()
@@ -950,6 +989,7 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 			Text:        m.text,
 			ReplyTo:     m.replyTo,
 			CreatedAt:   m.createdAt,
+			EditedAt:    m.editedAt,
 			Attachments: atts,
 		})
 	}

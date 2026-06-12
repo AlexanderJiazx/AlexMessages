@@ -411,10 +411,10 @@
 
   function renderTopbar() {
     const composerWrap = document.querySelector(".composer-wrap");
+    const chip = $("chSub");
     if (!state.activeChannel) {
       $("chName").textContent = "Messages";
-      $("chSub").textContent = "";
-      $("topbarChip").style.display = "none";
+      chip.style.display = "none";
       $("input").placeholder = "";
       composerWrap?.classList.add("hidden");
       return;
@@ -423,10 +423,9 @@
     const meta = activeChannelMeta();
     $("chName").textContent = meta.name;
     const online = state.online.has(meta.peerId);
-    $("chSub").textContent = online ? "online" : "offline";
-    $("topbarChip").style.display = "";
-    $("topbarChipText").textContent = online ? "online" : "offline";
-    $("topbarChip").querySelector(".cdot").style.background = online ? "var(--sage)" : "var(--faint)";
+    chip.style.display = "";
+    $("chSubText").textContent = online ? "online" : "offline";
+    chip.querySelector(".cdot").style.background = online ? "var(--sage)" : "var(--faint)";
     $("input").placeholder = `Message ${meta.name}`;
   }
 
@@ -658,7 +657,8 @@
     if (m.attachments && m.attachments.length) {
       attachHTML = '<div class="attachments">' + m.attachments.map(a => renderAttachment(a)).join("") + '</div>';
     }
-    const bodyHTML = m.text ? `<div class="body">${renderBody(m.text)}</div>` : "";
+    const editedTag = m.edited_at ? `<span class="edited-tag">(edited)</span>` : "";
+    const bodyHTML = m.text ? `<div class="body">${renderBody(m.text)}${editedTag}</div>` : "";
     const time = escapeHTML(fmtTime(m.created_at));
     const headBlock = isCont ? "" : (mine
       ? `<div class="head"><span class="time">${time}</span></div>`
@@ -685,6 +685,10 @@
         <button data-act="reply" title="Reply">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14l-5-5 5-5"/><path d="M4 9h9a7 7 0 0 1 7 7v3"/></svg>
         </button>
+        ${mine && m.text ? `
+        <button data-act="edit" title="Edit">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+        </button>` : ""}
         <button data-act="copy" title="Copy">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
         </button>
@@ -695,6 +699,7 @@
         e.stopPropagation();
         const act = btn.getAttribute("data-act");
         if (act === "reply") { state.replyTo = m; renderReplyBar(); $("input").focus(); }
+        if (act === "edit") startEditMessage(m);
         if (act === "copy") {
           navigator.clipboard?.writeText(m.text || "").then(() => toast("Copied")).catch(() => toast("Copy failed", true));
         }
@@ -822,6 +827,63 @@
     setTimeout(() => el.classList.remove("highlight"), 1400);
   }
 
+  // ──────── Inline message editing ────────
+  // Re-renders one message element in place (after an edit or cancel).
+  function rerenderMessage(channel, id) {
+    if (channel !== state.activeChannel) return;
+    const arr = state.history[channel] || [];
+    const idx = arr.findIndex(x => x.id === id);
+    if (idx < 0) return;
+    const el = document.getElementById("msg-" + id);
+    if (!el) return;
+    let prev = null;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (arr[i].type !== "system") { prev = arr[i]; break; }
+    }
+    el.replaceWith(renderMessage(arr[idx], prev, arr));
+    updateReadRemark();
+  }
+
+  // Swaps the bubble content for a textarea with Save/Cancel (own messages only).
+  function startEditMessage(m) {
+    const el = document.getElementById("msg-" + m.id);
+    if (!el || el.querySelector(".edit-area")) return;
+    const bubble = el.querySelector(".bubble");
+    if (!bubble) return;
+    const channel = m.channel || state.activeChannel;
+    bubble.classList.add("editing");
+    bubble.innerHTML = `
+      <textarea class="edit-area" aria-label="Edit message"></textarea>
+      <div class="edit-actions">
+        <button class="cancel">Cancel</button>
+        <button class="save">Save</button>
+      </div>`;
+    const area = bubble.querySelector(".edit-area");
+    area.value = m.text || "";
+    const autosize = () => { area.style.height = "auto"; area.style.height = Math.min(200, area.scrollHeight) + "px"; };
+    area.addEventListener("input", autosize);
+    const finish = () => rerenderMessage(channel, m.id);
+    const save = () => {
+      const text = area.value.trim();
+      if (!text || text === m.text) { finish(); return; }
+      send({ type: "edit", id: m.id, text });
+      // Optimistic local apply; the server's message_edited broadcast confirms.
+      m.text = text;
+      m.edited_at = Math.floor(Date.now() / 1000);
+      finish();
+      renderDMs();
+    };
+    bubble.querySelector(".save").addEventListener("click", save);
+    bubble.querySelector(".cancel").addEventListener("click", finish);
+    area.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); save(); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(); }
+    });
+    autosize();
+    area.focus();
+    area.setSelectionRange(area.value.length, area.value.length);
+  }
+
   // ──────── Reply bar ────────
   function renderReplyBar() {
     const bar = $("replyBar");
@@ -834,18 +896,25 @@
   $("cancelReply").addEventListener("click", () => { state.replyTo = null; renderReplyBar(); });
 
   // ──────── Pending attachments ────────
+  // Images get an iMessage-style thumbnail preview; other files keep the pill.
   function renderPendingAtt() {
     const el = $("pendingAtt");
     if (!state.pendingAtt.length) { el.style.display = "none"; el.innerHTML = ""; return; }
     el.style.display = "flex";
     el.innerHTML = "";
+    const removeBtnSVG = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>`;
     state.pendingAtt.forEach((a, i) => {
+      const isImg = (a.mime || "").startsWith("image/");
       const tag = document.createElement("span");
-      tag.className = "pending-att";
-      tag.innerHTML = `<b>${escapeHTML(a.name)}</b><span style="opacity:.7">${fmtSize(a.size)}</span>
-        <button data-i="${i}" aria-label="Remove">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>`;
+      if (isImg) {
+        tag.className = "pending-thumb";
+        tag.innerHTML = `<img src="${escapeHTML(a.url)}" alt="${escapeHTML(a.name)}" title="${escapeHTML(a.name)}"/>
+          <button data-i="${i}" aria-label="Remove">${removeBtnSVG}</button>`;
+      } else {
+        tag.className = "pending-att";
+        tag.innerHTML = `<b>${escapeHTML(a.name)}</b><span style="opacity:.7">${fmtSize(a.size)}</span>
+          <button data-i="${i}" aria-label="Remove">${removeBtnSVG}</button>`;
+      }
       tag.querySelector("button").addEventListener("click", () => {
         state.pendingAtt.splice(i, 1); renderPendingAtt(); updateSendState();
       });
@@ -886,10 +955,10 @@
       body = `Blocked by your browser. Open the site settings (click the lock icon in the address bar) to allow notifications.`;
       btn = "";
     } else if (enabled) {
-      body = `You'll get a system notification for new direct messages while AlexMessage isn't open or focused.`;
+      body = `You'll get a system notification for new direct messages while Alex Messages isn't open or focused.`;
       btn = `<button class="btn" id="notifDisable">Turn off notifications</button>`;
     } else {
-      body = `Get a system notification for new direct messages even when AlexMessage is in the background.`;
+      body = `Get a system notification for new direct messages even when Alex Messages is in the background.`;
       btn = `<button class="btn primary" id="notifEnable">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
         Enable notifications
@@ -1374,6 +1443,12 @@
       renderStream();
       if (state.sheetView === "peer" && state.sheetPeerId === p.id) renderSheet();
       if (state.sheetView === "me" && isSelf && !state.editing) renderSheet();
+    } else if (data.type === "message_edited") {
+      const arr = state.history[data.channel] || [];
+      const m = arr.find(x => x.id === data.id);
+      if (m) { m.text = data.text; m.edited_at = data.edited_at; }
+      rerenderMessage(data.channel, data.id);
+      renderDMs(); // sidebar preview may show the edited text
     } else if (data.type === "dm_read") {
       // Read receipt: the reader is data.user_id.
       const ch = data.channel;

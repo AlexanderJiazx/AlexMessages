@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,15 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// handleWS is the meeting control plane. The client protocol:
+//
+//	client → server: join {code} · leave · signal {to, payload} ·
+//	                 state {muted, cam_on, sharing} · host_mute {pid} ·
+//	                 host_transfer {pid} · ping
+//	server → client: hello {me} · joined {...} · peer_joined {participant} ·
+//	                 peer_left {pid} · signal {from, payload} ·
+//	                 peer_state {pid, ...} · host_changed {host_pid} ·
+//	                 force_mute {by} · error {message} · pong
 func handleWS(c *gin.Context) {
 	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
 
@@ -34,43 +44,9 @@ func handleWS(c *gin.Context) {
 	defer ws.Close()
 
 	cn := &conn{ws: ws}
-	userID := user.ID
-	presence.add(cn, userID)
+	cn.send(gin.H{"type": "hello", "me": userPublic(user)})
 
-	// Snapshot the user's existing active call (if any) so a freshly opened tab
-	// can rejoin/observe.
-	var snapshot map[string]any
-	callMu.Lock()
-	if existingID, ok := userToCall[userID]; ok {
-		if call := calls[existingID]; call != nil {
-			otherID := call.calleeID
-			direction := "outgoing"
-			if call.callerID != userID {
-				otherID = call.callerID
-				direction = "incoming"
-			}
-			other, _ := db.GetUserByID(otherID)
-			var peer any
-			if other != nil {
-				peer = userPublic(other)
-			}
-			snapshot = map[string]any{
-				"call_id":   call.id,
-				"state":     call.state,
-				"direction": direction,
-				"peer":      peer,
-			}
-		}
-	}
-	callMu.Unlock()
-
-	cn.send(map[string]any{
-		"type":        "hello",
-		"me":          userPublic(user),
-		"active_call": snapshot,
-	})
-
-	defer onSocketGone(cn, userID)
+	defer leaveRoom(cn)
 
 	for {
 		_, raw, err := ws.ReadMessage()
@@ -87,213 +63,153 @@ func handleWS(c *gin.Context) {
 		}
 		switch kind {
 		case "ping":
-			cn.send(map[string]any{"type": "pong"})
-		case "call_start":
-			handleCallStart(cn, user, data)
-		case "call_accept":
-			handleCallAccept(cn, user, data)
-		case "call_decline":
-			handleCallDecline(cn, user, data)
-		case "call_cancel":
-			handleCallCancel(cn, user, data)
-		case "call_end":
-			handleCallEnd(cn, user, data)
-		case "call_signal":
-			handleCallSignal(cn, user, data)
+			cn.send(gin.H{"type": "pong"})
+		case "join":
+			handleJoin(cn, user, data)
+		case "leave":
+			leaveRoom(cn)
+		case "signal":
+			handleSignal(cn, data)
+		case "state":
+			handleStateUpdate(cn, data)
+		case "host_mute":
+			handleHostMute(cn, data)
+		case "host_transfer":
+			handleHostTransfer(cn, data)
 		}
 		// Unknown types are silently ignored.
 	}
 }
 
-// onSocketGone cleans up when a socket closes. If this was the user's last
-// socket and they were in a call — or the call was bound to this specific
-// socket — the call ends.
-func onSocketGone(cn *conn, userID int) {
-	presence.remove(cn)
-	callMu.Lock()
-	defer callMu.Unlock()
-	callID, ok := userToCall[userID]
-	if !ok {
+func meetError(message string) gin.H {
+	return gin.H{"type": "error", "message": message}
+}
+
+// ---------- join / leave ----------
+
+func handleJoin(cn *conn, user *db.User, data map[string]any) {
+	code, _ := data["code"].(string)
+	code = strings.ToLower(strings.TrimSpace(code))
+	if code == "" {
+		cn.send(meetError("Missing meeting code."))
 		return
 	}
-	call := calls[callID]
-	if call == nil {
+
+	// A connection joins at most one room; joining again moves it.
+	leaveRoom(cn)
+
+	meetMu.Lock()
+	pruneRoomsLocked()
+	rm := rooms[code]
+	if rm == nil {
+		meetMu.Unlock()
+		cn.send(meetError("Meeting not found. It may have ended."))
 		return
 	}
-	bound := cn == call.callerWS || cn == call.calleeWS
-	anyLeft := presence.isOnline(userID)
-	if !bound && anyLeft {
-		return
+	p := &participant{
+		pid:      allocPid(),
+		user:     userPublic(user),
+		c:        cn,
+		joinedAt: db.NowTS(),
+		muted:    false,
+		camOn:    true,
 	}
-	if call.state == "ringing" {
-		if call.callerID == userID {
-			finalizeCall(call, "cancelled", "caller_left")
-		} else {
-			finalizeCall(call, "missed", "callee_left")
+	rm.parts[p.pid] = p
+	rm.order = append(rm.order, p.pid)
+	rm.emptySince = 0
+	if rm.hostPid == 0 {
+		rm.hostPid = p.pid // first joiner (in practice: the creator) hosts
+	}
+	connRoom[cn] = rm
+	connPart[cn] = p
+
+	roster := make([]map[string]any, 0, len(rm.parts))
+	var others []*conn
+	for _, pid := range rm.order {
+		op := rm.parts[pid]
+		if op == nil {
+			continue
 		}
-	} else { // accepted
-		finalizeCall(call, "completed", "peer_left")
-	}
-}
-
-// ---------- command handlers ----------
-
-func handleCallStart(cn *conn, user *db.User, data map[string]any) {
-	username, _ := data["to_username"].(string)
-	if trimSpace(username) == "" {
-		cn.send(callError("Missing username."))
-		return
-	}
-	target, _ := db.GetUserByUsername(auth.NormalizeUsername(username))
-	if target == nil || target.Status != "approved" {
-		cn.send(callError("No such user."))
-		return
-	}
-	if target.ID == user.ID {
-		cn.send(callError("You can't call yourself."))
-		return
-	}
-
-	callMu.Lock()
-	defer callMu.Unlock()
-
-	if _, busy := userToCall[user.ID]; busy {
-		cn.send(callError("You're already in a call."))
-		return
-	}
-	if !presence.isOnline(target.ID) {
-		// Persist an "unavailable" entry so the user sees it in history.
-		ts := db.NowTS()
-		caller, callee := user.ID, target.ID
-		_, _ = db.InsertCall(&caller, &callee, ts, nil, ts, "unavailable")
-		cn.send(map[string]any{"type": "call_unavailable", "reason": "offline", "peer": userPublic(target)})
-		pushRecentCalls(user.ID)
-		return
-	}
-	if _, targetBusy := userToCall[target.ID]; targetBusy {
-		cn.send(map[string]any{"type": "call_unavailable", "reason": "busy", "peer": userPublic(target)})
-		return
-	}
-
-	callID := allocCallID()
-	call := &Call{
-		id:        callID,
-		callerID:  user.ID,
-		calleeID:  target.ID,
-		callerWS:  cn,
-		state:     "ringing",
-		startedAt: db.NowTS(),
-	}
-	calls[callID] = call
-	userToCall[user.ID] = callID
-	userToCall[target.ID] = callID
-
-	// Caller tab gets the canonical "outgoing" view.
-	cn.send(map[string]any{"type": "call_ringing", "call_id": callID, "peer": userPublic(target)})
-	// Other caller tabs learn an outgoing call is in flight.
-	sendToUser(user.ID, map[string]any{"type": "call_outgoing_elsewhere", "call_id": callID, "peer": userPublic(target)}, cn)
-	// Every callee tab is rung.
-	sendToUser(target.ID, map[string]any{"type": "incoming_call", "call_id": callID, "from": userPublic(user)}, nil)
-}
-
-func handleCallAccept(cn *conn, user *db.User, data map[string]any) {
-	cid, ok := parseCallID(data["call_id"])
-	if !ok {
-		return
-	}
-	callMu.Lock()
-	defer callMu.Unlock()
-	call := calls[cid]
-	if call == nil || call.calleeID != user.ID {
-		cn.send(callError("Call not found."))
-		return
-	}
-	if call.state != "ringing" {
-		cn.send(callError("Call already resolved."))
-		return
-	}
-	call.state = "accepted"
-	call.calleeWS = cn
-	now := db.NowTS()
-	call.answeredAt = &now
-
-	// The caller side starts negotiation (creates the SDP offer).
-	call.callerWS.send(map[string]any{"type": "call_accepted", "call_id": call.id, "peer": userPublic(user)})
-	// Confirm to the accepting tab.
-	var callerPeer any
-	if caller, _ := db.GetUserByID(call.callerID); caller != nil {
-		callerPeer = userPublic(caller)
-	}
-	cn.send(map[string]any{"type": "call_connected", "call_id": call.id, "peer": callerPeer})
-	// Tell other callee tabs the banner is no longer relevant.
-	sendToUser(call.calleeID, map[string]any{"type": "call_taken", "call_id": call.id}, cn)
-}
-
-func handleCallDecline(cn *conn, user *db.User, data map[string]any) {
-	cid, ok := parseCallID(data["call_id"])
-	if !ok {
-		return
-	}
-	callMu.Lock()
-	defer callMu.Unlock()
-	call := calls[cid]
-	if call == nil || call.calleeID != user.ID {
-		return
-	}
-	if call.state != "ringing" {
-		return
-	}
-	finalizeCall(call, "declined", "declined")
-}
-
-func handleCallCancel(cn *conn, user *db.User, data map[string]any) {
-	cid, ok := parseCallID(data["call_id"])
-	if !ok {
-		return
-	}
-	callMu.Lock()
-	defer callMu.Unlock()
-	call := calls[cid]
-	if call == nil || call.callerID != user.ID {
-		return
-	}
-	if call.state != "ringing" {
-		return
-	}
-	finalizeCall(call, "cancelled", "cancelled")
-}
-
-func handleCallEnd(cn *conn, user *db.User, data map[string]any) {
-	cid, ok := parseCallID(data["call_id"])
-	if !ok {
-		return
-	}
-	callMu.Lock()
-	defer callMu.Unlock()
-	call := calls[cid]
-	if call == nil {
-		return
-	}
-	if user.ID != call.callerID && user.ID != call.calleeID {
-		return
-	}
-	if call.state == "ringing" {
-		// Treat as cancel/decline depending on who hung up.
-		if call.callerID == user.ID {
-			finalizeCall(call, "cancelled", "cancelled")
-		} else {
-			finalizeCall(call, "declined", "declined")
+		roster = append(roster, participantPayload(op))
+		if op.pid != p.pid {
+			others = append(others, op.c)
 		}
-		return
 	}
-	finalizeCall(call, "completed", "hangup")
+	hostPid := rm.hostPid
+	mode := rm.mode
+	meetMu.Unlock()
+
+	joined := gin.H{
+		"type":         "joined",
+		"code":         code,
+		"mode":         mode,
+		"self_pid":     p.pid,
+		"host_pid":     hostPid,
+		"participants": roster,
+	}
+	if mode == modeVolc {
+		joined["volc"] = volcJoinPayload(code, p.pid)
+	}
+	cn.send(joined)
+
+	announce := gin.H{"type": "peer_joined", "participant": participantPayload(p)}
+	for _, oc := range others {
+		oc.send(announce)
+	}
 }
 
-// handleCallSignal forwards an opaque SDP/ICE payload to the other participant.
-// Only the two bound sockets may exchange signaling, so multi-tab fan-out never
-// duplicates ICE candidates. The send happens after releasing callMu.
-func handleCallSignal(cn *conn, user *db.User, data map[string]any) {
-	cid, ok := parseCallID(data["call_id"])
+// leaveRoom detaches a connection from its room (no-op when not in one) and
+// notifies the remaining participants, reassigning the host role if needed.
+func leaveRoom(cn *conn) {
+	meetMu.Lock()
+	rm := connRoom[cn]
+	p := connPart[cn]
+	delete(connRoom, cn)
+	delete(connPart, cn)
+	if rm == nil || p == nil {
+		meetMu.Unlock()
+		return
+	}
+	delete(rm.parts, p.pid)
+	for i, pid := range rm.order {
+		if pid == p.pid {
+			rm.order = append(rm.order[:i], rm.order[i+1:]...)
+			break
+		}
+	}
+	hostChanged := false
+	if rm.hostPid == p.pid {
+		rm.hostPid = 0
+		if len(rm.order) > 0 {
+			rm.hostPid = rm.order[0] // longest-present participant inherits
+			hostChanged = true
+		}
+	}
+	if len(rm.parts) == 0 {
+		rm.emptySince = db.NowTS()
+	}
+	var notify []*conn
+	for _, op := range rm.parts {
+		notify = append(notify, op.c)
+	}
+	hostPid := rm.hostPid
+	pid := p.pid
+	meetMu.Unlock()
+
+	for _, oc := range notify {
+		oc.send(gin.H{"type": "peer_left", "pid": pid})
+		if hostChanged {
+			oc.send(gin.H{"type": "host_changed", "host_pid": hostPid})
+		}
+	}
+}
+
+// ---------- mesh signaling relay ----------
+
+// handleSignal forwards an opaque WebRTC payload (SDP description or ICE
+// candidate) to one other participant in the same room.
+func handleSignal(cn *conn, data map[string]any) {
+	to, ok := parsePid(data["to"])
 	if !ok {
 		return
 	}
@@ -302,30 +218,134 @@ func handleCallSignal(cn *conn, user *db.User, data map[string]any) {
 		return
 	}
 	var target *conn
-	callMu.Lock()
-	call := calls[cid]
-	if call != nil && call.state == "accepted" {
-		if cn == call.callerWS && call.calleeWS != nil {
-			target = call.calleeWS
-		} else if cn == call.calleeWS && call.callerWS != nil {
-			target = call.callerWS
+	from := 0
+	meetMu.Lock()
+	if rm, p := connRoom[cn], connPart[cn]; rm != nil && p != nil {
+		if t := rm.parts[to]; t != nil {
+			target = t.c
+			from = p.pid
 		}
 	}
-	callMu.Unlock()
+	meetMu.Unlock()
 	if target == nil {
 		return
 	}
-	target.send(map[string]any{"type": "call_signal", "call_id": cid, "payload": payload})
+	target.send(gin.H{"type": "signal", "from": from, "payload": payload})
+}
+
+// ---------- AV state fan-out ----------
+
+func handleStateUpdate(cn *conn, data map[string]any) {
+	muted, _ := data["muted"].(bool)
+	camOn, _ := data["cam_on"].(bool)
+	sharing, _ := data["sharing"].(bool)
+
+	meetMu.Lock()
+	rm, p := connRoom[cn], connPart[cn]
+	if rm == nil || p == nil {
+		meetMu.Unlock()
+		return
+	}
+	p.muted = muted
+	p.camOn = camOn
+	p.sharing = sharing
+	payload := gin.H{"type": "peer_state", "pid": p.pid, "muted": muted, "cam_on": camOn, "sharing": sharing}
+	var notify []*conn
+	for _, op := range rm.parts {
+		if op.pid != p.pid {
+			notify = append(notify, op.c)
+		}
+	}
+	meetMu.Unlock()
+
+	for _, oc := range notify {
+		oc.send(payload)
+	}
+}
+
+// ---------- host controls ----------
+
+func handleHostMute(cn *conn, data map[string]any) {
+	pid, ok := parsePid(data["pid"])
+	if !ok {
+		return
+	}
+	var (
+		targetConn *conn
+		notify     []*conn
+		payload    gin.H
+		byPid      int
+	)
+	meetMu.Lock()
+	rm, p := connRoom[cn], connPart[cn]
+	switch {
+	case rm == nil || p == nil:
+	case rm.hostPid != p.pid:
+		meetMu.Unlock()
+		cn.send(meetError("Only the host can mute others."))
+		return
+	default:
+		if t := rm.parts[pid]; t != nil && t.pid != p.pid {
+			t.muted = true
+			targetConn = t.c
+			byPid = p.pid
+			payload = gin.H{"type": "peer_state", "pid": t.pid, "muted": true, "cam_on": t.camOn, "sharing": t.sharing}
+			for _, op := range rm.parts {
+				if op.pid != t.pid {
+					notify = append(notify, op.c)
+				}
+			}
+		}
+	}
+	meetMu.Unlock()
+
+	if targetConn == nil {
+		return
+	}
+	targetConn.send(gin.H{"type": "force_mute", "by": byPid})
+	for _, oc := range notify {
+		oc.send(payload)
+	}
+}
+
+func handleHostTransfer(cn *conn, data map[string]any) {
+	pid, ok := parsePid(data["pid"])
+	if !ok {
+		return
+	}
+	var notify []*conn
+	meetMu.Lock()
+	rm, p := connRoom[cn], connPart[cn]
+	switch {
+	case rm == nil || p == nil:
+	case rm.hostPid != p.pid:
+		meetMu.Unlock()
+		cn.send(meetError("Only the host can transfer the host role."))
+		return
+	default:
+		if t := rm.parts[pid]; t != nil {
+			rm.hostPid = t.pid
+			for _, op := range rm.parts {
+				notify = append(notify, op.c)
+			}
+		}
+	}
+	hostPid := 0
+	if rm != nil {
+		hostPid = rm.hostPid
+	}
+	meetMu.Unlock()
+
+	payload := gin.H{"type": "host_changed", "host_pid": hostPid}
+	for _, oc := range notify {
+		oc.send(payload)
+	}
 }
 
 // ---------- small helpers ----------
 
-func callError(message string) map[string]any {
-	return map[string]any{"type": "call_error", "message": message}
-}
-
-// parseCallID mirrors int(data.get("call_id")) with its TypeError/ValueError guard.
-func parseCallID(v any) (int, bool) {
+// parsePid mirrors int(data.get(...)) with its TypeError/ValueError guard.
+func parsePid(v any) (int, bool) {
 	switch x := v.(type) {
 	case float64:
 		return int(x), true

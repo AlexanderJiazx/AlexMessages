@@ -1,6 +1,6 @@
 {
-  "name": "AlexMessage",
-  "short_name": "AlexMessage",
+  "name": "Alex Messages",
+  "short_name": "Alex Messages",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

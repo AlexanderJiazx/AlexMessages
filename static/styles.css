@@ -209,17 +209,16 @@ body::before {
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
 .topbar .title h1 .hash { color: var(--sage); margin-right: 2px; }
-.topbar .title .sub {
-  color: var(--muted); font-size: 12px; margin-top: 3px;
-  display:flex; align-items:center; gap:8px;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-}
-.topbar .chip {
+/* Presence chip lives under the recipient name (replaces the old plain-text
+   sub + the duplicate chip that used to sit on the topbar's right). */
+.presence-chip {
   display:inline-flex; align-items:center; gap:6px;
-  padding: 5px 9px; border-radius: 999px; border:1px solid var(--line);
-  background: var(--surface); font-size: 11.5px; color: var(--ink-2); font-weight: 500;
+  margin-top: 4px; align-self: flex-start;
+  padding: 3px 9px; border-radius: 999px; border:1px solid var(--line);
+  background: var(--surface); font-size: 11px; color: var(--ink-2); font-weight: 500;
+  line-height: 1.3;
 }
-.topbar .chip .cdot { width:6px; height:6px; border-radius:50%; background: var(--sage); }
+.presence-chip .cdot { width:6px; height:6px; border-radius:50%; background: var(--sage); }
 .iconbtn {
   width: 32px; height:32px; display:inline-flex; align-items:center; justify-content:center;
   background: transparent; border:1px solid transparent; border-radius: 9px; color: var(--muted);
@@ -342,6 +341,26 @@ body::before {
   font-size: 10.5px; color: var(--faint); font-weight: 500;
   margin: 2px 6px 0;
 }
+.edited-tag { font-size: 10px; color: var(--faint); margin-left: 5px; white-space: nowrap; }
+
+/* Inline message editing */
+.bubble.editing { width: min(72vw, 480px); }
+.edit-area {
+  width: 100%; border: 1px solid var(--sage-mint); border-radius: 10px;
+  background: var(--surface); resize: none; outline: none;
+  font: inherit; font-size: 14px; color: var(--ink); line-height: 1.5;
+  padding: 7px 10px; min-height: 38px; max-height: 200px;
+}
+.edit-area:focus { box-shadow: 0 0 0 3px rgba(199,225,197,.4); }
+.edit-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
+.edit-actions button {
+  height: 26px; padding: 0 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.edit-actions button:hover { background: var(--sage-tint); border-color: var(--sage-mint); color: var(--sage-deep); }
+.edit-actions button.save { background: var(--sage); border-color: var(--sage); color: #fff; }
+.edit-actions button.save:hover { background: var(--sage-deep); border-color: var(--sage-deep); }
 
 .reply-ref {
   display:flex; align-items:center; gap:8px; margin-bottom: 4px;
@@ -449,21 +468,22 @@ body::before {
 }
 .actions button:hover { background: var(--sage-tint); color: var(--sage-deep); }
 
-/* Composer */
+/* Composer — long pill, like iMessage. The radius stays constant when the
+   textarea grows, which reads as a rounded rect for multi-line input. */
 .composer-wrap { padding: 6px 16px 10px; }
 .composer {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 23px;
   box-shadow: var(--shadow-1);
   transition: border-color .15s, box-shadow .15s;
 }
 .composer.focused { border-color: var(--sage-mint); box-shadow: 0 0 0 4px rgba(199,225,197,.35), var(--shadow-1); }
 .replying-to {
   display:flex; align-items:center; gap:10px;
-  padding: 8px 14px; border-bottom: 1px solid var(--line-2);
+  padding: 8px 16px; border-bottom: 1px solid var(--line-2);
   font-size: 12.5px; color: var(--muted);
-  background: var(--sage-tint); border-radius: 13px 13px 0 0;
+  background: var(--sage-tint); border-radius: 22px 22px 0 0;
 }
 .replying-to b { color: var(--sage-deep); font-weight:600; }
 .replying-to .preview { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 60vw; }
@@ -473,7 +493,7 @@ body::before {
 }
 .replying-to .x:hover { background: rgba(0,0,0,.06); color: var(--ink); }
 
-.pending-attachments { display:flex; flex-wrap:wrap; gap:6px; padding: 8px 12px 0; }
+.pending-attachments { display:flex; flex-wrap:wrap; gap:8px; padding: 10px 14px 2px; }
 .pending-att {
   display:flex; align-items:center; gap:8px; padding: 6px 10px;
   background: var(--sage-tint); border: 1px solid var(--sage-mint); border-radius: 999px;
@@ -485,23 +505,40 @@ body::before {
   display:grid; place-items:center; border-radius:50%;
 }
 .pending-att button:hover { background: rgba(53,80,64,.15); }
+/* iMessage-style image thumbnail for pending image attachments */
+.pending-thumb { position: relative; width: 72px; height: 72px; }
+.pending-thumb img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+  border-radius: 14px; border: 1px solid var(--line);
+  box-shadow: 0 1px 4px rgba(27,36,31,.14);
+}
+.pending-thumb button {
+  position: absolute; top: -6px; right: -6px;
+  width: 20px; height: 20px; border-radius: 50%; padding: 0;
+  background: var(--ink); color: #fff; border: 2px solid var(--surface);
+  display: grid; place-items: center;
+}
+.pending-thumb button:hover { background: var(--danger); }
 
-.input-row { display:flex; align-items:flex-end; padding: 8px 8px 8px 12px; gap: 4px; }
+/* Single-line metrics: 22px line + 7px vertical padding = 36px, exactly the
+   button diameter, so icons sit dead-center of the pill. */
+.input-row { display:flex; align-items:flex-end; padding: 5px 5px 5px 8px; gap: 4px; }
 textarea.input {
   flex:1; border:0; background: transparent; resize:none; outline:none;
   font: inherit; font-size: 14.5px; color: var(--ink);
-  padding: 8px 6px; line-height: 1.5; max-height: 160px;
+  padding: 7px 6px; line-height: 22px; max-height: 160px;
   min-width: 0;
 }
 textarea.input::placeholder { color: var(--faint); }
 .toolbtn {
-  width: 34px; height: 34px; border-radius: 9px; background: transparent;
+  width: 36px; height: 36px; border-radius: 50%; background: transparent;
   border:0; color: var(--muted); display:grid; place-items:center; flex-shrink:0;
 }
 .toolbtn:hover { background: var(--sage-tint); color: var(--sage-deep); }
 .send {
-  height: 34px; padding: 0 14px; border-radius: 9px; border:0; background: var(--sage); color:#fff;
-  font-weight:600; font-size: 12.5px; display:inline-flex; align-items:center; gap:6px;
+  width: 36px; height: 36px; padding: 0; border-radius: 50%; border:0;
+  background: var(--sage); color:#fff;
+  display:grid; place-items:center;
   box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 1px 2px rgba(53,80,64,.4);
   flex-shrink:0;
 }
@@ -672,6 +709,7 @@ textarea.input::placeholder { color: var(--faint); }
     grid-template-columns: 1fr;
     gap: 0; padding: 0;
   }
+  .presence-chip { margin-top: 3px; padding: 2px 8px; font-size: 10.5px; }
   .pane { border-radius: 0; border-left:0; border-right:0; }
   .pane.left {
     position: fixed; top:0; left:0; bottom:0; width: 84vw; max-width: 320px;
@@ -685,7 +723,6 @@ textarea.input::placeholder { color: var(--faint); }
   .rail-close { display: inline-flex; }
   .topbar { padding: 10px 12px; }
   .topbar .title h1 { font-size: 19px; }
-  .topbar .chip { display: none; }
   .stream { padding: 14px 10px 10px; overflow-x: hidden; }
   .msg { gap: 8px; padding: 3px 4px; }
   .msg-col { max-width: 84%; }
