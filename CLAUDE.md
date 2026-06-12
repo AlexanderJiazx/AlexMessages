@@ -60,7 +60,11 @@ chosen per meeting from a lobby dropdown:
   SDP/ICE (`signal` messages). The client uses the MDN perfect-negotiation
   pattern (newcomer = polite peer) and creates audio+video transceivers
   up-front so mute/device-switch/screen-share are all `replaceTrack` — no
-  renegotiation. Google STUN only, no TURN.
+  renegotiation. Screen shares request system/tab audio
+  (`getDisplayMedia({audio: true})`); when the browser grants it, the capture
+  is mixed with the mic via WebAudio (`state.shareMix`) into the existing
+  audio sender — still no renegotiation, mic mute keeps working
+  (`enabled=false` contributes silence to the mix). Google STUN only, no TURN.
 - **`volc` — VolcEngine RTC ("Better performance in China").** Media flows
   through the VolcEngine Web SDK (vendored at
   `static/vendor/volc-rtc-4.68.5.min.js`, UMD global `VERTC`); the server
@@ -69,7 +73,11 @@ chosen per meeting from a lobby dropdown:
   little-endian packing, HMAC-SHA256, golden-tested in `volctoken_test.go`).
   Credentials come from `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY` (defaults are
   baked in). VolcEngine user ids are `p<pid>` so streams map back to roster
-  entries.
+  entries. Screen shares capture with `startScreenCapture({enableAudio: true})`
+  and publish `AUDIO_AND_VIDEO` (falling back to `VIDEO`). Gotcha:
+  `isAutoSubscribeVideo` covers only main (camera/mic) streams — remote screen
+  streams must be explicitly `subscribeScreen`d in `onUserPublishScreen`, or
+  viewers get a black tile.
 
 Either way, every participant stays on the meet server's `/ws` **control
 plane**: it owns the roster, AV state fan-out (`peer_state`), and host powers.

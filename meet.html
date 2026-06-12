@@ -639,10 +639,12 @@
     // mesh
     localStream: null,
     screenStream: null,
+    shareMix: null,      // {ctx, dest, micSrc, track} while sharing with system audio
     pcs: new Map(),      // pid -> {pc, audioTx, videoTx, makingOffer, ignoreOffer, srdAnswerPending, polite}
     // volc
     volc: null,          // join payload {app_id, room_id, user_id, token}
     volcEngine: null,
+    volcShareMedia: null, // MediaType we published for the current screen share
     ws: null,
     wsReady: false,
     pendingSend: [],
@@ -1221,11 +1223,17 @@
     }
     state.localStream.addTrack(track);
     // Push the new track to every peer connection (replaceTrack avoids renegotiation).
-    for (const peer of state.pcs.values()) {
-      const tx = kind === "audio" ? peer.audioTx : peer.videoTx;
-      // While screen-sharing the video sender carries the screen track.
-      if (kind === "video" && state.sharing) continue;
-      if (tx) tx.sender.replaceTrack(track).catch(() => {});
+    if (kind === "audio" && state.shareMix) {
+      // The audio sender currently carries the mic+system-audio mix — feed
+      // the new mic into the mixer instead of replacing the sender track.
+      wireShareMixMic(track);
+    } else {
+      for (const peer of state.pcs.values()) {
+        const tx = kind === "audio" ? peer.audioTx : peer.videoTx;
+        // While screen-sharing the video sender carries the screen track.
+        if (kind === "video" && state.sharing) continue;
+        if (tx) tx.sender.replaceTrack(track).catch(() => {});
+      }
     }
     if (kind === "video") refreshSelfPreview();
     return track;
@@ -1273,7 +1281,8 @@
       videoTx: null,
     };
     const stream = state.localStream || new MediaStream();
-    const at = stream.getAudioTracks()[0] || null;
+    // While sharing with system audio the outgoing audio is the mixed track.
+    const at = (state.shareMix ? state.shareMix.track : stream.getAudioTracks()[0]) || null;
     const shareTrack = state.sharing && state.screenStream ? state.screenStream.getVideoTracks()[0] : null;
     const vt = shareTrack || stream.getVideoTracks()[0] || null;
     // Transceivers are created up-front in sendrecv so toggling devices later
@@ -1360,12 +1369,46 @@
   }
 
   // ──────── Screen share ────────
+  // Mixes the mic and the captured system audio into one outgoing track so
+  // the audio sender never needs renegotiation. Mic mute keeps working: a
+  // disabled mic track contributes silence to the mix.
+  function startShareMix(sysTrack) {
+    const ctx = new AudioContext();
+    const dest = ctx.createMediaStreamDestination();
+    ctx.createMediaStreamSource(new MediaStream([sysTrack])).connect(dest);
+    state.shareMix = { ctx, dest, micSrc: null, track: dest.stream.getAudioTracks()[0] };
+    const mic = state.localStream?.getAudioTracks()[0];
+    if (mic) wireShareMixMic(mic);
+    ctx.resume().catch(() => {});
+    return state.shareMix.track;
+  }
+
+  function wireShareMixMic(micTrack) {
+    const mix = state.shareMix;
+    if (!mix) return;
+    if (mix.micSrc) { try { mix.micSrc.disconnect(); } catch {} }
+    mix.micSrc = mix.ctx.createMediaStreamSource(new MediaStream([micTrack]));
+    mix.micSrc.connect(mix.dest);
+  }
+
+  function stopShareMix() {
+    if (!state.shareMix) return;
+    try { state.shareMix.ctx.close(); } catch {}
+    state.shareMix = null;
+  }
+
   async function startShare() {
     if (state.mode === "volc") {
       // The SDK runs its own capture flow (one picker dialog).
       try {
-        await state.volcEngine.startScreenCapture();
-        await state.volcEngine.publishScreen(VERTC.MediaType.VIDEO);
+        await state.volcEngine.startScreenCapture({ enableAudio: true });
+        try {
+          await state.volcEngine.publishScreen(VERTC.MediaType.AUDIO_AND_VIDEO);
+          state.volcShareMedia = VERTC.MediaType.AUDIO_AND_VIDEO;
+        } catch {
+          await state.volcEngine.publishScreen(VERTC.MediaType.VIDEO);
+          state.volcShareMedia = VERTC.MediaType.VIDEO;
+        }
         const t = tiles.get(state.selfPid);
         if (t) {
           state.volcEngine.setLocalVideoPlayer(VERTC.StreamIndex.STREAM_INDEX_SCREEN, {
@@ -1384,13 +1427,18 @@
       }
       let ds;
       try {
-        ds = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        // Ask for system/tab audio too; pickers that can't capture it (or
+        // where the user leaves it unchecked) just return no audio track.
+        ds = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true, systemAudio: "include" });
       } catch { return; } // user cancelled the picker
       const track = ds.getVideoTracks()[0];
       if (!track) return;
       state.screenStream = ds;
+      const sysAudio = ds.getAudioTracks()[0] || null;
+      const sendAudio = sysAudio ? startShareMix(sysAudio) : null;
       for (const peer of state.pcs.values()) {
         if (peer.videoTx) peer.videoTx.sender.replaceTrack(track).catch(() => {});
+        if (sendAudio && peer.audioTx) peer.audioTx.sender.replaceTrack(sendAudio).catch(() => {});
       }
       state.sharing = true;
       refreshSelfPreview();
@@ -1402,8 +1450,9 @@
   async function stopShare() {
     if (!state.sharing) return;
     if (state.mode === "volc") {
-      try { await state.volcEngine.unpublishScreen(VERTC.MediaType.VIDEO); } catch {}
+      try { await state.volcEngine.unpublishScreen(state.volcShareMedia || VERTC.MediaType.VIDEO); } catch {}
       try { await state.volcEngine.stopScreenCapture(); } catch {}
+      state.volcShareMedia = null;
       const t = tiles.get(state.selfPid);
       if (t && t.vScreen) t.vScreen.innerHTML = "";
     } else {
@@ -1411,9 +1460,13 @@
         try { state.screenStream.getTracks().forEach(t => t.stop()); } catch {}
       }
       state.screenStream = null;
+      const hadMix = !!state.shareMix;
+      stopShareMix();
       const cam = state.localStream?.getVideoTracks()[0] || null;
+      const mic = state.localStream?.getAudioTracks()[0] || null;
       for (const peer of state.pcs.values()) {
         if (peer.videoTx) peer.videoTx.sender.replaceTrack(cam).catch(() => {});
+        if (hadMix && peer.audioTx) peer.audioTx.sender.replaceTrack(mic).catch(() => {});
       }
     }
     state.sharing = false;
@@ -1461,7 +1514,13 @@
     });
     on("onUserPublishScreen", (e) => {
       const pid = pidFromVolcUid(e.userId);
-      if (pid != null) attachVolcRemote(pid, true);
+      if (pid == null) return;
+      // isAutoSubscribeVideo only covers main (camera/mic) streams — without
+      // an explicit subscription the screen stays black for everyone else.
+      const media = e.mediaType || VERTC.MediaType.VIDEO;
+      Promise.resolve(engine.subscribeScreen(e.userId, media))
+        .catch(err => console.warn("[volc] subscribeScreen failed", err));
+      if (media & VERTC.MediaType.VIDEO) attachVolcRemote(pid, true);
     });
     on("onUserUnpublishScreen", (e) => {
       const pid = pidFromVolcUid(e.userId);
@@ -1523,6 +1582,7 @@
     audioEls.clear();
     if (state.screenStream) { try { state.screenStream.getTracks().forEach(t => t.stop()); } catch {} }
     state.screenStream = null;
+    stopShareMix();
     if (state.localStream) { try { state.localStream.getTracks().forEach(t => t.stop()); } catch {} }
     state.localStream = null;
     if (state.volcEngine) {
@@ -1537,6 +1597,7 @@
       })();
     }
     state.sharing = false;
+    state.volcShareMedia = null;
   }
 
   // ──────── Lobby ────────
