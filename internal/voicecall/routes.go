@@ -17,12 +17,15 @@ import (
 )
 
 // vcUser is the Alex Meet public user view (no bio, unlike the chat app, but
-// with the avatar URL so meeting tiles can show profile photos).
+// with the avatar URL so meeting tiles can show profile photos). Guests carry
+// a synthetic identity: a negative id (unique per participant, so avatar
+// colors stay distinct) and guest=true.
 type vcUser struct {
 	ID          int    `json:"id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
 	Avatar      string `json:"avatar"`
+	Guest       bool   `json:"guest,omitempty"`
 }
 
 func userPublic(u *db.User) vcUser {
@@ -114,9 +117,17 @@ func (s *vcServer) handleRoot(c *gin.Context) {
 func (s *vcServer) handleMeetingPage(c *gin.Context) {
 	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
 	if user == nil {
-		// Send the user back to this meeting after signing in.
-		c.Redirect(http.StatusFound, "/login?next="+url.QueryEscape(c.Request.URL.Path))
-		return
+		// Guests may load the page when the meeting allows them; everyone
+		// else is sent back to this meeting after signing in.
+		code := strings.ToLower(strings.TrimSpace(c.Param("code")))
+		meetMu.Lock()
+		rm := rooms[code]
+		allowGuests := rm != nil && rm.allowGuests
+		meetMu.Unlock()
+		if !allowGuests {
+			c.Redirect(http.StatusFound, "/login?next="+url.QueryEscape(c.Request.URL.Path))
+			return
+		}
 	}
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.meetHTML))
 }
@@ -216,28 +227,30 @@ func handleCreateMeeting(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": code, "mode": mode})
 }
 
+// handleMeetingInfo is deliberately public: the meeting page must learn
+// allow_guests before deciding between the guest gate and the login redirect.
+// It only reveals that a room code exists, its backend, and a head count.
 func handleMeetingInfo(c *gin.Context) {
-	if _, ok := requireUser(c); !ok {
-		return
-	}
 	code := strings.ToLower(strings.TrimSpace(c.Param("code")))
 	meetMu.Lock()
 	pruneRoomsLocked()
 	rm := rooms[code]
 	var (
-		mode  string
-		count int
+		mode        string
+		count       int
+		allowGuests bool
 	)
 	if rm != nil {
 		mode = rm.mode
 		count = len(rm.parts)
+		allowGuests = rm.allowGuests
 	}
 	meetMu.Unlock()
 	if rm == nil {
 		httpx.Error(c, http.StatusNotFound, "Meeting not found")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": code, "mode": mode, "participants": count})
+	c.JSON(http.StatusOK, gin.H{"code": code, "mode": mode, "participants": count, "allow_guests": allowGuests})
 }
 
 // ---------- shared small helpers ----------

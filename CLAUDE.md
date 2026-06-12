@@ -81,37 +81,65 @@ chosen per meeting from a lobby dropdown:
 
 Either way, every participant stays on the meet server's `/ws` **control
 plane**: it owns the roster, AV state fan-out (`peer_state`), and host powers.
-Protocol: client sends `join {code}` / `leave` / `signal {to, payload}` /
-`state {muted, cam_on, sharing}` / `host_mute {pid}` / `host_transfer {pid}` /
-`ping`; server sends `hello` / `joined` (roster + `host_pid` + `volc` join
-payload when applicable) / `peer_joined` / `peer_left` / `signal {from}` /
-`peer_state` / `host_changed` / `force_mute` / `error` / `pong`.
+Protocol: client sends `join {code, guest_name?}` / `leave` /
+`signal {to, payload}` / `state {muted, cam_on, sharing}` / `host_mute {pid}` /
+`host_transfer {pid}` / `host_kick {pid}` / `set_guests {allowed}` / `ping`;
+server sends `hello` (`me` is `null` for anonymous connections) / `joined`
+(roster + `host_pid` + `allow_guests` + `volc` join payload when applicable) /
+`peer_joined` / `peer_left` / `signal {from}` / `peer_state` / `host_changed` /
+`force_mute` / `kicked` / `guests_changed {allowed}` / `error` / `pong`.
 
 Rooms (`internal/voicecall/state.go`) are in-memory only, keyed by
 `xxx-xxxx-xxx` codes (no i/l/o). The first joiner is host; when the host
 leaves, the longest-present participant inherits (`host_changed`). Empty rooms
 survive a 5-minute grace (refresh-proof) and never-joined rooms an hour, then
 are pruned lazily. The same account in two tabs is two participants.
+**Guest access**: each room has a host-toggled `allowGuests` flag (the switch
+lives in the People panel; `set_guests` over WS). When on, non-registered
+visitors get the meeting page instead of the login redirect and join by just
+entering a name; guests are synthetic `vcUser`s with a negative id,
+`username "guest"`, and `guest: true`. The host can also kick anyone
+(`host_kick` → `kicked` to the target, who sees a "removed" screen).
 
-Routes: `GET /` (lobby) and `GET /m/:code` (meeting page, redirects through
-`/login?next=…`), `POST /api/meetings {mode}` → `{code}`,
-`GET /api/meetings/:code` → `{mode, participants}`, plus login/logout/me.
-The meet server mounts `/static`, `/fonts`, `/sound`, and `/avatars` (so
-meeting tiles can show profile photos; `vcUser` = `{id, username,
-display_name, avatar}`, still no bio). The legacy 1:1 `calls` table remains in
-the DB but Alex Meet does not write meeting history.
+Routes: `GET /` (lobby) and `GET /m/:code` (meeting page; anonymous users are
+redirected through `/login?next=…` unless the room allows guests),
+`POST /api/meetings {mode}` → `{code}`, `GET /api/meetings/:code` →
+`{mode, participants, allow_guests}` (deliberately public so the page can pick
+gate vs. login before auth), plus login/logout/me. The meet server mounts
+`/static`, `/fonts`, `/sound`, and `/avatars` (so meeting tiles can show
+profile photos; `vcUser` = `{id, username, display_name, avatar, guest?}`,
+still no bio). The legacy 1:1 `calls` table remains in the DB but Alex Meet
+does not write meeting history.
 
-Frontend (`meet.html`, single file): lobby → pre-join gate (mic/cam toggles;
-the click is the user gesture autoplay policies want) → meeting. Meeting UI:
-rounded main view; right-hand vertical preview stack (click a tile to pin,
-click the main view to unpin); grid "group view" paged at 9 tiles; bottom bar
-with mic/cam split buttons (chevron opens an input-device picker), screen
-share, grid toggle on the left and the red leave pill on the right; top-left
-copy-link button + code chip; top-right people panel with host mute /
-make-host actions. All icons are embedded Lucide SVGs. Tiles never get
-destroyed on layout changes — they move between main/stack/grid containers and
-an off-screen "park" so media keeps playing; in mesh mode remote audio plays
-through a fixed hidden audio pool so tile juggling can't interrupt it.
+Frontend (`meet.html`, single file): lobby → pre-join gate → meeting. The gate
+shows a live selfie preview plus microphone/speaker/camera dropdowns (and the
+name field for guests); in mesh mode the preview stream is adopted as the call
+media on join, in volc mode it's stopped and the SDK captures with the chosen
+devices. Meeting UI: the **grid "group view" is the default** (paged at 9
+tiles; `bestGridSize` picks the row/column split that maximizes 16:9 tile area
+for the current window ratio, so wide windows lean on columns and portrait
+phones stack one column; relaid out on resize). Clicking a tile switches to
+the focus view (clicked tile big, everyone else in a fixed-width 16:9 stack on
+the right, scrollable); clicking the main view returns to the grid. A starting
+remote screen share auto-focuses the sharer and falls back to the grid when it
+ends. Video is never cropped: mesh uses `object-fit: contain`, volc passes
+`renderMode RENDER_MODE_FIT`. The active speaker's tile gets a light-green
+stroke — mesh meters tracks with WebAudio analysers (RMS threshold + 700 ms
+hold so background noise doesn't flicker it), volc uses
+`enableAudioPropertiesReport`/`linearVolume`. Bottom bar (stacks vertically
+and centers on narrow screens): mic split button (chevron menu lists
+microphones *and* speakers — output switching is `setSinkId` on the mesh audio
+pool / `setAudioPlaybackDevice` on volc), camera split button, screen share,
+**streaming-quality menu** (Auto/Low 360p/Standard 720p/High 1080p/Premium 4K;
+per-user, applied to *their* outgoing stream: capture constraints + per-sender
+bitrate caps in mesh, `setVideoCaptureConfig`/`setVideoEncoderConfig` + audio
+profile in volc), grid toggle, and the red leave pill. Top-left copy-link
+button + code chip; top-right people panel with host mute / make-host / kick
+actions and the allow-guests switch. All icons are embedded Lucide SVGs. Tiles
+never get destroyed on layout changes — they move between main/stack/grid
+containers and an off-screen "park" so media keeps playing; in mesh mode
+remote audio plays through a fixed hidden audio pool so tile juggling can't
+interrupt it.
 
 ## Layout
 

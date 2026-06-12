@@ -55,13 +55,14 @@ type participant struct {
 // lobby, survive briefly while empty (so a refresh doesn't kill a meeting),
 // and are pruned afterwards.
 type room struct {
-	code       string
-	mode       string // "mesh" | "volc"
-	hostPid    int    // 0 while nobody has joined yet
-	parts      map[int]*participant
-	order      []int // join order; the head inherits the host role
-	createdAt  int64
-	emptySince int64 // 0 while occupied
+	code        string
+	mode        string // "mesh" | "volc"
+	hostPid     int    // 0 while nobody has joined yet
+	parts       map[int]*participant
+	order       []int // join order; the head inherits the host role
+	createdAt   int64
+	emptySince  int64 // 0 while occupied
+	allowGuests bool  // host-toggled: non-registered users may join by name
 }
 
 const (

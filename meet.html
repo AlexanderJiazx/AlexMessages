@@ -164,14 +164,39 @@
   /* ───── pre-join gate / interstitials ───── */
   .center-body { flex:1; display:flex; align-items:center; justify-content:center; padding: 24px; }
   .gate-card {
-    width: 100%; max-width: 420px; text-align: center;
+    width: 100%; max-width: 460px; text-align: center;
     background: var(--surface); border:1px solid var(--line); border-radius: 18px;
-    box-shadow: var(--shadow-2); padding: 30px 26px 26px;
-    display:flex; flex-direction:column; align-items:center; gap: 14px;
+    box-shadow: var(--shadow-2); padding: 26px 26px 24px;
+    display:flex; flex-direction:column; align-items:center; gap: 13px;
   }
   .gate-card h2 { margin:0; font-family:'Instrument Serif',serif; font-weight:400; font-size: 28px; }
   .gate-card .code-line { font-family:'JetBrains Mono',monospace; font-size: 13px; color: var(--muted); }
-  .gate-toggles { display:flex; gap: 14px; margin: 6px 0 2px; }
+  .gate-preview {
+    width: 100%; aspect-ratio: 16 / 9; border-radius: 14px; overflow: hidden;
+    background: var(--video-bg); position: relative; flex-shrink: 0;
+  }
+  .gate-preview video {
+    width: 100%; height: 100%; object-fit: contain; display: block;
+    transform: scaleX(-1); /* selfie mirror */
+  }
+  .gate-preview .gp-off {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px;
+    color: rgba(255,255,255,.55); font-size: 12.5px; background: linear-gradient(160deg, #233129, #18231D 70%);
+  }
+  .gate-toggles { display:flex; gap: 14px; margin: 0; }
+  .gate-name { width: 100%; }
+  .gate-name input {
+    width: 100%; background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 12px; font-size: 13.5px; color: var(--ink); outline: none; text-align: center;
+  }
+  .gate-name input::placeholder { color: var(--faint); }
+  .gate-name input:focus { border-color: var(--sage-mint); box-shadow: 0 0 0 3px rgba(199,225,197,.4); }
+  .gate-devices { width: 100%; display:flex; flex-direction:column; gap: 7px; }
+  .gate-devices .dev-row { display:flex; align-items:center; gap: 9px; }
+  .gate-devices .dev-row > svg { color: var(--muted); flex-shrink: 0; }
+  .gate-devices .select-wrap { flex: 1; min-width: 0; }
+  .gate-devices select { padding: 8px 32px 8px 10px; font-size: 12.5px; }
   .gate-note { font-size: 12px; color: var(--muted); line-height: 1.5; max-width: 300px; }
   .btn-join {
     display:inline-flex; align-items:center; gap:9px;
@@ -218,23 +243,26 @@
     color: rgba(255,255,255,.45); font-size: 14px;
   }
 
-  /* participant stack on the right */
+  /* participant stack on the right — fixed-width 16:9 cards. height:auto
+     beats the .tile base sizing so tiles never stretch to the stack height;
+     everyone who doesn't fit scrolls instead of disappearing. */
   .stack {
-    width: 218px; flex-shrink: 0;
+    width: 224px; flex-shrink: 0; min-height: 0;
     overflow-y: auto; overflow-x: hidden;
     display:flex; flex-direction:column; gap: 10px; padding: 2px;
   }
   .stack::-webkit-scrollbar{ width:6px } .stack::-webkit-scrollbar-thumb{ background:rgba(0,0,0,.08); border-radius:4px }
-  .stack .tile { aspect-ratio: 16 / 9; flex-shrink: 0; }
+  .stack .tile { width: 100%; height: auto; aspect-ratio: 16 / 9; flex-shrink: 0; }
 
-  /* grid (group view) */
+  /* grid (group view) — tiles are sized in px by layout(), which picks the
+     row/column split that maximizes tile area for the current window ratio */
   .grid-area { flex:1; min-width:0; display:flex; align-items:center; gap: 6px; }
   .grid-pages {
-    flex:1; height: 100%;
+    flex:1; height: 100%; min-width: 0;
     display:flex; flex-wrap:wrap; align-content:center; justify-content:center;
     gap: 12px; padding: 2px;
   }
-  .grid-pages .tile { aspect-ratio: 16 / 9; }
+  .grid-pages .tile { flex: 0 0 auto; }
   .pager {
     width: 34px; height: 56px; border-radius: 12px; flex-shrink:0;
     background: var(--surface); border:1px solid var(--line); color: var(--ink-2);
@@ -250,8 +278,9 @@
     border: 1px solid rgba(27,36,31,.18);
     width: 100%; height: 100%;
   }
-  .main-view .tile { border: 0; border-radius: 18px; cursor: default; }
-  .tile video { width:100%; height:100%; object-fit: cover; display:block; background: var(--video-bg); }
+  .main-view .tile { border: 0; border-radius: 18px; }
+  /* scale to fit, never crop — a landscape feed stays landscape */
+  .tile video { width:100%; height:100%; object-fit: contain; display:block; background: var(--video-bg); }
   .tile .vbox { position:absolute; inset:0; }
   .tile .vbox video { position:absolute; inset:0; }
   .tile .v-main, .tile .v-screen { position:absolute; inset:0; }
@@ -282,12 +311,18 @@
     background: rgba(13,20,17,.55); color:#fff; place-items:center; backdrop-filter: blur(4px);
   }
   .tile.pinned .pin-ind { display: grid; }
+  /* active speaker — light green stroke (driven by audio level w/ hold) */
+  .tile.speaking::after {
+    content: ""; position: absolute; inset: 0; z-index: 4; pointer-events: none;
+    border: 3px solid #7ED491; border-radius: inherit;
+  }
 
   /* bottom control bar */
   .meet-bottom {
     display:flex; align-items:center; gap: 12px; padding: 14px 18px 16px;
   }
   .meet-bottom .spacer { flex:1; }
+  .ctrl-group { display:flex; align-items:center; gap: 12px; }
   .mbtn {
     height: 48px; border: 1px solid var(--line); background: var(--surface);
     color: var(--ink-2); display:inline-flex; align-items:center; justify-content:center;
@@ -343,6 +378,7 @@
   .float-menu button.item .chk { width: 14px; flex-shrink:0; color: var(--sage); visibility: hidden; }
   .float-menu button.item.cur .chk { visibility: visible; }
   .float-menu button.item span.lbl { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .float-menu .sep { height: 1px; background: var(--line-2); margin: 4px 6px; }
 
   .people-panel {
     position: fixed; top: 64px; right: 18px; z-index: 200;
@@ -376,6 +412,23 @@
     color: var(--muted); display:grid; place-items:center; flex-shrink: 0;
   }
   .pp-act:hover { background: var(--sage-tint); color: var(--sage-deep); }
+  .pp-act.danger:hover { background: #F6E4E2; color: var(--danger); }
+  .pp-foot {
+    border-top: 1px solid var(--line-2); padding: 11px 16px;
+    display:flex; align-items:center; gap: 10px; font-size: 12.5px; color: var(--ink-2);
+  }
+  .pp-foot .lbl { flex:1; line-height: 1.35; }
+  .tgl {
+    width: 36px; height: 21px; border-radius: 999px; border: 0; padding: 0;
+    background: var(--line); position: relative; flex-shrink: 0; transition: background .15s;
+  }
+  .tgl::after {
+    content: ""; position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(27,36,31,.25);
+    transition: left .15s;
+  }
+  .tgl.on { background: var(--sage); }
+  .tgl.on::after { left: 17.5px; }
 
   /* keep off-screen tiles alive without display:none jank */
   #park { position: fixed; left: -10000px; top: 0; width: 320px; height: 180px; overflow: hidden; opacity: 0; pointer-events: none; }
@@ -383,11 +436,18 @@
   @media (max-width: 860px) {
     .meet-body { flex-direction: column; padding: 0 10px; }
     .stack { width: 100%; flex-direction: row; overflow-x:auto; overflow-y:hidden; }
-    .stack .tile { width: 152px; height: 86px; aspect-ratio: auto; }
+    .stack .tile { width: 152px; height: auto; }
     .meet-top, .meet-bottom { padding-left: 10px; padding-right: 10px; }
     .mbtn.pill { padding: 0 16px; }
     .mbtn.end { padding: 0 18px; }
     .people-panel { right: 10px; left: 10px; width: auto; }
+  }
+  /* narrow/vertical screens: control group and leave button stack
+     vertically, both centered; buttons inside a group stay horizontal */
+  @media (max-width: 700px) {
+    .meet-bottom { flex-direction: column; align-items: center; gap: 10px; padding-top: 10px; }
+    .meet-bottom .spacer { display: none; }
+    .ctrl-group { gap: 10px; }
   }
 </style>
 </head>
@@ -443,9 +503,15 @@
   <div class="view" id="gateView" hidden>
     <div class="center-body">
       <div class="gate-card">
-        <div class="logo"></div>
         <h2 class="serif">Ready to join?</h2>
         <div class="code-line" id="gateCode"></div>
+        <div class="gate-preview">
+          <video id="gateVideo" autoplay playsinline muted></video>
+          <div class="gp-off" id="gateOff">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.66 6H14a2 2 0 0 1 2 2v2.5l5.248-3.062A.5.5 0 0 1 22 7.87v8.196"/><path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2"/><line x1="2" x2="22" y1="2" y2="22"/></svg>
+            <span id="gateOffText">Camera is off</span>
+          </div>
+        </div>
         <div class="gate-toggles">
           <button class="mbtn round" id="gateMic" title="Microphone">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
@@ -453,6 +519,32 @@
           <button class="mbtn round" id="gateCam" title="Camera">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
           </button>
+        </div>
+        <div class="gate-name" id="gateNameWrap" hidden>
+          <input id="gateName" placeholder="Your name" maxlength="40" autocomplete="name" autocapitalize="words" spellcheck="false" />
+        </div>
+        <div class="gate-devices">
+          <div class="dev-row">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+            <div class="select-wrap">
+              <select id="gateMicSel" aria-label="Microphone"></select>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+          </div>
+          <div class="dev-row">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/></svg>
+            <div class="select-wrap">
+              <select id="gateSpkSel" aria-label="Speaker"></select>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+          </div>
+          <div class="dev-row">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
+            <div class="select-wrap">
+              <select id="gateCamSel" aria-label="Camera"></select>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+          </div>
         </div>
         <div class="gate-note" id="gateNote">Your mic and camera start on. Toggle them here or any time in the meeting.</div>
         <button class="btn-join" id="gateJoin">Join now</button>
@@ -507,24 +599,29 @@
     </div>
 
     <div class="meet-bottom">
-      <div class="split" id="micSplit">
-        <button class="main-t" id="micBtn" title="Toggle microphone" aria-label="Toggle microphone"></button>
-        <button class="chev" id="micPick" title="Choose microphone" aria-label="Choose microphone">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+      <div class="ctrl-group">
+        <div class="split" id="micSplit">
+          <button class="main-t" id="micBtn" title="Toggle microphone" aria-label="Toggle microphone"></button>
+          <button class="chev" id="micPick" title="Microphone & speaker" aria-label="Microphone & speaker">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+          </button>
+        </div>
+        <div class="split" id="camSplit">
+          <button class="main-t" id="camBtn" title="Toggle camera" aria-label="Toggle camera"></button>
+          <button class="chev" id="camPick" title="Choose camera" aria-label="Choose camera">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+          </button>
+        </div>
+        <button class="mbtn pill" id="shareBtn" title="Share screen" aria-label="Share screen">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 10 3-3 3 3"/><path d="M12 13V7"/><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M12 17v4"/><path d="M8 21h8"/></svg>
+        </button>
+        <button class="mbtn round" id="qualBtn" title="Streaming quality" aria-label="Streaming quality">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
+        </button>
+        <button class="mbtn round" id="gridBtn" title="Grid view" aria-label="Grid view">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
         </button>
       </div>
-      <div class="split" id="camSplit">
-        <button class="main-t" id="camBtn" title="Toggle camera" aria-label="Toggle camera"></button>
-        <button class="chev" id="camPick" title="Choose camera" aria-label="Choose camera">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
-        </button>
-      </div>
-      <button class="mbtn pill" id="shareBtn" title="Share screen" aria-label="Share screen">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 10 3-3 3 3"/><path d="M12 13V7"/><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M12 17v4"/><path d="M8 21h8"/></svg>
-      </button>
-      <button class="mbtn round" id="gridBtn" title="Grid view" aria-label="Grid view">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
-      </button>
       <span class="spacer"></span>
       <button class="mbtn end" id="endBtn" title="Leave meeting" aria-label="Leave meeting">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)"/></svg>
@@ -540,6 +637,10 @@
         </button>
       </div>
       <div class="pp-list" id="ppList"></div>
+      <div class="pp-foot" id="ppFoot" hidden>
+        <span class="lbl">Allow joining without an account</span>
+        <button class="tgl" id="guestTgl" role="switch" aria-label="Allow joining without an account"></button>
+      </div>
     </div>
   </div>
 
@@ -555,8 +656,27 @@
   const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
   const PEER_COLORS = ["#4F7A5E","#7BA17F","#39604A","#A3B581","#6F8A6E","#8FAE92","#5A7773","#94A36B","#5B8A6C","#6A8E5F"];
   const BACKEND_KEY = "meet_backend";
+  const QUALITY_KEY = "meet_quality";
+  const GUEST_NAME_KEY = "meet_guest_name";
   const GRID_PAGE_SIZE = 9;
   const VOLC_SDK_SRC = "/static/vendor/volc-rtc-4.68.5.min.js";
+
+  // Per-user outgoing stream quality. Each tier pairs a video size/bitrate
+  // with an audio bitrate (mesh) / VolcEngine audio profile. "auto" leaves
+  // the backend to adapt on its own.
+  const QUALITIES = [
+    { id: "auto",    label: "Auto (Recommended)" },
+    { id: "low",     label: "Low · 360p" },
+    { id: "std",     label: "Standard · 720p" },
+    { id: "high",    label: "High quality · 1080p" },
+    { id: "premium", label: "Premium · 4K" },
+  ];
+  const QUALITY_CONF = {
+    low:     { w: 640,  h: 360,  fps: 15, kbps: 500,   akbps: 24,  volcAudio: "fluent" },
+    std:     { w: 1280, h: 720,  fps: 24, kbps: 1700,  akbps: 48,  volcAudio: "standard" },
+    high:    { w: 1920, h: 1080, fps: 30, kbps: 4000,  akbps: 128, volcAudio: "hd" },
+    premium: { w: 3840, h: 2160, fps: 30, kbps: 12000, akbps: 256, volcAudio: "hd" },
+  };
 
   const ICONS = {
     mic: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
@@ -569,6 +689,7 @@
     check: `<svg class="chk" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`,
     micTiny: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
     micTinyOff: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M5 10v2a7 7 0 0 0 12 4.3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
+    kick: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" x2="22" y1="8" y2="13"/><line x1="22" x2="17" y1="8" y2="13"/></svg>`,
   };
 
   // ──────── DOM / small helpers ────────
@@ -629,13 +750,18 @@
     roster: new Map(),   // pid -> {pid, user, muted, camOn, sharing}
     order: [],           // pids in join order
     pinned: null,        // pid pinned as main view, null = auto
-    grid: false,
+    grid: true,          // group view is the default; clicking a tile focuses it
     gridPage: 0,
+    autoFocusPid: null,  // pid we auto-focused for a screen share
+    allowGuests: false,
     micOn: true,
     camOn: true,
     sharing: false,
     micDevice: null,
     camDevice: null,
+    spkDevice: null,
+    quality: "auto",
+    gateStream: null,    // pre-join preview stream (adopted by mesh on join)
     // mesh
     localStream: null,
     screenStream: null,
@@ -653,6 +779,11 @@
 
   const tiles = new Map(); // pid -> {el, vbox, video, vMain, vScreen, phAv, nameEl}
   const audioEls = new Map(); // pid -> <audio> (mesh only)
+
+  try {
+    const q = localStorage.getItem(QUALITY_KEY);
+    if (q === "auto" || QUALITY_CONF[q]) state.quality = q;
+  } catch {}
 
   // ──────── Views ────────
   const VIEWS = ["lobbyView", "gateView", "interView", "meetView"];
@@ -729,6 +860,7 @@
         state.mode = data.mode;
         state.selfPid = data.self_pid;
         state.hostPid = data.host_pid;
+        state.allowGuests = !!data.allow_guests;
         state.roster.clear();
         state.order = [];
         (data.participants || []).forEach(p => {
@@ -737,6 +869,10 @@
         });
         state.volc = data.volc || null;
         state.phase = "inmeeting";
+        // Someone already sharing? Open on them instead of the grid.
+        for (const [pid, p] of state.roster) {
+          if (p.sharing && pid !== state.selfPid) { state.grid = false; state.autoFocusPid = pid; break; }
+        }
         showView("meetView");
         syncTiles();
         startMedia().catch(err => {
@@ -761,6 +897,10 @@
         state.roster.delete(data.pid);
         state.order = state.order.filter(x => x !== data.pid);
         if (state.pinned === data.pid) state.pinned = null;
+        if (state.autoFocusPid === data.pid) {
+          state.autoFocusPid = null;
+          if (state.pinned == null) state.grid = true; // their share focus ends with them
+        }
         meshDropPeer(data.pid);
         syncTiles();
         if (p) toast(`${p.user.display_name || p.user.username} left`);
@@ -769,11 +909,32 @@
       case "peer_state": {
         const p = state.roster.get(data.pid);
         if (!p) break;
+        const wasSharing = p.sharing;
         p.muted = !!data.muted;
         p.camOn = !!data.cam_on;
         p.sharing = !!data.sharing;
+        // A starting screen share pulls everyone into focus view on it; when
+        // it ends (and nothing was hand-picked) we fall back to the grid.
+        if (!wasSharing && p.sharing && data.pid !== state.selfPid && state.pinned == null) {
+          state.grid = false;
+          state.autoFocusPid = data.pid;
+        } else if (wasSharing && !p.sharing && state.autoFocusPid === data.pid) {
+          state.autoFocusPid = null;
+          if (state.pinned == null) state.grid = true;
+        }
         updateTile(data.pid);
         layout(); // sharing may change the auto main view
+        renderPeople();
+        break;
+      }
+      case "kicked": {
+        teardownMedia();
+        state.phase = "left";
+        showInterstitial("Removed from meeting", "The host removed you from this meeting.", false);
+        break;
+      }
+      case "guests_changed": {
+        state.allowGuests = !!data.allowed;
         renderPeople();
         break;
       }
@@ -908,12 +1069,31 @@
     const t = tiles.get(pid);
     if (!t) return;
     if (t.el.parentElement === $("mainView")) {
-      state.pinned = null; // clicking the main view unpins
+      // Clicking the focused view returns to the group grid.
+      state.pinned = null;
+      state.autoFocusPid = null;
+      state.grid = true;
     } else {
       state.pinned = pid;
+      state.autoFocusPid = null;
       state.grid = false;
     }
     layout();
+  }
+
+  // bestGridSize picks the row/column split that maximizes 16:9 tile area in
+  // a w×h container — no hardcoded arrangements, so a wide window leans on
+  // columns (6 → 2×3) and a portrait phone stacks a single column.
+  function bestGridSize(n, w, h, gap) {
+    let best = { w: 0, h: 0 };
+    for (let rows = 1; rows <= n; rows++) {
+      const cols = Math.ceil(n / rows);
+      const maxW = (w - gap * (cols - 1)) / cols;
+      const maxH = (h - gap * (rows - 1)) / rows;
+      const tw = Math.min(maxW, maxH * 16 / 9);
+      if (tw > best.w) best = { w: tw, h: tw * 9 / 16 };
+    }
+    return best;
   }
 
   // layout moves tile elements between the main view, the right stack, the
@@ -933,16 +1113,20 @@
       state.gridPage = Math.min(state.gridPage, pages - 1);
       const start = state.gridPage * GRID_PAGE_SIZE;
       const visible = pids.slice(start, start + GRID_PAGE_SIZE);
-      const cols = Math.ceil(Math.sqrt(visible.length));
-      const pct = Math.floor(100 / cols);
+      const rect = gridPages.getBoundingClientRect();
+      const size = bestGridSize(visible.length, Math.max(0, rect.width - 4), Math.max(0, rect.height - 4), 12);
+      const wpx = Math.max(96, Math.floor(size.w)) + "px";
+      const hpx = Math.max(54, Math.floor(size.h)) + "px";
       for (const pid of pids) {
         const t = tiles.get(pid);
         if (!t) continue;
         if (visible.includes(pid)) {
-          t.el.style.width = `calc(${pct}% - 12px)`;
+          t.el.style.width = wpx;
+          t.el.style.height = hpx;
           if (t.el.parentElement !== gridPages) gridPages.appendChild(t.el);
         } else {
           t.el.style.width = "";
+          t.el.style.height = "";
           if (t.el.parentElement !== park) park.appendChild(t.el);
         }
       }
@@ -957,6 +1141,7 @@
         const t = tiles.get(pid);
         if (!t) continue;
         t.el.style.width = "";
+        t.el.style.height = "";
         if (pid === mainPid) {
           if (t.el.parentElement !== main) main.appendChild(t.el);
         } else if (t.el.parentElement !== stack) {
@@ -973,7 +1158,13 @@
     pids.forEach(updateTile);
   }
 
-  $("gridBtn").addEventListener("click", () => { state.grid = !state.grid; state.gridPage = 0; layout(); });
+  $("gridBtn").addEventListener("click", () => {
+    state.grid = !state.grid;
+    state.gridPage = 0;
+    if (state.grid) { state.pinned = null; state.autoFocusPid = null; }
+    layout();
+  });
+  window.addEventListener("resize", () => { if (state.phase === "inmeeting") layout(); });
   $("gridPrev").addEventListener("click", () => { state.gridPage = Math.max(0, state.gridPage - 1); layout(); });
   $("gridNext").addEventListener("click", () => { state.gridPage = state.gridPage + 1; layout(); });
 
@@ -1004,23 +1195,31 @@
           <b>${escapeHTML(p.user.display_name || p.user.username)}${isSelf ? " (You)" : ""}</b>
           <span class="sub">
             ${state.hostPid === pid ? `<span class="host-badge" title="Host">${ICONS.crown}</span> Host ·` : ""}
-            @${escapeHTML(p.user.username)}
+            ${p.user.guest ? "Guest" : "@" + escapeHTML(p.user.username)}
           </span>
         </div>
         <span class="mic-state ${p.muted ? "muted" : ""}">${p.muted ? ICONS.micTinyOff : ICONS.micTiny}</span>
         ${meHost && !isSelf && !p.muted ? `<button class="pp-act" data-act="mute" title="Mute">${ICONS.micTinyOff}</button>` : ""}
-        ${meHost && !isSelf ? `<button class="pp-act" data-act="host" title="Make host">${ICONS.crown}</button>` : ""}`;
+        ${meHost && !isSelf ? `<button class="pp-act" data-act="host" title="Make host">${ICONS.crown}</button>` : ""}
+        ${meHost && !isSelf ? `<button class="pp-act danger" data-act="kick" title="Remove from meeting">${ICONS.kick}</button>` : ""}`;
       row.querySelectorAll(".pp-act").forEach(btn => {
         btn.addEventListener("click", (e) => {
           e.stopPropagation();
           const act = btn.getAttribute("data-act");
           if (act === "mute") send({ type: "host_mute", pid });
           if (act === "host") send({ type: "host_transfer", pid });
+          if (act === "kick") send({ type: "host_kick", pid });
         });
       });
       list.appendChild(row);
     }
+    $("ppFoot").hidden = !meHost;
+    $("guestTgl").classList.toggle("on", state.allowGuests);
+    $("guestTgl").setAttribute("aria-checked", state.allowGuests ? "true" : "false");
   }
+  $("guestTgl").addEventListener("click", () => {
+    send({ type: "set_guests", allowed: !state.allowGuests });
+  });
 
   // ──────── Copy link ────────
   function copyLink() {
@@ -1133,10 +1332,10 @@
   });
 
   async function listDevices(kind) {
-    if (state.mode === "volc") {
+    if (state.mode === "volc" && window.VERTC) {
       try {
-        return kind === "audioinput"
-          ? await VERTC.enumerateAudioCaptureDevices()
+        return kind === "audioinput" ? await VERTC.enumerateAudioCaptureDevices()
+          : kind === "audiooutput" ? await VERTC.enumerateAudioPlaybackDevices()
           : await VERTC.enumerateVideoCaptureDevices();
       } catch { return []; }
     }
@@ -1146,36 +1345,63 @@
     } catch { return []; }
   }
 
-  async function showDevicePicker(anchor, kind) {
-    closeMenu();
-    const devices = (await listDevices(kind)).filter(d => d.deviceId);
-    const menu = document.createElement("div");
-    menu.className = "float-menu";
-    const current = kind === "audioinput" ? state.micDevice : state.camDevice;
-    menu.innerHTML = `<div class="hd">${kind === "audioinput" ? "Microphone" : "Camera"}</div>`;
+  // Anchors a float menu above its button, clamped to the viewport.
+  function openMenuAt(menu, anchor) {
+    document.body.appendChild(menu);
+    const r = anchor.getBoundingClientRect();
+    const mr = menu.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - mr.width - 8)) + "px";
+    menu.style.top = Math.max(8, r.top - mr.height - 8) + "px";
+    state.openMenu = menu;
+  }
+
+  function menuSection(menu, title, devices, current, onPick) {
+    const hd = document.createElement("div");
+    hd.className = "hd";
+    hd.textContent = title;
+    menu.appendChild(hd);
     if (!devices.length) {
-      menu.innerHTML += `<button class="item" disabled><span class="lbl">No devices found</span></button>`;
+      const none = document.createElement("button");
+      none.className = "item";
+      none.disabled = true;
+      none.innerHTML = `<span class="lbl">No devices found</span>`;
+      menu.appendChild(none);
+      return;
     }
     devices.forEach((d, i) => {
       const btn = document.createElement("button");
       btn.className = "item" + ((current ? d.deviceId === current : i === 0) ? " cur" : "");
       btn.innerHTML = `${ICONS.check}<span class="lbl">${escapeHTML(d.label || `Device ${i + 1}`)}</span>`;
-      btn.addEventListener("click", () => {
-        closeMenu();
-        if (kind === "audioinput") setMicDevice(d.deviceId);
-        else setCamDevice(d.deviceId);
-      });
+      btn.addEventListener("click", () => { closeMenu(); onPick(d.deviceId); });
       menu.appendChild(btn);
     });
-    document.body.appendChild(menu);
-    const r = anchor.getBoundingClientRect();
-    const mr = menu.getBoundingClientRect();
-    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - mr.width - 8)) + "px";
-    menu.style.top = (r.top - mr.height - 8) + "px";
-    state.openMenu = menu;
   }
-  $("micPick").addEventListener("click", (e) => { e.stopPropagation(); showDevicePicker(e.currentTarget, "audioinput"); });
-  $("camPick").addEventListener("click", (e) => { e.stopPropagation(); showDevicePicker(e.currentTarget, "videoinput"); });
+
+  // The mic chevron carries both audio menus: microphone in, speaker out.
+  async function showAudioPicker(anchor) {
+    closeMenu();
+    const mics = (await listDevices("audioinput")).filter(d => d.deviceId);
+    const outs = (await listDevices("audiooutput")).filter(d => d.deviceId);
+    const menu = document.createElement("div");
+    menu.className = "float-menu";
+    menuSection(menu, "Microphone", mics, state.micDevice, setMicDevice);
+    const sep = document.createElement("div");
+    sep.className = "sep";
+    menu.appendChild(sep);
+    menuSection(menu, "Speaker", outs, state.spkDevice, setSpeakerDevice);
+    openMenuAt(menu, anchor);
+  }
+
+  async function showCamPicker(anchor) {
+    closeMenu();
+    const cams = (await listDevices("videoinput")).filter(d => d.deviceId);
+    const menu = document.createElement("div");
+    menu.className = "float-menu";
+    menuSection(menu, "Camera", cams, state.camDevice, setCamDevice);
+    openMenuAt(menu, anchor);
+  }
+  $("micPick").addEventListener("click", (e) => { e.stopPropagation(); showAudioPicker(e.currentTarget); });
+  $("camPick").addEventListener("click", (e) => { e.stopPropagation(); showCamPicker(e.currentTarget); });
 
   async function setMicDevice(deviceId) {
     state.micDevice = deviceId;
@@ -1199,6 +1425,99 @@
     const track = await acquireTrack("video", deviceId, true);
     if (track) { track.enabled = state.camOn; refreshSelfPreview(); toast("Camera switched", "ok"); }
     else toast("Couldn't switch camera", "err");
+  }
+
+  async function setSpeakerDevice(deviceId) {
+    state.spkDevice = deviceId;
+    if (state.mode === "volc") {
+      try { await state.volcEngine.setAudioPlaybackDevice(deviceId); toast("Speaker switched", "ok"); }
+      catch { toast("Couldn't switch speaker", "err"); }
+      return;
+    }
+    if (!HTMLMediaElement.prototype.setSinkId) {
+      toast("Speaker selection isn't supported in this browser", "err");
+      return;
+    }
+    let ok = true;
+    for (const [, a] of audioEls) {
+      try { await a.setSinkId(deviceId); } catch { ok = false; }
+    }
+    toast(ok ? "Speaker switched" : "Couldn't switch speaker", ok ? "ok" : "err");
+  }
+
+  // ──────── Speaking indicator ────────
+  // Lights a green stroke on the active speaker's tile. Deliberately not
+  // touchy: the level must clear a speech-y threshold, and the stroke holds
+  // for a while after the last loud sample so it doesn't flicker on pauses —
+  // but room hum below the threshold never lights it.
+  const SPEAK_RMS = 0.05;      // mesh: time-domain RMS (0..1)
+  const SPEAK_VOLC = 45;       // volc: linearVolume (0..255)
+  const SPEAK_HOLD_MS = 700;
+  const SPEAK_TICK_MS = 180;
+  const speak = { ctx: null, meters: new Map(), last: new Map(), timer: null };
+
+  function setSpeaking(pid, on) {
+    const t = tiles.get(pid);
+    if (t) t.el.classList.toggle("speaking", on);
+  }
+
+  function speakHeard(pid) {
+    speak.last.set(pid, performance.now());
+    setSpeaking(pid, true);
+  }
+
+  function speakTimerTick() {
+    for (const [pid, m] of speak.meters) {
+      const p = state.roster.get(pid);
+      const muted = pid === state.selfPid ? !state.micOn : (!p || p.muted);
+      if (muted) continue;
+      m.an.getByteTimeDomainData(m.buf);
+      let sum = 0;
+      for (let i = 0; i < m.buf.length; i++) { const d = (m.buf[i] - 128) / 128; sum += d * d; }
+      if (Math.sqrt(sum / m.buf.length) > SPEAK_RMS) speakHeard(pid);
+    }
+    const now = performance.now();
+    for (const [pid, ts] of speak.last) {
+      if (now - ts > SPEAK_HOLD_MS) { speak.last.delete(pid); setSpeaking(pid, false); }
+    }
+  }
+
+  function startSpeakTimer() {
+    if (!speak.timer) speak.timer = setInterval(speakTimerTick, SPEAK_TICK_MS);
+  }
+
+  // meshWatchMic meters one audio track (self mic or a remote's track).
+  function meshWatchMic(pid, track) {
+    if (!track) return;
+    try {
+      if (!speak.ctx) speak.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const old = speak.meters.get(pid);
+      if (old && old.key === track.id) return;
+      if (old) { try { old.src.disconnect(); } catch {} }
+      const src = speak.ctx.createMediaStreamSource(new MediaStream([track]));
+      const an = speak.ctx.createAnalyser();
+      an.fftSize = 512;
+      src.connect(an);
+      speak.meters.set(pid, { key: track.id, src, an, buf: new Uint8Array(an.fftSize) });
+      speak.ctx.resume().catch(() => {});
+    } catch {}
+    startSpeakTimer();
+  }
+
+  function speakDropPeer(pid) {
+    const m = speak.meters.get(pid);
+    if (m) { try { m.src.disconnect(); } catch {} speak.meters.delete(pid); }
+    speak.last.delete(pid);
+    setSpeaking(pid, false);
+  }
+
+  function speakTeardown() {
+    for (const [pid] of speak.meters) setSpeaking(pid, false);
+    for (const [pid] of speak.last) setSpeaking(pid, false);
+    speak.meters.clear();
+    speak.last.clear();
+    if (speak.timer) { clearInterval(speak.timer); speak.timer = null; }
+    if (speak.ctx) { try { speak.ctx.close(); } catch {} speak.ctx = null; }
   }
 
   // ──────── Mesh media ────────
@@ -1235,6 +1554,7 @@
         if (tx) tx.sender.replaceTrack(track).catch(() => {});
       }
     }
+    if (kind === "audio") meshWatchMic(state.selfPid, track);
     if (kind === "video") refreshSelfPreview();
     return track;
   }
@@ -1313,22 +1633,27 @@
         if (!a) {
           a = document.createElement("audio");
           a.autoplay = true;
+          if (state.spkDevice && a.setSinkId) a.setSinkId(state.spkDevice).catch(() => {});
           $("audioPool").appendChild(a);
           audioEls.set(pid, a);
         }
         if (a.srcObject !== remote) a.srcObject = remote;
         a.play().catch(() => {});
+        meshWatchMic(pid, ev.track);
       }
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed") {
         try { pc.restartIce(); } catch {}
       }
+      // Encodings exist only after negotiation; (re)apply the bitrate caps.
+      if (pc.connectionState === "connected") meshApplyPeerQuality(peer);
     };
     state.pcs.set(pid, peer);
   }
 
   function meshDropPeer(pid) {
+    speakDropPeer(pid);
     const peer = state.pcs.get(pid);
     if (!peer) return;
     try { peer.pc.close(); } catch {}
@@ -1412,7 +1737,7 @@
         const t = tiles.get(state.selfPid);
         if (t) {
           state.volcEngine.setLocalVideoPlayer(VERTC.StreamIndex.STREAM_INDEX_SCREEN, {
-            renderDom: t.vScreen, userId: state.volc.user_id,
+            renderDom: t.vScreen, userId: state.volc.user_id, renderMode: volcFitMode(),
           });
         }
         state.sharing = true;
@@ -1474,10 +1799,90 @@
     updateSelfRoster();
   }
 
+  // ──────── Streaming quality ────────
+  // Applies the user's tier to their *outgoing* stream. Mesh: capture
+  // constraints on the camera track plus per-sender bitrate caps. Volc:
+  // capture/encoder config plus an audio profile. "Auto" lifts the caps and
+  // lets the backend adapt.
+  async function applyQuality() {
+    const conf = QUALITY_CONF[state.quality] || null;
+    if (state.mode === "volc") {
+      const eng = state.volcEngine;
+      if (!eng || !window.VERTC) return;
+      try {
+        const v = conf || { w: 1280, h: 720, fps: 24, kbps: 0 };
+        try { await eng.setVideoCaptureConfig({ width: v.w, height: v.h, frameRate: v.fps }); } catch {}
+        const encCfg = { width: v.w, height: v.h, frameRate: v.fps };
+        if (v.kbps) encCfg.maxKbps = v.kbps;
+        await eng.setVideoEncoderConfig(encCfg);
+        const profiles = VERTC.AudioProfileType || {};
+        if (typeof eng.setAudioProfile === "function") {
+          const p = conf ? profiles[conf.volcAudio] : profiles.default;
+          eng.setAudioProfile(p ?? profiles.default ?? 0);
+        }
+      } catch (err) { console.warn("[volc] quality apply failed", err); }
+    } else {
+      const cam = state.localStream?.getVideoTracks()[0];
+      if (cam) {
+        const want = conf
+          ? { width: { ideal: conf.w }, height: { ideal: conf.h }, frameRate: { ideal: conf.fps } }
+          : { width: { ideal: 1280 }, height: { ideal: 720 } };
+        try { await cam.applyConstraints(want); } catch {}
+      }
+      for (const peer of state.pcs.values()) meshApplyPeerQuality(peer);
+    }
+  }
+
+  // Caps one peer connection's send bitrates. Encodings only exist once
+  // negotiation ran, so this is re-applied when a connection reaches
+  // "connected" — fresh peers pick the tier up there.
+  function meshApplyPeerQuality(peer) {
+    const conf = QUALITY_CONF[state.quality] || null;
+    const cap = (tx, kbps) => {
+      if (!tx || !tx.sender) return;
+      try {
+        const params = tx.sender.getParameters();
+        if (!params.encodings || !params.encodings.length) return;
+        if (kbps) params.encodings[0].maxBitrate = kbps * 1000;
+        else delete params.encodings[0].maxBitrate;
+        tx.sender.setParameters(params).catch(() => {});
+      } catch {}
+    };
+    cap(peer.videoTx, conf && conf.kbps);
+    cap(peer.audioTx, conf && conf.akbps);
+  }
+
+  function showQualityMenu(anchor) {
+    closeMenu();
+    const menu = document.createElement("div");
+    menu.className = "float-menu";
+    menu.innerHTML = `<div class="hd">Streaming quality</div>`;
+    QUALITIES.forEach(q => {
+      const btn = document.createElement("button");
+      btn.className = "item" + (state.quality === q.id ? " cur" : "");
+      btn.innerHTML = `${ICONS.check}<span class="lbl">${q.label}</span>`;
+      btn.addEventListener("click", () => {
+        closeMenu();
+        state.quality = q.id;
+        try { localStorage.setItem(QUALITY_KEY, q.id); } catch {}
+        applyQuality();
+        toast(q.label, "ok");
+      });
+      menu.appendChild(btn);
+    });
+    openMenuAt(menu, anchor);
+  }
+  $("qualBtn").addEventListener("click", (e) => { e.stopPropagation(); showQualityMenu(e.currentTarget); });
+
   // ──────── VolcEngine media ────────
   function pidFromVolcUid(uid) {
     const n = parseInt(String(uid || "").replace(/^p/, ""), 10);
     return Number.isFinite(n) ? n : null;
+  }
+
+  // FIT = scale to fit (letterbox), matching the mesh object-fit: contain.
+  function volcFitMode() {
+    return (window.VERTC && VERTC.VideoRenderMode && VERTC.VideoRenderMode.RENDER_MODE_FIT) ?? 1;
   }
 
   function attachVolcLocalMain() {
@@ -1485,7 +1890,7 @@
     if (!t || !state.volcEngine) return;
     try {
       state.volcEngine.setLocalVideoPlayer(VERTC.StreamIndex.STREAM_INDEX_MAIN, {
-        renderDom: t.vMain, userId: state.volc.user_id,
+        renderDom: t.vMain, userId: state.volc.user_id, renderMode: volcFitMode(),
       });
     } catch (err) { console.warn("[volc] local player failed", err); }
   }
@@ -1496,7 +1901,7 @@
     try {
       state.volcEngine.setRemoteVideoPlayer(
         screen ? VERTC.StreamIndex.STREAM_INDEX_SCREEN : VERTC.StreamIndex.STREAM_INDEX_MAIN,
-        { renderDom: screen ? t.vScreen : t.vMain, userId: "p" + pid },
+        { renderDom: screen ? t.vScreen : t.vMain, userId: "p" + pid, renderMode: volcFitMode() },
       );
     } catch (err) { console.warn("[volc] remote player failed", err); }
   }
@@ -1542,6 +1947,23 @@
     on("onError", (e) => {
       console.error("[volc] engine error", e);
     });
+    // Speaking indicator: the SDK reports capture/playback volumes
+    // (linearVolume 0..255); the shared hold/threshold logic does the rest.
+    on("onLocalAudioPropertiesReport", (list) => {
+      if (!state.micOn) return;
+      (list || []).forEach(r => {
+        const v = r && r.audioPropertiesInfo && r.audioPropertiesInfo.linearVolume;
+        if ((v | 0) > SPEAK_VOLC) speakHeard(state.selfPid);
+      });
+    });
+    on("onRemoteAudioPropertiesReport", (list) => {
+      (list || []).forEach(r => {
+        const pid = pidFromVolcUid(r && r.streamKey && r.streamKey.userId);
+        const p = pid != null ? state.roster.get(pid) : null;
+        const v = r && r.audioPropertiesInfo && r.audioPropertiesInfo.linearVolume;
+        if (p && !p.muted && (v | 0) > SPEAK_VOLC) speakHeard(pid);
+      });
+    });
 
     await engine.joinRoom(info.token, info.room_id, { userId: info.user_id }, {
       isAutoPublish: true,
@@ -1549,11 +1971,17 @@
       isAutoSubscribeVideo: true,
     });
 
+    try { engine.enableAudioPropertiesReport({ interval: SPEAK_TICK_MS }); } catch {}
+    startSpeakTimer(); // volc has no meters; the timer just decays the stroke
+    await applyQuality();
+    if (state.spkDevice) {
+      try { await engine.setAudioPlaybackDevice(state.spkDevice); } catch {}
+    }
     if (state.micOn) {
-      try { await engine.startAudioCapture(); } catch (err) { console.warn("[volc] mic", err); state.micOn = false; }
+      try { await engine.startAudioCapture(state.micDevice || undefined); } catch (err) { console.warn("[volc] mic", err); state.micOn = false; }
     }
     if (state.camOn) {
-      try { await engine.startVideoCapture(); attachVolcLocalMain(); } catch (err) { console.warn("[volc] cam", err); state.camOn = false; }
+      try { await engine.startVideoCapture(state.camDevice || undefined); attachVolcLocalMain(); } catch (err) { console.warn("[volc] cam", err); state.camOn = false; }
     }
     if (!state.micOn && !state.camOn) toast("Joined without mic and camera", "warn");
     updateSelfRoster();
@@ -1566,6 +1994,8 @@
     } else {
       await ensureLocalMedia();
       refreshSelfPreview();
+      meshWatchMic(state.selfPid, state.localStream?.getAudioTracks()[0]);
+      await applyQuality();
       for (const pid of state.order) {
         if (pid !== state.selfPid) meshEnsurePeer(pid);
       }
@@ -1574,6 +2004,8 @@
   }
 
   function teardownMedia() {
+    speakTeardown();
+    stopGatePreview();
     for (const [pid, peer] of state.pcs) {
       try { peer.pc.close(); } catch {}
     }
@@ -1672,11 +2104,100 @@
       .catch(() => {});
   }
 
+  // ──────── Pre-join preview ────────
+  // The gate shows a live selfie preview plus mic/speaker/camera pickers so
+  // people can check themselves before joining. Mesh adopts the preview
+  // stream as the call media; volc stops it and lets the SDK capture.
+  async function startGatePreview() {
+    stopGatePreview();
+    let s = null;
+    try {
+      s = await navigator.mediaDevices.getUserMedia({
+        audio: state.micDevice ? { deviceId: { exact: state.micDevice } } : true,
+        video: state.camDevice ? { deviceId: { exact: state.camDevice } } : true,
+      });
+    } catch {
+      try { s = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch {}
+    }
+    if (state.phase !== "gate") { // joined (or left) while we waited
+      if (s) { try { s.getTracks().forEach(t => t.stop()); } catch {} }
+      return;
+    }
+    state.gateStream = s;
+    syncGatePreview();
+    await fillGateDevices();
+  }
+
+  function stopGatePreview() {
+    if (state.gateStream) { try { state.gateStream.getTracks().forEach(t => t.stop()); } catch {} }
+    state.gateStream = null;
+    const v = $("gateVideo");
+    if (v.srcObject) v.srcObject = null;
+  }
+
+  function syncGatePreview() {
+    const v = $("gateVideo");
+    const vt = state.gateStream ? state.gateStream.getVideoTracks()[0] : null;
+    if (vt) vt.enabled = state.camOn;
+    if (v.srcObject !== state.gateStream) v.srcObject = state.gateStream;
+    const showVideo = !!vt && state.camOn;
+    $("gateOff").hidden = showVideo;
+    $("gateOffText").textContent = vt || !state.gateStream ? "Camera is off" : "No camera found";
+  }
+
+  function gateTrackDeviceId(kind) {
+    const t = kind === "audio"
+      ? state.gateStream?.getAudioTracks()[0]
+      : state.gateStream?.getVideoTracks()[0];
+    try { return t ? t.getSettings().deviceId : null; } catch { return null; }
+  }
+
+  async function fillGateDevices() {
+    let all = [];
+    try { all = await navigator.mediaDevices.enumerateDevices(); } catch {}
+    const fill = (id, kind, current, fallback) => {
+      const sel = $(id);
+      const devs = all.filter(d => d.kind === kind && d.deviceId);
+      sel.innerHTML = "";
+      if (!devs.length) {
+        sel.appendChild(new Option(fallback, ""));
+        sel.disabled = true;
+        return;
+      }
+      sel.disabled = false;
+      devs.forEach((d, i) => sel.appendChild(new Option(d.label || `${fallback} ${i + 1}`, d.deviceId)));
+      if (current && devs.some(d => d.deviceId === current)) sel.value = current;
+    };
+    fill("gateMicSel", "audioinput", state.micDevice || gateTrackDeviceId("audio"), "Microphone");
+    fill("gateSpkSel", "audiooutput", state.spkDevice, "Speaker");
+    fill("gateCamSel", "videoinput", state.camDevice || gateTrackDeviceId("video"), "Camera");
+  }
+
+  // Hands the preview tracks to the meeting so a mesh join is seamless.
+  function adoptGateStream() {
+    if (!state.gateStream) return;
+    state.localStream = state.gateStream;
+    state.gateStream = null;
+    $("gateVideo").srcObject = null;
+    const at = state.localStream.getAudioTracks()[0] || null;
+    const vt = state.localStream.getVideoTracks()[0] || null;
+    state.micOn = state.micOn && !!at;
+    state.camOn = state.camOn && !!vt;
+    if (at) at.enabled = state.micOn;
+    if (vt) vt.enabled = state.camOn;
+  }
+
   // ──────── Meeting boot ────────
   async function initMeeting(code) {
     state.code = code;
     $("gateCode").textContent = code;
     $("meetCode").textContent = code;
+
+    // Who am I? Guests get null and join by name (when the host allows it).
+    try {
+      const r = await fetch("/api/me", { credentials: "same-origin" });
+      if (r.ok) state.me = (await r.json()).user || null;
+    } catch {}
 
     let info;
     try {
@@ -1692,11 +2213,22 @@
       return;
     }
     state.mode = info.mode;
+    state.allowGuests = !!info.allow_guests;
+    if (!state.me && !state.allowGuests) {
+      // The host turned guest access off after this page was served.
+      location.href = "/login?next=" + encodeURIComponent(location.pathname);
+      return;
+    }
     connectWS();
 
     // Pre-join gate — also supplies the user gesture autoplay policies want.
     showView("gateView");
     state.phase = "gate";
+    if (!state.me) {
+      $("gateNameWrap").hidden = false;
+      try { $("gateName").value = localStorage.getItem(GUEST_NAME_KEY) || ""; } catch {}
+      $("gateName").addEventListener("keydown", (e) => { if (e.key === "Enter") $("gateJoin").click(); });
+    }
     const gateNoteFor = () => {
       const n = info.participants | 0;
       return n === 0 ? "No one else is here yet." : n === 1 ? "1 person is in this meeting." : `${n} people are in this meeting.`;
@@ -1708,20 +2240,35 @@
       $("gateMic").innerHTML = state.micOn ? ICONS.mic : ICONS.micOff;
       $("gateCam").innerHTML = state.camOn ? ICONS.cam : ICONS.camOff;
     };
-    $("gateMic").addEventListener("click", () => { state.micOn = !state.micOn; syncGate(); });
-    $("gateCam").addEventListener("click", () => { state.camOn = !state.camOn; syncGate(); });
+    $("gateMic").addEventListener("click", () => { state.micOn = !state.micOn; syncGate(); syncGatePreview(); });
+    $("gateCam").addEventListener("click", () => { state.camOn = !state.camOn; syncGate(); syncGatePreview(); });
     syncGate();
-    $("gateBack").addEventListener("click", () => { location.href = "/"; });
+    $("gateMicSel").addEventListener("change", () => { state.micDevice = $("gateMicSel").value || null; startGatePreview(); });
+    $("gateCamSel").addEventListener("change", () => { state.camDevice = $("gateCamSel").value || null; startGatePreview(); });
+    $("gateSpkSel").addEventListener("change", () => { state.spkDevice = $("gateSpkSel").value || null; });
+    $("gateBack").addEventListener("click", () => { stopGatePreview(); location.href = "/"; });
     $("gateJoin").addEventListener("click", async () => {
+      let guestName = "";
+      if (!state.me) {
+        guestName = $("gateName").value.trim();
+        if (!guestName) { toast("Enter your name first", "warn"); $("gateName").focus(); return; }
+        try { localStorage.setItem(GUEST_NAME_KEY, guestName); } catch {}
+      }
       $("gateJoin").disabled = true;
       state.phase = "joining";
       if (state.mode === "mesh") {
-        await ensureLocalMedia(); // ask for devices inside the click gesture
+        adoptGateStream();        // reuse the preview tracks as call media
+        await ensureLocalMedia(); // fallback when the preview never started
+      } else {
+        stopGatePreview();        // the VolcEngine SDK captures on its own
       }
       updateControls();
-      send({ type: "join", code });
+      const msg = { type: "join", code };
+      if (guestName) msg.guest_name = guestName;
+      send(msg);
     });
     updateControls();
+    startGatePreview(); // live selfie preview + unlock device labels
   }
 
   // ──────── Boot ────────
