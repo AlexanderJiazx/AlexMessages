@@ -132,14 +132,25 @@ microphones *and* speakers — output switching is `setSinkId` on the mesh audio
 pool / `setAudioPlaybackDevice` on volc), camera split button, screen share,
 **streaming-quality menu** (Auto/Low 360p/Standard 720p/High 1080p/Premium 4K;
 per-user, applied to *their* outgoing stream: capture constraints + per-sender
-bitrate caps in mesh, `setVideoCaptureConfig`/`setVideoEncoderConfig` + audio
-profile in volc), grid toggle, and the red leave pill. Top-left copy-link
+bitrate caps in mesh; `setVideoEncoderConfig` + `setScreenEncoderConfig` +
+audio profile in volc — `maxKbps` is mandatory there, the SDK rejects configs
+without it and keeps its 640×480/600 Kbps default, so even "Auto" passes an
+explicit 720p/2000 Kbps profile), grid toggle, and the red leave pill.
+Note: volc media quality is bounded by the network path to VolcEngine's relay,
+not by these configs — behind a UDP-blocking proxy/VPN the SDK falls back to
+ICE-TCP through the tunnel (~260 ms RTT) and congestion control caps the send
+rate around 0.5–1 Mbps regardless of the tier, so 4K will look blocky. Direct
+UDP to a nearby volc edge is required for the high tiers to mean anything. Top-left copy-link
 button + code chip; top-right people panel with host mute / make-host / kick
 actions and the allow-guests switch. All icons are embedded Lucide SVGs. Tiles
 never get destroyed on layout changes — they move between main/stack/grid
 containers and an off-screen "park" so media keeps playing; in mesh mode
 remote audio plays through a fixed hidden audio pool so tile juggling can't
-interrupt it.
+interrupt it. Gotcha: WebKit pauses a `<video>` whose element is re-inserted
+in the DOM (Chrome doesn't), so tile moves go through `placeTile`/`placeTiles`
+— no-op when already in position, `moveBefore()` where supported, otherwise
+`insertBefore` + `play()` resume (plus a post-layout sweep and a pause
+listener on mesh tile videos).
 
 ## Layout
 

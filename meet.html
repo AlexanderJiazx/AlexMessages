@@ -1010,6 +1010,11 @@
     if (state.mode === "mesh") {
       const v = document.createElement("video");
       v.autoplay = true; v.playsInline = true; v.muted = true;
+      // Tile videos are never paused on purpose, so any pause is WebKit
+      // reacting to a DOM move (or a tab switch) — resume once it settles.
+      v.addEventListener("pause", () => {
+        if (v.srcObject) queueMicrotask(() => { if (v.paused) v.play().catch(() => {}); });
+      });
       t.vbox.appendChild(v);
       t.video = v;
     }
@@ -1096,6 +1101,31 @@
     return best;
   }
 
+  // Safari (WebKit) pauses a <video> whenever its element is re-inserted in
+  // the DOM, and autoplay won't restart it — so moving tiles with appendChild
+  // froze every feed there (Chrome keeps playing through DOM moves).
+  // moveBefore() moves nodes without state resets where it exists (Chrome
+  // 133+ / Firefox 144+; no Safari support as of 27); elsewhere fall back to
+  // insertBefore and nudge the videos back into playback.
+  function placeTile(parent, el, before = null) {
+    if (el.parentNode === parent && el.nextSibling === before) return;
+    if (el.parentNode && typeof parent.moveBefore === "function") {
+      try { parent.moveBefore(el, before); return; } catch {}
+    }
+    parent.insertBefore(el, before);
+    el.querySelectorAll("video").forEach(v => { if (v.paused) v.play().catch(() => {}); });
+  }
+
+  // Reorders parent's children to match els with the fewest moves — a
+  // steady-state layout() touches no nodes, so playback never blips.
+  function placeTiles(parent, els) {
+    let cursor = parent.firstChild;
+    for (const el of els) {
+      if (el === cursor) { cursor = cursor.nextSibling; continue; }
+      placeTile(parent, el, cursor);
+    }
+  }
+
   // layout moves tile elements between the main view, the right stack, the
   // grid pages, and the off-screen park (media keeps playing when parked).
   function layout() {
@@ -1117,45 +1147,45 @@
       const size = bestGridSize(visible.length, Math.max(0, rect.width - 4), Math.max(0, rect.height - 4), 12);
       const wpx = Math.max(96, Math.floor(size.w)) + "px";
       const hpx = Math.max(54, Math.floor(size.h)) + "px";
+      const visEls = [];
       for (const pid of pids) {
         const t = tiles.get(pid);
         if (!t) continue;
         if (visible.includes(pid)) {
           t.el.style.width = wpx;
           t.el.style.height = hpx;
-          if (t.el.parentElement !== gridPages) gridPages.appendChild(t.el);
+          visEls.push(t.el);
         } else {
           t.el.style.width = "";
           t.el.style.height = "";
-          if (t.el.parentElement !== park) park.appendChild(t.el);
+          if (t.el.parentNode !== park) placeTile(park, t.el, null);
         }
       }
-      // Keep page order stable.
-      visible.forEach(pid => { const t = tiles.get(pid); if (t) gridPages.appendChild(t.el); });
+      placeTiles(gridPages, visEls); // page membership + stable order
       $("gridPrev").disabled = state.gridPage <= 0;
       $("gridNext").disabled = state.gridPage >= pages - 1;
       $("gridPrev").parentElement.querySelectorAll(".pager").forEach(b => b.hidden = pages <= 1);
     } else {
       const mainPid = (state.pinned != null && state.roster.has(state.pinned)) ? state.pinned : autoMainPid();
+      const stackEls = [];
       for (const pid of pids) {
         const t = tiles.get(pid);
         if (!t) continue;
         t.el.style.width = "";
         t.el.style.height = "";
-        if (pid === mainPid) {
-          if (t.el.parentElement !== main) main.appendChild(t.el);
-        } else if (t.el.parentElement !== stack) {
-          stack.appendChild(t.el);
-        }
+        if (pid === mainPid) placeTile(main, t.el, null);
+        else stackEls.push(t.el); // join order, skipping the main tile
       }
-      // Stable stack order (join order, skipping the main tile).
-      pids.forEach(pid => {
-        if (pid === mainPid) return;
-        const t = tiles.get(pid);
-        if (t) stack.appendChild(t.el);
-      });
+      placeTiles(stack, stackEls);
     }
     pids.forEach(updateTile);
+    // WebKit can finalize the reparent pause in a later task — sweep once the
+    // dust settles and restart anything that stopped (no-op elsewhere).
+    setTimeout(() => {
+      for (const [, t] of tiles) {
+        t.el.querySelectorAll("video").forEach(v => { if (v.paused) v.play().catch(() => {}); });
+      }
+    }, 0);
   }
 
   $("gridBtn").addEventListener("click", () => {
@@ -1590,7 +1620,10 @@
     const t = tiles.get(state.selfPid);
     if (!t || !t.video) return;
     const src = state.sharing && state.screenStream ? state.screenStream : state.localStream;
-    if (t.video.srcObject !== src) t.video.srcObject = src;
+    if (t.video.srcObject !== src) {
+      t.video.srcObject = src;
+      t.video.play().catch(() => {}); // Safari: autoplay may have been consumed
+    }
   }
 
   function meshEnsurePeer(pid) {
@@ -1632,7 +1665,10 @@
     pc.ontrack = (ev) => {
       const t = tiles.get(pid);
       const remote = (ev.streams && ev.streams[0]) || new MediaStream([ev.track]);
-      if (t && t.video && t.video.srcObject !== remote) t.video.srcObject = remote;
+      if (t && t.video && t.video.srcObject !== remote) {
+        t.video.srcObject = remote;
+        t.video.play().catch(() => {}); // Safari: autoplay may have been consumed
+      }
       if (ev.track.kind === "audio") {
         let a = audioEls.get(pid);
         if (!a) {
@@ -1837,27 +1873,36 @@
   }
 
   // Applies the user's tier to their *outgoing* stream. Mesh: capture
-  // constraints on the camera track plus per-sender bitrate caps. Volc:
-  // capture/encoder config plus an audio profile. "Auto" lifts the caps and
-  // lets the backend adapt.
+  // constraints on the camera track plus per-sender bitrate caps ("Auto"
+  // lifts the caps and lets the browser adapt). Volc: setVideoEncoderConfig
+  // drives BOTH capture and encoding since SDK 4.51 (setVideoCaptureConfig is
+  // deprecated), and maxKbps is mandatory — the SDK rejects configs without
+  // it and keeps publishing its 640×480 / 15 fps / 600 Kbps default, so
+  // "Auto" gets an explicit 720p profile and adaptation happens below the cap.
   async function applyQuality() {
     const conf = QUALITY_CONF[state.quality] || null;
     if (state.mode === "volc") {
       const eng = state.volcEngine;
       if (!eng || !window.VERTC) return;
+      const v = conf || { w: 1280, h: 720, fps: 24, kbps: 2000 };
+      const fit = fitTierToCamera(v, await cameraMaxRes(null));
       try {
-        const v = conf || { w: 1280, h: 720, fps: 24, kbps: 0 };
-        const fit = fitTierToCamera(v, await cameraMaxRes(null));
-        try { await eng.setVideoCaptureConfig({ width: fit.w, height: fit.h, frameRate: v.fps }); } catch {}
-        const encCfg = { width: fit.w, height: fit.h, frameRate: v.fps };
-        if (v.kbps) encCfg.maxKbps = v.kbps;
-        await eng.setVideoEncoderConfig(encCfg);
+        await eng.setVideoEncoderConfig({ width: fit.w, height: fit.h, frameRate: v.fps, maxKbps: v.kbps });
+      } catch (err) { console.warn("[volc] video encoder config failed", err); }
+      // Screen shares encode separately and default to 1080p / 15 fps /
+      // 3000 Kbps regardless of the camera config — without this a 4K tier
+      // share stays at the default. "detail" favors legible text.
+      const s = conf || { w: 1920, h: 1080, fps: 15, kbps: 3000 };
+      try {
+        await eng.setScreenEncoderConfig({ width: s.w, height: s.h, frameRate: s.fps, maxKbps: s.kbps, contentHint: "detail" });
+      } catch (err) { console.warn("[volc] screen encoder config failed", err); }
+      try {
         const profiles = VERTC.AudioProfileType || {};
         if (typeof eng.setAudioProfile === "function") {
           const p = conf ? profiles[conf.volcAudio] : profiles.default;
           eng.setAudioProfile(p ?? profiles.default ?? 0);
         }
-      } catch (err) { console.warn("[volc] quality apply failed", err); }
+      } catch (err) { console.warn("[volc] audio profile failed", err); }
     } else {
       const cam = state.localStream?.getVideoTracks()[0];
       if (cam) {
