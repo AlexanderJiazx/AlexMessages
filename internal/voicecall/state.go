@@ -20,10 +20,22 @@ import (
 	"crypto/rand"
 	"math/big"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 
 	"alexmessage/internal/db"
+)
+
+const (
+	// pongWait bounds how long a socket may go silent before the read loop
+	// gives up on it. The client pings every 20s, so a healthy connection
+	// (even a throttled background tab) refreshes the deadline well inside
+	// this window; a truly-dead socket self-prunes within pongWait.
+	pongWait = 75 * time.Second
+	// writeWait bounds a single frame write so a half-open socket can't wedge
+	// a fan-out goroutine while it holds the per-connection write mutex.
+	writeWait = 10 * time.Second
 )
 
 // conn wraps one WebSocket with a write mutex.
@@ -36,6 +48,7 @@ type conn struct {
 func (c *conn) send(payload any) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_ = c.ws.SetWriteDeadline(time.Now().Add(writeWait))
 	return c.ws.WriteJSON(payload) == nil
 }
 
@@ -45,6 +58,7 @@ type participant struct {
 	pid      int
 	user     vcUser
 	c        *conn
+	clientID string // per-tab id from the client; identifies reconnects/guests
 	joinedAt int64
 	muted    bool
 	camOn    bool

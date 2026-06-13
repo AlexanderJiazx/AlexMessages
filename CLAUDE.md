@@ -81,19 +81,30 @@ chosen per meeting from a lobby dropdown:
 
 Either way, every participant stays on the meet server's `/ws` **control
 plane**: it owns the roster, AV state fan-out (`peer_state`), and host powers.
-Protocol: client sends `join {code, guest_name?}` / `leave` /
+Protocol: client sends `join {code, guest_name?, client_id?}` / `leave` /
 `signal {to, payload}` / `state {muted, cam_on, sharing}` / `host_mute {pid}` /
 `host_transfer {pid}` / `host_kick {pid}` / `set_guests {allowed}` / `ping`;
 server sends `hello` (`me` is `null` for anonymous connections) / `joined`
 (roster + `host_pid` + `allow_guests` + `volc` join payload when applicable) /
 `peer_joined` / `peer_left` / `signal {from}` / `peer_state` / `host_changed` /
-`force_mute` / `kicked` / `guests_changed {allowed}` / `error` / `pong`.
+`force_mute` / `kicked` / `replaced` / `guests_changed {allowed}` / `error` /
+`pong`.
 
 Rooms (`internal/voicecall/state.go`) are in-memory only, keyed by
 `xxx-xxxx-xxx` codes (no i/l/o). The first joiner is host; when the host
 leaves, the longest-present participant inherits (`host_changed`). Empty rooms
 survive a 5-minute grace (refresh-proof) and never-joined rooms an hour, then
-are pruned lazily. The same account in two tabs is two participants.
+are pruned lazily. **One slot per identity**: a `join` whose registered user id
+(or per-tab `client_id`) already occupies the room evicts the prior instance —
+the displaced socket gets `replaced` and the rejoiner reclaims host — so an
+abnormal disconnect + rejoin can't leave a ghost (or a stuck host) behind. A
+**heartbeat** (server read deadline `pongWait`=75s, refreshed per frame; the
+client pings every 20s) reclaims a silently-dead socket even without a rejoin;
+`conn.send` carries a `writeWait` deadline so a half-open socket can't wedge a
+fan-out. The client treats a dropped control socket as recoverable: it keeps
+local capture and retries `connectWS`+`join` for ~12s behind a "Reconnecting…"
+banner (mesh rebuilds peers, volc rejoins the room with the fresh token) before
+falling back to a "Connection lost" screen.
 **Guest access**: each room has a host-toggled `allowGuests` flag (the switch
 lives in the People panel; `set_guests` over WS). When on, non-registered
 visitors get the meeting page instead of the login redirect and join by just
@@ -114,22 +125,39 @@ does not write meeting history.
 Frontend (`meet.html`, single file): lobby → pre-join gate → meeting. The gate
 shows a live selfie preview plus microphone/speaker/camera dropdowns (and the
 name field for guests); in mesh mode the preview stream is adopted as the call
-media on join, in volc mode it's stopped and the SDK captures with the chosen
-devices. Meeting UI: the **grid "group view" is the default** (paged at 9
+media on join, in volc mode it's held through the join handshake and released
+only just before the SDK opens the same devices (so the camera isn't toggled
+off mid-join and the already-granted permission isn't re-prompted). Device
+constraints fall back from `{deviceId: exact}` to the system default if a
+selected device has vanished, and mic capture requests auto-gain so quiet
+sources stay audible. Meeting UI: the **grid "group view" is the default** (paged at 9
 tiles; `bestGridSize` picks the row/column split that maximizes 16:9 tile area
 for the current window ratio, so wide windows lean on columns and portrait
 phones stack one column; relaid out on resize). Clicking a tile switches to
-the focus view (clicked tile big, everyone else in a fixed-width 16:9 stack on
-the right, scrollable); clicking the main view returns to the grid. A starting
-remote screen share auto-focuses the sharer and falls back to the grid when it
-ends. Video is never cropped: mesh uses `object-fit: contain`, volc passes
-`renderMode RENDER_MODE_FIT`. The active speaker's tile gets a light-green
+the focus view (clicked tile big, the rest in a 16:9 stack); the stack's
+placement follows the **window ratio**, not its width — landscape windows
+(including a sideways phone) keep it in a scrollable right column so the main
+tile isn't squeezed, portrait windows drop it below (`meet-body.stack-bottom`,
+toggled from `layout()`). Clicking the main view returns to the grid. A
+starting remote screen share auto-focuses the sharer and falls back to the grid
+when it ends. The focused tile carries two overlay controls (Lucide icons, only
+shown on the tile in `.main-view`): **top-left fullscreen** (Fullscreen API on
+the tile element) and **bottom-left fit/fill** — video **scale-to-fill (cover)
+is the default**, the toggle restores letterboxing (`fit`), and the choice is
+persisted (`meet_fill`) and inherited in fullscreen. Mesh drives it with
+`object-fit` on `.main-view .tile video` (`.main-view.fit` → contain); volc
+re-applies the focused camera's `renderMode` (`RENDER_MODE_HIDDEN` vs `_FIT`).
+A shared screen is never cropped (stays `contain`/`FIT`). The active speaker's
+tile gets a light-green
 stroke — mesh meters tracks with WebAudio analysers (RMS threshold + 700 ms
 hold so background noise doesn't flicker it), volc uses
 `enableAudioPropertiesReport`/`linearVolume`. Bottom bar (stacks vertically
-and centers on narrow screens): mic split button (chevron menu lists
-microphones *and* speakers — output switching is `setSinkId` on the mesh audio
-pool / `setAudioPlaybackDevice` on volc), camera split button, screen share,
+and centers on narrow screens): mic split button (chevron menu carries an
+**output-volume slider** (0–200%, persisted `meet_volume`; volc amplifies via
+`setPlaybackVolume`, mesh caps at the element's 1.0 and leans on mic auto-gain)
+plus the microphone *and* speaker device lists — output switching is `setSinkId`
+on the remote tile videos / `setAudioPlaybackDevice` on volc), camera split
+button, screen share,
 **streaming-quality menu** (Auto/Low 360p/Standard 720p/High 1080p/Premium 4K;
 per-user, applied to *their* outgoing stream: capture constraints + per-sender
 bitrate caps in mesh; `setVideoEncoderConfig` + `setScreenEncoderConfig` +
@@ -144,9 +172,10 @@ UDP to a nearby volc edge is required for the high tiers to mean anything. Top-l
 button + code chip; top-right people panel with host mute / make-host / kick
 actions and the allow-guests switch. All icons are embedded Lucide SVGs. Tiles
 never get destroyed on layout changes — they move between main/stack/grid
-containers and an off-screen "park" so media keeps playing; in mesh mode
-remote audio plays through a fixed hidden audio pool so tile juggling can't
-interrupt it. Gotcha: WebKit pauses a `<video>` whose element is re-inserted
+containers and an off-screen "park" so media keeps playing; in mesh mode remote
+audio plays through each remote's own tile `<video>` element (one media clock ⇒
+lip-sync — there is **no** separate audio pool; only the self tile is muted).
+Gotcha: WebKit pauses a `<video>` whose element is re-inserted
 in the DOM (Chrome doesn't), so tile moves go through `placeTile`/`placeTiles`
 — no-op when already in position, `moveBefore()` where supported, otherwise
 `insertBefore` + `play()` resume (plus a post-layout sweep and a pause

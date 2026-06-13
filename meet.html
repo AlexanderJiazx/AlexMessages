@@ -86,6 +86,21 @@
   .toast.ok   { background: var(--sage-deep); }
   @keyframes toast-in { from { opacity:0; transform: translateY(8px) } to { opacity:1; transform: translateY(0) } }
 
+  /* reconnect banner — non-destructive, shown while the control socket retries */
+  .reconnect-banner {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 400;
+    display: flex; align-items: center; gap: 9px;
+    background: var(--warn); color: #fff; padding: 8px 16px; border-radius: 999px;
+    font-size: 13px; font-weight: 500; box-shadow: var(--shadow-2);
+    animation: toast-in .2s ease-out;
+  }
+  .reconnect-banner .spinner {
+    width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid rgba(255,255,255,.4); border-top-color: #fff;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
   /* ───── lobby ───── */
   .lobby-top {
     display:flex; align-items:center; gap:12px; padding: 18px 24px;
@@ -247,12 +262,22 @@
      beats the .tile base sizing so tiles never stretch to the stack height;
      everyone who doesn't fit scrolls instead of disappearing. */
   .stack {
-    width: 224px; flex-shrink: 0; min-height: 0;
+    width: min(224px, 30vw); flex-shrink: 0; min-height: 0;
     overflow-y: auto; overflow-x: hidden;
     display:flex; flex-direction:column; gap: 10px; padding: 2px;
   }
   .stack::-webkit-scrollbar{ width:6px } .stack::-webkit-scrollbar-thumb{ background:rgba(0,0,0,.08); border-radius:4px }
   .stack .tile { width: 100%; height: auto; aspect-ratio: 16 / 9; flex-shrink: 0; }
+
+  /* Focus-view layout is chosen by window *ratio*, not width: portrait windows
+     (incl. phones held upright) stack previews below the main tile; landscape
+     windows (incl. a sideways phone) keep them in a scrollable right column so
+     the main tile is never squeezed to a sliver. Toggled from layout(). */
+  .meet-body.stack-bottom { flex-direction: column; }
+  .meet-body.stack-bottom .stack {
+    width: 100%; flex-direction: row; overflow-x: auto; overflow-y: hidden;
+  }
+  .meet-body.stack-bottom .stack .tile { width: 152px; height: auto; }
 
   /* grid (group view) — tiles are sized in px by layout(), which picks the
      row/column split that maximizes tile area for the current window ratio */
@@ -317,6 +342,23 @@
     border: 3px solid #7ED491; border-radius: inherit;
   }
 
+  /* focused-tile overlay controls — only visible on the tile in .main-view */
+  .tile-ctrl {
+    position: absolute; z-index: 5; display: none;
+    width: 34px; height: 34px; border-radius: 10px; border: 0;
+    background: rgba(13,20,17,.55); color: #fff; backdrop-filter: blur(4px);
+    align-items: center; justify-content: center;
+  }
+  .tile-ctrl:hover { background: rgba(13,20,17,.82); }
+  .tile-fs   { top: 10px; left: 10px; }
+  .tile-fill { bottom: 10px; left: 10px; }
+  .main-view .tile > .tile-ctrl { display: inline-flex; }
+  .main-view .tile .tag { left: 52px; }  /* clear the bottom-left control */
+  /* scale-to-fill is the focused-view default; the fit toggle restores
+     letterboxing. A shared screen is never cropped. */
+  .main-view .tile:not(.sharing) video { object-fit: cover; }
+  .main-view.fit .tile:not(.sharing) video { object-fit: contain; }
+
   /* bottom control bar */
   .meet-bottom {
     display:flex; align-items:center; gap: 12px; padding: 14px 18px 16px;
@@ -379,6 +421,10 @@
   .float-menu button.item.cur .chk { visibility: visible; }
   .float-menu button.item span.lbl { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .float-menu .sep { height: 1px; background: var(--line-2); margin: 4px 6px; }
+  .float-menu .vol-ctl { display:flex; align-items:center; gap:9px; padding: 2px 10px 8px; }
+  .float-menu .vol-ctl svg { color: var(--muted); flex-shrink:0; }
+  .float-menu .vol-ctl input[type=range] { flex:1; min-width:0; accent-color: var(--sage); height: 4px; }
+  .float-menu .vol-val { font-size: 11.5px; color: var(--muted); width: 38px; text-align:right; flex-shrink:0; font-variant-numeric: tabular-nums; }
 
   .people-panel {
     position: fixed; top: 64px; right: 18px; z-index: 200;
@@ -434,9 +480,7 @@
   #park { position: fixed; left: -10000px; top: 0; width: 320px; height: 180px; overflow: hidden; opacity: 0; pointer-events: none; }
 
   @media (max-width: 860px) {
-    .meet-body { flex-direction: column; padding: 0 10px; }
-    .stack { width: 100%; flex-direction: row; overflow-x:auto; overflow-y:hidden; }
-    .stack .tile { width: 152px; height: auto; }
+    .meet-body { padding: 0 10px; }
     .meet-top, .meet-bottom { padding-left: 10px; padding-right: 10px; }
     .mbtn.pill { padding: 0 16px; }
     .mbtn.end { padding: 0 18px; }
@@ -582,7 +626,11 @@
       </button>
     </div>
 
-    <div class="meet-body">
+    <div class="reconnect-banner" id="reconnectBanner" hidden>
+      <span class="spinner"></span> Reconnecting…
+    </div>
+
+    <div class="meet-body" id="meetBody">
       <div class="main-wrap" id="mainWrap">
         <div class="main-view" id="mainView"></div>
       </div>
@@ -645,7 +693,6 @@
   </div>
 
   <div id="park"></div>
-  <div id="audioPool" style="display:none"></div>
   <div class="toast-stack" id="toasts"></div>
 
 <script>
@@ -654,12 +701,20 @@
 
   // ──────── Constants ────────
   const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+  // Mic capture defaults: auto-gain in particular normalizes quiet sources so
+  // remote participants come through at a usable level (see the volume slider).
+  const AUDIO_CONSTRAINTS = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
   const PEER_COLORS = ["#4F7A5E","#7BA17F","#39604A","#A3B581","#6F8A6E","#8FAE92","#5A7773","#94A36B","#5B8A6C","#6A8E5F"];
   const BACKEND_KEY = "meet_backend";
   const QUALITY_KEY = "meet_quality";
   const GUEST_NAME_KEY = "meet_guest_name";
+  const VOLUME_KEY = "meet_volume";
+  const FILL_KEY = "meet_fill";
   const GRID_PAGE_SIZE = 9;
   const VOLC_SDK_SRC = "/static/vendor/volc-rtc-4.68.5.min.js";
+  // Reconnect: retry the control-plane socket for this long before giving up.
+  const RECONNECT_WINDOW_MS = 12000;
+  const RECONNECT_INTERVAL_MS = 2000;
 
   // Per-user outgoing stream quality. Each tier pairs a video size/bitrate
   // with an audio bitrate (mesh) / VolcEngine audio profile. "auto" leaves
@@ -690,6 +745,11 @@
     micTiny: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
     micTinyOff: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M5 10v2a7 7 0 0 0 12 4.3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`,
     kick: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" x2="22" y1="8" y2="13"/><line x1="22" x2="17" y1="8" y2="13"/></svg>`,
+    // overlay controls on the focused tile
+    maximize: `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>`,
+    minimize: `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>`,
+    expand: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-6-6m6 6v-4.8m0 4.8h-4.8"/><path d="M3 16.2V21m0 0h4.8M3 21l6-6"/><path d="M21 7.8V3m0 0h-4.8M21 3l-6 6"/><path d="M3 7.8V3m0 0h4.8M3 3l6 6"/></svg>`,
+    shrink: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 15 6 6m-6-6v4.8m0-4.8h4.8"/><path d="M9 19.8V15m0 0H4.2M9 15l-6 6"/><path d="M15 4.2V9m0 0h4.8M15 9l6-6"/><path d="M9 4.2V9m0 0H4.2M9 9 3 3"/></svg>`,
   };
 
   // ──────── DOM / small helpers ────────
@@ -745,6 +805,14 @@
     code: null,          // meeting code when on /m/<code>
     mode: null,          // "mesh" | "volc"
     phase: "idle",       // idle | gate | joining | inmeeting | left
+    // Stable per-tab identity so a reconnect/rejoin replaces its own ghost
+    // server-side instead of doubling up.
+    clientID: (() => { try { return crypto.randomUUID(); } catch { return String(Math.random()).slice(2) + Date.now(); } })(),
+    guestName: "",       // remembered so a reconnect can re-send join
+    leaving: false,      // intentional exit — don't try to reconnect
+    reconnecting: false,
+    reconnectTimer: null,
+    reconnectDeadline: 0,
     selfPid: null,
     hostPid: null,
     roster: new Map(),   // pid -> {pid, user, muted, camOn, sharing}
@@ -761,6 +829,9 @@
     camDevice: null,
     spkDevice: null,
     quality: "auto",
+    volume: 100,         // output volume %, 0–200 (persisted)
+    fillMode: "fill",    // focused-tile video scaling: "fill" (cover) | "fit" (contain)
+    mainPid: null,       // pid currently in the focus/main view (for volc render mode)
     gateStream: null,    // pre-join preview stream (adopted by mesh on join)
     // mesh
     localStream: null,
@@ -778,11 +849,18 @@
   };
 
   const tiles = new Map(); // pid -> {el, vbox, video, vMain, vScreen, phAv, nameEl}
-  const audioEls = new Map(); // pid -> <audio> (mesh only)
 
   try {
     const q = localStorage.getItem(QUALITY_KEY);
     if (q === "auto" || QUALITY_CONF[q]) state.quality = q;
+  } catch {}
+  try {
+    const v = parseInt(localStorage.getItem(VOLUME_KEY), 10);
+    if (Number.isFinite(v) && v >= 0 && v <= 200) state.volume = v;
+  } catch {}
+  try {
+    const f = localStorage.getItem(FILL_KEY);
+    if (f === "fill" || f === "fit") state.fillMode = f;
   } catch {}
 
   // ──────── Views ────────
@@ -809,6 +887,9 @@
     ws.onopen = () => {
       if (state.ws !== ws) return;
       state.wsReady = true;
+      // A socket opened mid-reconnect must re-announce us first; the server
+      // evicts our stale ghost (matched by client_id) and replies "joined".
+      if (state.reconnecting) sendJoin();
       state.pendingSend.forEach(p => { try { ws.send(JSON.stringify(p)); } catch {} });
       state.pendingSend = [];
     };
@@ -826,11 +907,9 @@
         location.href = "/login" + next;
         return;
       }
-      if (state.phase === "inmeeting" || state.phase === "joining") {
-        teardownMedia();
-        state.phase = "left";
-        showInterstitial("Connection lost", "The connection to the meeting server dropped.");
-      }
+      if (state.leaving) return;            // intentional exit
+      if (state.reconnecting) return;       // the reconnect timer drives retries
+      if (state.phase === "inmeeting" || state.phase === "joining") beginReconnect();
     };
     ws.onerror = () => {};
   }
@@ -841,7 +920,57 @@
       state.pendingSend.push(payload);
     }
   }
-  setInterval(() => { if (state.wsReady) send({ type: "ping" }); }, 25000);
+  setInterval(() => { if (state.wsReady) send({ type: "ping" }); }, 20000);
+
+  function sendJoin() {
+    const msg = { type: "join", code: state.code, client_id: state.clientID };
+    if (state.guestName) msg.guest_name = state.guestName;
+    send(msg);
+  }
+
+  // ──────── Reconnect ────────
+  // A dropped control-plane socket no longer ends the meeting outright: we keep
+  // local capture alive and retry for RECONNECT_WINDOW_MS, only surfacing
+  // "Connection lost" once that window elapses.
+  function showReconnecting(on) {
+    const b = $("reconnectBanner");
+    if (b) b.hidden = !on;
+  }
+  function beginReconnect() {
+    if (state.reconnecting) return;
+    state.reconnecting = true;
+    state.reconnectDeadline = Date.now() + RECONNECT_WINDOW_MS;
+    state.pendingSend = [];
+    showReconnecting(true);
+    tryReconnect();
+  }
+  function tryReconnect() {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+    if (!state.reconnecting) return;
+    if (Date.now() > state.reconnectDeadline) { giveUpReconnect(); return; }
+    if (state.ws) { const old = state.ws; state.ws = null; try { old.close(); } catch {} }
+    connectWS();
+    state.reconnectTimer = setTimeout(tryReconnect, RECONNECT_INTERVAL_MS);
+  }
+  function endReconnect() {
+    if (!state.reconnecting) return;
+    state.reconnecting = false;
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+    showReconnecting(false);
+    toast("Reconnected", "ok");
+  }
+  function giveUpReconnect(msg) {
+    state.reconnecting = false;
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+    showReconnecting(false);
+    if (state.ws) { const old = state.ws; state.ws = null; try { old.close(); } catch {} }
+    teardownMedia();
+    state.phase = "left";
+    showInterstitial("Connection lost", msg || "We couldn't reconnect to the meeting.");
+  }
 
   function sendState() {
     send({ type: "state", muted: !state.micOn, cam_on: state.camOn, sharing: state.sharing });
@@ -857,6 +986,10 @@
         break;
       }
       case "joined": {
+        // A "joined" that arrives while we still hold media is a reconnect:
+        // reuse local capture (no permission re-prompt), just rewire peers.
+        const hadMedia = state.mode === "volc" ? !!state.volcEngine : !!state.localStream;
+        const reconnect = state.reconnecting && hadMedia;
         state.mode = data.mode;
         state.selfPid = data.self_pid;
         state.hostPid = data.host_pid;
@@ -875,10 +1008,15 @@
         }
         showView("meetView");
         syncTiles();
-        startMedia().catch(err => {
-          console.error("[meet] media start failed", err);
-          toast("Couldn't start audio/video", "err");
-        });
+        if (reconnect) {
+          reconnectMedia();
+        } else {
+          startMedia().catch(err => {
+            console.error("[meet] media start failed", err);
+            toast("Couldn't start audio/video", "err");
+          });
+        }
+        endReconnect();
         sendState();
         break;
       }
@@ -928,9 +1066,21 @@
         break;
       }
       case "kicked": {
+        state.leaving = true;
+        endReconnect();
         teardownMedia();
         state.phase = "left";
         showInterstitial("Removed from meeting", "The host removed you from this meeting.", false);
+        break;
+      }
+      case "replaced": {
+        // This account/tab joined again elsewhere; that newer instance took
+        // over. Stop here (don't reconnect) but allow pulling it back.
+        state.leaving = true;
+        endReconnect();
+        teardownMedia();
+        state.phase = "left";
+        showInterstitial("Joined on another device", "You joined this meeting from another tab or device, so this window left it.", true);
         break;
       }
       case "guests_changed": {
@@ -956,6 +1106,7 @@
         break;
       }
       case "error": {
+        if (state.reconnecting) { giveUpReconnect(data.message); break; }
         if (state.phase === "joining") {
           state.phase = "left";
           showInterstitial("Can't join", data.message || "Something went wrong.", false);
@@ -998,7 +1149,9 @@
         ${ICONS.micOffSmall}
         <span class="nm"></span>
       </div>
-      <div class="pin-ind">${ICONS.pin}</div>`;
+      <div class="pin-ind">${ICONS.pin}</div>
+      <button class="tile-ctrl tile-fs" type="button" title="Fullscreen" aria-label="Fullscreen">${ICONS.maximize}</button>
+      <button class="tile-ctrl tile-fill" type="button" title="${state.fillMode === "fill" ? "Fit to window" : "Fill window"}" aria-label="Scale to fill or fit">${state.fillMode === "fill" ? ICONS.shrink : ICONS.expand}</button>`;
     const t = {
       el,
       vbox: el.querySelector(".vbox"),
@@ -1009,9 +1162,14 @@
     };
     if (state.mode === "mesh") {
       const v = document.createElement("video");
-      v.autoplay = true; v.playsInline = true; v.muted = true;
+      v.autoplay = true; v.playsInline = true;
+      // Remote audio plays through the tile's own video element (one media
+      // clock ⇒ lip-sync); only the self tile is muted. Volume is applied per
+      // tile once a stream is attached (see applyAudioOut / applyVolume).
+      v.muted = (p.pid === state.selfPid);
       // Tile videos are never paused on purpose, so any pause is WebKit
-      // reacting to a DOM move (or a tab switch) — resume once it settles.
+      // reacting to a DOM move (or a tab switch) — resume once it settles
+      // (this also keeps off-screen/parked participants audible).
       v.addEventListener("pause", () => {
         if (v.srcObject) queueMicrotask(() => { if (v.paused) v.play().catch(() => {}); });
       });
@@ -1019,6 +1177,8 @@
       t.video = v;
     }
     el.addEventListener("click", () => onTileClick(p.pid));
+    el.querySelector(".tile-fs").addEventListener("click", (e) => { e.stopPropagation(); toggleFullscreen(el); });
+    el.querySelector(".tile-fill").addEventListener("click", (e) => { e.stopPropagation(); setFill(state.fillMode === "fill" ? "fit" : "fill"); });
     tiles.set(p.pid, t);
     updateTile(p.pid);
     return t;
@@ -1049,9 +1209,6 @@
         tiles.delete(pid);
       }
       else updateTile(pid);
-    }
-    for (const [pid, a] of audioEls) {
-      if (!state.roster.has(pid)) { a.remove(); audioEls.delete(pid); }
     }
     $("pplBadge").textContent = String(state.roster.size);
     layout();
@@ -1084,6 +1241,39 @@
       state.grid = false;
     }
     layout();
+  }
+
+  // ──────── Focused-tile overlay controls (fill/fit + fullscreen) ────────
+  function fsElement() { return document.fullscreenElement || document.webkitFullscreenElement || null; }
+  function toggleFullscreen(el) {
+    if (fsElement()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) exit.call(document);
+      return;
+    }
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) Promise.resolve(req.call(el)).catch(() => toast("Couldn't enter fullscreen", "err"));
+    else toast("Fullscreen isn't supported here", "warn");
+  }
+  function updateFsIcons() {
+    const on = !!fsElement();
+    document.querySelectorAll(".tile-fs").forEach(b => { b.innerHTML = on ? ICONS.minimize : ICONS.maximize; });
+  }
+  document.addEventListener("fullscreenchange", updateFsIcons);
+  document.addEventListener("webkitfullscreenchange", updateFsIcons);
+
+  function setFill(mode) {
+    state.fillMode = mode === "fit" ? "fit" : "fill";
+    try { localStorage.setItem(FILL_KEY, state.fillMode); } catch {}
+    updateFillButtons();
+    layout(); // mesh: toggles the .fit class; volc: re-applies the render mode
+  }
+  function updateFillButtons() {
+    const fill = state.fillMode === "fill";
+    document.querySelectorAll(".tile-fill").forEach(b => {
+      b.innerHTML = fill ? ICONS.shrink : ICONS.expand;
+      b.title = fill ? "Fit to window" : "Fill window";
+    });
   }
 
   // bestGridSize picks the row/column split that maximizes 16:9 tile area in
@@ -1130,6 +1320,9 @@
   // grid pages, and the off-screen park (media keeps playing when parked).
   function layout() {
     const main = $("mainView"), stack = $("stack"), gridPages = $("gridPages"), park = $("park");
+    // Focus-view stack placement follows the window ratio, not its width.
+    $("meetBody").classList.toggle("stack-bottom", window.innerWidth < window.innerHeight);
+    const prevMain = state.mainPid;
     const pids = state.order.filter(pid => state.roster.has(pid));
     const useGrid = state.grid && pids.length > 0;
 
@@ -1139,6 +1332,7 @@
     $("gridBtn").classList.toggle("on", state.grid);
 
     if (useGrid) {
+      state.mainPid = null;
       const pages = Math.max(1, Math.ceil(pids.length / GRID_PAGE_SIZE));
       state.gridPage = Math.min(state.gridPage, pages - 1);
       const start = state.gridPage * GRID_PAGE_SIZE;
@@ -1167,6 +1361,7 @@
       $("gridPrev").parentElement.querySelectorAll(".pager").forEach(b => b.hidden = pages <= 1);
     } else {
       const mainPid = (state.pinned != null && state.roster.has(state.pinned)) ? state.pinned : autoMainPid();
+      state.mainPid = mainPid;
       const stackEls = [];
       for (const pid of pids) {
         const t = tiles.get(pid);
@@ -1178,6 +1373,9 @@
       }
       placeTiles(stack, stackEls);
     }
+    // Focused-tile scaling: fill (cover) by default, fit (contain) when toggled.
+    $("mainView").classList.toggle("fit", state.fillMode === "fit");
+    if (state.mode === "volc") applyVolcFill(prevMain);
     pids.forEach(updateTile);
     // WebKit can finalize the reparent pause in a later task — sweep once the
     // dust settles and restart anything that stopped (no-op elsewhere).
@@ -1339,6 +1537,10 @@
   $("endBtn").addEventListener("click", leaveMeeting);
 
   function leaveMeeting() {
+    state.leaving = true;
+    state.reconnecting = false;
+    clearTimeout(state.reconnectTimer);
+    showReconnecting(false);
     send({ type: "leave" });
     teardownMedia();
     state.phase = "left";
@@ -1349,6 +1551,7 @@
 
   window.addEventListener("pagehide", () => {
     if (state.phase === "inmeeting") {
+      state.leaving = true;
       try { state.ws && state.ws.send(JSON.stringify({ type: "leave" })); } catch {}
     }
   });
@@ -1414,6 +1617,22 @@
     const outs = (await listDevices("audiooutput")).filter(d => d.deviceId);
     const menu = document.createElement("div");
     menu.className = "float-menu";
+
+    // Output volume slider (the report's "volume feels too low" fix).
+    const vol = document.createElement("div");
+    vol.innerHTML = `<div class="hd">Volume</div>
+      <div class="vol-ctl">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/></svg>
+        <input type="range" id="volSlider" min="0" max="200" step="5" value="${state.volume}" aria-label="Output volume" />
+        <span class="vol-val">${state.volume}%</span>
+      </div>`;
+    menu.appendChild(vol);
+    const sld = vol.querySelector("#volSlider");
+    const val = vol.querySelector(".vol-val");
+    sld.addEventListener("input", () => { setVolume(parseInt(sld.value, 10)); val.textContent = state.volume + "%"; });
+    sld.addEventListener("click", (e) => e.stopPropagation()); // keep menu open
+    const sep0 = document.createElement("div"); sep0.className = "sep"; menu.appendChild(sep0);
+
     menuSection(menu, "Microphone", mics, state.micDevice, setMicDevice);
     const sep = document.createElement("div");
     sep.className = "sep";
@@ -1474,10 +1693,39 @@
       return;
     }
     let ok = true;
-    for (const [, a] of audioEls) {
-      try { await a.setSinkId(deviceId); } catch { ok = false; }
+    for (const [pid, t] of tiles) {
+      if (pid === state.selfPid || !t.video) continue;
+      try { await t.video.setSinkId(deviceId); } catch { ok = false; }
     }
     toast(ok ? "Speaker switched" : "Couldn't switch speaker", ok ? "ok" : "err");
+  }
+
+  // applyAudioOut wires one remote tile's video element to the chosen output
+  // volume (capped at 1.0 — mesh has no gain stage) and speaker device.
+  function applyAudioOut(pid, videoEl) {
+    if (!videoEl || pid === state.selfPid) return;
+    try { videoEl.volume = Math.min(1, state.volume / 100); } catch {}
+    if (state.spkDevice && videoEl.setSinkId) videoEl.setSinkId(state.spkDevice).catch(() => {});
+  }
+
+  // applyVolume pushes state.volume to the active backend. volc amplifies up to
+  // 200%; mesh tops out at the element cap (1.0) — quiet sources are helped by
+  // microphone auto-gain instead.
+  function applyVolume() {
+    if (state.mode === "volc") {
+      try { state.volcEngine && state.volcEngine.setPlaybackVolume && state.volcEngine.setPlaybackVolume(state.volume); } catch {}
+    } else {
+      const v = Math.min(1, state.volume / 100);
+      for (const [pid, t] of tiles) {
+        if (pid !== state.selfPid && t.video) { try { t.video.volume = v; } catch {} }
+      }
+    }
+  }
+
+  function setVolume(pct) {
+    state.volume = Math.max(0, Math.min(200, pct | 0));
+    try { localStorage.setItem(VOLUME_KEY, String(state.volume)); } catch {}
+    applyVolume();
   }
 
   // ──────── Speaking indicator ────────
@@ -1559,13 +1807,27 @@
   // acquireTrack gets a fresh audio/video track (optionally a specific
   // device), installs it into localStream and every sender, and returns it.
   async function acquireTrack(kind, deviceId, replaceExisting = false) {
-    const constraint = deviceId ? { deviceId: { exact: deviceId } } : true;
+    const build = (dev) => kind === "audio"
+      ? { audio: dev ? { deviceId: { exact: dev }, ...AUDIO_CONSTRAINTS } : AUDIO_CONSTRAINTS }
+      : { video: dev ? { deviceId: { exact: dev } } : true };
     let stream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia(kind === "audio" ? { audio: constraint } : { video: constraint });
+      stream = await navigator.mediaDevices.getUserMedia(build(deviceId));
     } catch (err) {
-      console.warn("[mesh] getUserMedia failed", err);
-      return null;
+      // A specific device that vanished or is busy throws Overconstrained/
+      // NotFound — fall back to the system default before giving up, so a
+      // stale device selection can't make the mic/camera unusable.
+      if (deviceId) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(build(null));
+        } catch (err2) {
+          console.warn(`[mesh] getUserMedia(${kind}) failed`, err2 && err2.name || err2);
+          return null;
+        }
+      } else {
+        console.warn(`[mesh] getUserMedia(${kind}) failed`, err && err.name || err);
+        return null;
+      }
     }
     const track = kind === "audio" ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0];
     if (!track) return null;
@@ -1600,13 +1862,13 @@
     state.localStream = new MediaStream();
     if (!want.audio && !want.video) return;
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ audio: want.audio, video: want.video });
+      const s = await navigator.mediaDevices.getUserMedia({ audio: want.audio ? AUDIO_CONSTRAINTS : false, video: want.video });
       s.getTracks().forEach(t => state.localStream.addTrack(t));
     } catch (err) {
       // Retry audio-only before giving up (camera may be missing/blocked).
       if (want.video && want.audio) {
         try {
-          const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const s = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS });
           s.getTracks().forEach(t => state.localStream.addTrack(t));
         } catch {}
       }
@@ -1666,22 +1928,11 @@
       const t = tiles.get(pid);
       const remote = (ev.streams && ev.streams[0]) || new MediaStream([ev.track]);
       if (t && t.video && t.video.srcObject !== remote) {
-        t.video.srcObject = remote;
+        t.video.srcObject = remote;          // audio rides along, in sync
+        applyAudioOut(pid, t.video);         // volume + chosen output device
         t.video.play().catch(() => {}); // Safari: autoplay may have been consumed
       }
-      if (ev.track.kind === "audio") {
-        let a = audioEls.get(pid);
-        if (!a) {
-          a = document.createElement("audio");
-          a.autoplay = true;
-          if (state.spkDevice && a.setSinkId) a.setSinkId(state.spkDevice).catch(() => {});
-          $("audioPool").appendChild(a);
-          audioEls.set(pid, a);
-        }
-        if (a.srcObject !== remote) a.srcObject = remote;
-        a.play().catch(() => {});
-        meshWatchMic(pid, ev.track);
-      }
+      if (ev.track.kind === "audio") meshWatchMic(pid, ev.track);
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed") {
@@ -1985,12 +2236,41 @@
   function attachVolcRemote(pid, screen) {
     const t = tiles.get(pid);
     if (!t || !state.volcEngine) return;
+    // A camera that's the focused tile honors the fill choice; shares and
+    // non-focused tiles stay letterboxed.
+    const mode = (!screen && pid === state.mainPid) ? volcRenderMode(state.fillMode === "fill") : volcFitMode();
     try {
       state.volcEngine.setRemoteVideoPlayer(
         screen ? VERTC.StreamIndex.STREAM_INDEX_SCREEN : VERTC.StreamIndex.STREAM_INDEX_MAIN,
-        { renderDom: screen ? t.vScreen : t.vMain, userId: "p" + pid, renderMode: volcFitMode() },
+        { renderDom: screen ? t.vScreen : t.vMain, userId: "p" + pid, renderMode: mode },
       );
     } catch (err) { console.warn("[volc] remote player failed", err); }
+  }
+
+  // RENDER_MODE_HIDDEN crops to fill the tile; RENDER_MODE_FIT letterboxes.
+  function volcRenderMode(fill) {
+    const M = window.VERTC && VERTC.VideoRenderMode;
+    if (!M) return fill ? 2 : 1;
+    return fill ? (M.RENDER_MODE_HIDDEN ?? 2) : (M.RENDER_MODE_FIT ?? 1);
+  }
+  // Re-attaches one tile's *camera* (main) stream with the given scaling.
+  function reattachVolcCamera(pid, fill) {
+    const t = tiles.get(pid);
+    if (!t || !state.volcEngine) return;
+    const mode = volcRenderMode(fill);
+    try {
+      if (pid === state.selfPid) {
+        state.volcEngine.setLocalVideoPlayer(VERTC.StreamIndex.STREAM_INDEX_MAIN, { renderDom: t.vMain, userId: state.volc.user_id, renderMode: mode });
+      } else {
+        state.volcEngine.setRemoteVideoPlayer(VERTC.StreamIndex.STREAM_INDEX_MAIN, { renderDom: t.vMain, userId: "p" + pid, renderMode: mode });
+      }
+    } catch (err) { console.warn("[volc] render mode", err); }
+  }
+  // volc has no CSS object-fit, so fill/fit is the focused camera's renderMode.
+  function applyVolcFill(prevMain) {
+    if (state.mode !== "volc" || !state.volcEngine) return;
+    if (prevMain != null && prevMain !== state.mainPid) reattachVolcCamera(prevMain, false);
+    if (state.mainPid != null) reattachVolcCamera(state.mainPid, state.fillMode === "fill");
   }
 
   async function volcStart(info) {
@@ -2061,15 +2341,23 @@
     try { engine.enableAudioPropertiesReport({ interval: SPEAK_TICK_MS }); } catch {}
     startSpeakTimer(); // volc has no meters; the timer just decays the stroke
     await applyQuality();
+    applyVolume(); // honor the saved output-volume tier
     if (state.spkDevice) {
       try { await engine.setAudioPlaybackDevice(state.spkDevice); } catch {}
     }
+    // Release the pre-join preview only now (it stayed live through the join
+    // handshake), just before the SDK opens the same devices.
+    stopGatePreview();
     if (state.micOn) {
-      try { await engine.startAudioCapture(state.micDevice || undefined); } catch (err) { console.warn("[volc] mic", err); state.micOn = false; }
+      try { await engine.startAudioCapture(state.micDevice || undefined); } catch (err) { console.warn("[volc] mic", err && err.name || err); state.micOn = false; }
     }
     if (state.camOn) {
-      try { await engine.startVideoCapture(state.camDevice || undefined); attachVolcLocalMain(); } catch (err) { console.warn("[volc] cam", err); state.camOn = false; }
+      try { await engine.startVideoCapture(state.camDevice || undefined); attachVolcLocalMain(); } catch (err) { console.warn("[volc] cam", err && err.name || err); state.camOn = false; }
     }
+    // Re-assert the saved quality tier now that capture is running: some SDK
+    // builds only latch the encoder config once a capture stream exists, so an
+    // apply done before startVideoCapture can be silently dropped.
+    await applyQuality();
     if (!state.micOn && !state.camOn) toast("Joined without mic and camera", "warn");
     updateSelfRoster();
   }
@@ -2090,6 +2378,43 @@
     }
   }
 
+  // Re-establishes media after a control-plane reconnect. Our pid changed, so
+  // peer relationships must be rebuilt — but local capture is preserved, so
+  // the browser never re-prompts for the mic/camera.
+  function reconnectMedia() {
+    if (state.mode === "volc") {
+      // The volc user id is "p<pid>"; the new pid means a fresh room join with
+      // the new token. Devices stay permitted, so there's no second prompt.
+      const eng = state.volcEngine;
+      state.volcEngine = null;
+      state.sharing = false;
+      state.volcShareMedia = null;
+      if (eng) {
+        (async () => {
+          try { await eng.stopScreenCapture(); } catch {}
+          try { await eng.stopAudioCapture(); } catch {}
+          try { await eng.stopVideoCapture(); } catch {}
+          try { await eng.leaveRoom(); } catch {}
+          try { VERTC.destroyEngine(eng); } catch {}
+        })();
+      }
+      volcStart(state.volc).catch(err => {
+        console.error("[meet] volc reconnect failed", err);
+        toast("Couldn't restore audio/video", "err");
+      });
+    } else {
+      // Far-side peers were keyed to our old pid; drop and rebuild the mesh.
+      for (const [pid] of state.pcs) meshDropPeer(pid);
+      refreshSelfPreview();
+      meshWatchMic(state.selfPid, state.localStream?.getAudioTracks()[0]);
+      applyQuality();
+      for (const pid of state.order) {
+        if (pid !== state.selfPid) meshEnsurePeer(pid);
+      }
+      updateSelfRoster();
+    }
+  }
+
   function teardownMedia() {
     speakTeardown();
     stopGatePreview();
@@ -2097,8 +2422,6 @@
       try { peer.pc.close(); } catch {}
     }
     state.pcs.clear();
-    for (const [, a] of audioEls) a.remove();
-    audioEls.clear();
     if (state.screenStream) { try { state.screenStream.getTracks().forEach(t => t.stop()); } catch {} }
     state.screenStream = null;
     stopShareMix();
@@ -2197,14 +2520,19 @@
   // stream as the call media; volc stops it and lets the SDK capture.
   async function startGatePreview() {
     stopGatePreview();
+    const audio = state.micDevice ? { deviceId: { exact: state.micDevice }, ...AUDIO_CONSTRAINTS } : AUDIO_CONSTRAINTS;
+    const video = state.camDevice ? { deviceId: { exact: state.camDevice } } : true;
     let s = null;
     try {
-      s = await navigator.mediaDevices.getUserMedia({
-        audio: state.micDevice ? { deviceId: { exact: state.micDevice } } : true,
-        video: state.camDevice ? { deviceId: { exact: state.camDevice } } : true,
-      });
-    } catch {
-      try { s = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch {}
+      s = await navigator.mediaDevices.getUserMedia({ audio, video });
+    } catch (err) {
+      // A stale device selection (Overconstrained/NotFound) shouldn't sink the
+      // preview — retry with system defaults, then mic-only as a last resort.
+      try {
+        s = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS, video: true });
+      } catch {
+        try { s = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS }); } catch {}
+      }
     }
     if (state.phase !== "gate") { // joined (or left) while we waited
       if (s) { try { s.getTracks().forEach(t => t.stop()); } catch {} }
@@ -2343,16 +2671,16 @@
       }
       $("gateJoin").disabled = true;
       state.phase = "joining";
+      state.guestName = guestName; // remembered for reconnect re-joins
       if (state.mode === "mesh") {
         adoptGateStream();        // reuse the preview tracks as call media
         await ensureLocalMedia(); // fallback when the preview never started
-      } else {
-        stopGatePreview();        // the VolcEngine SDK captures on its own
       }
+      // volc captures on its own inside volcStart, which releases the preview
+      // just before it grabs the devices — so the camera isn't toggled off
+      // mid-join (and the already-granted permission isn't re-prompted).
       updateControls();
-      const msg = { type: "join", code };
-      if (guestName) msg.guest_name = guestName;
-      send(msg);
+      sendJoin();
     });
     updateControls();
     startGatePreview(); // live selfie preview + unlock device labels

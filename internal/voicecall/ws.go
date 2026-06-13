@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -20,15 +21,19 @@ var upgrader = websocket.Upgrader{
 
 // handleWS is the meeting control plane. The client protocol:
 //
-//	client → server: join {code, guest_name?} · leave · signal {to, payload} ·
-//	                 state {muted, cam_on, sharing} · host_mute {pid} ·
-//	                 host_transfer {pid} · host_kick {pid} ·
+//	client → server: join {code, guest_name?, client_id?} · leave ·
+//	                 signal {to, payload} · state {muted, cam_on, sharing} ·
+//	                 host_mute {pid} · host_transfer {pid} · host_kick {pid} ·
 //	                 set_guests {allowed} · ping
 //	server → client: hello {me} · joined {...} · peer_joined {participant} ·
 //	                 peer_left {pid} · signal {from, payload} ·
 //	                 peer_state {pid, ...} · host_changed {host_pid} ·
-//	                 force_mute {by} · kicked {by} · guests_changed {allowed} ·
-//	                 error {message} · pong
+//	                 force_mute {by} · kicked {by} · replaced ·
+//	                 guests_changed {allowed} · error {message} · pong
+//
+// client_id is a stable per-tab id: a join with an id already present in the
+// room evicts the prior instance (so a reconnect/rejoin replaces its ghost and
+// reclaims host) and the displaced socket receives a "replaced" message.
 //
 // Anonymous connections are allowed (hello carries me: null): a guest can
 // join a room whose host enabled allow_guests by sending a guest_name.
@@ -50,11 +55,18 @@ func handleWS(c *gin.Context) {
 
 	defer leaveRoom(cn)
 
+	// Heartbeat: a socket that goes silent past pongWait is treated as dead so
+	// its participant (and any host role it held) is reclaimed promptly. The
+	// deadline is refreshed on every frame; the client's 20s ping keeps a
+	// healthy connection alive.
+	_ = ws.SetReadDeadline(time.Now().Add(pongWait))
+
 	for {
 		_, raw, err := ws.ReadMessage()
 		if err != nil {
 			return
 		}
+		_ = ws.SetReadDeadline(time.Now().Add(pongWait))
 		var data map[string]any
 		if json.Unmarshal(raw, &data) != nil {
 			continue
@@ -104,6 +116,10 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 	if r := []rune(guestName); len(r) > 40 {
 		guestName = string(r[:40])
 	}
+	clientID := strings.TrimSpace(strField(data, "client_id"))
+	if r := []rune(clientID); len(r) > 64 {
+		clientID = string(r[:64])
+	}
 
 	// A connection joins at most one room; joining again moves it.
 	leaveRoom(cn)
@@ -126,9 +142,49 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 		cn.send(meetError("Enter your name to join."))
 		return
 	}
+
+	// A single account (or a reconnecting tab) may only hold one slot: evict
+	// any prior same-identity participant so an abnormal disconnect + rejoin
+	// can't leave a ghost behind. Identity is the registered user id, or the
+	// per-tab client id (which also covers guests and reconnects).
+	var (
+		evicted        []*participant
+		hostWasEvicted bool
+	)
+	for _, pid := range rm.order {
+		op := rm.parts[pid]
+		if op == nil {
+			continue
+		}
+		sameUser := user != nil && !op.user.Guest && op.user.ID == user.ID
+		sameClient := clientID != "" && op.clientID == clientID
+		if sameUser || sameClient {
+			evicted = append(evicted, op)
+		}
+	}
+	var evictedConns []*conn
+	var evictedPids []int
+	for _, op := range evicted {
+		if rm.hostPid == op.pid {
+			hostWasEvicted = true
+		}
+		delete(rm.parts, op.pid)
+		for i, q := range rm.order {
+			if q == op.pid {
+				rm.order = append(rm.order[:i], rm.order[i+1:]...)
+				break
+			}
+		}
+		delete(connRoom, op.c)
+		delete(connPart, op.c)
+		evictedConns = append(evictedConns, op.c)
+		evictedPids = append(evictedPids, op.pid)
+	}
+
 	p := &participant{
 		pid:      allocPid(),
 		c:        cn,
+		clientID: clientID,
 		joinedAt: db.NowTS(),
 		muted:    false,
 		camOn:    true,
@@ -141,8 +197,9 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 	rm.parts[p.pid] = p
 	rm.order = append(rm.order, p.pid)
 	rm.emptySince = 0
-	if rm.hostPid == 0 {
-		rm.hostPid = p.pid // first joiner (in practice: the creator) hosts
+	// First joiner hosts; a rejoiner also reclaims host from its evicted ghost.
+	if rm.hostPid == 0 || hostWasEvicted {
+		rm.hostPid = p.pid
 	}
 	connRoom[cn] = rm
 	connPart[cn] = p
@@ -160,6 +217,7 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 		}
 	}
 	hostPid := rm.hostPid
+	hostChanged := hostWasEvicted
 	mode := rm.mode
 	allowGuests := rm.allowGuests
 	meetMu.Unlock()
@@ -178,8 +236,22 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 	}
 	cn.send(joined)
 
+	// Tell the evicted instance it was taken over, then close it so its read
+	// loop exits (its deferred leaveRoom is now a no-op — maps already cleared).
+	for _, ec := range evictedConns {
+		ec.send(gin.H{"type": "replaced"})
+		_ = ec.ws.Close()
+	}
+
+	// Others see the ghost leave (+ any host handover) before the newcomer.
 	announce := gin.H{"type": "peer_joined", "participant": participantPayload(p)}
 	for _, oc := range others {
+		for _, gone := range evictedPids {
+			oc.send(gin.H{"type": "peer_left", "pid": gone})
+		}
+		if hostChanged {
+			oc.send(gin.H{"type": "host_changed", "host_pid": hostPid})
+		}
 		oc.send(announce)
 	}
 }
