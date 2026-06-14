@@ -1,4 +1,4 @@
-package voicecall
+package meet
 
 import (
 	"net/http"
@@ -13,14 +13,15 @@ import (
 
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
+	"alexmessage/internal/debuglog"
 	"alexmessage/internal/httpx"
 )
 
-// vcUser is the Alex Meet public user view (no bio, unlike the chat app, but
+// meetUser is the Alex Meet public user view (no bio, unlike the chat app, but
 // with the avatar URL so meeting tiles can show profile photos). Guests carry
 // a synthetic identity: a negative id (unique per participant, so avatar
 // colors stay distinct) and guest=true.
-type vcUser struct {
+type meetUser struct {
 	ID          int    `json:"id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
@@ -28,22 +29,20 @@ type vcUser struct {
 	Guest       bool   `json:"guest,omitempty"`
 }
 
-func userPublic(u *db.User) vcUser {
-	return vcUser{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Avatar: u.Avatar}
+func userPublic(u *db.User) meetUser {
+	return meetUser{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Avatar: u.Avatar}
 }
 
-type vcServer struct {
+type meetServer struct {
 	meetHTML  string
 	loginHTML string
-	debugHTML string
 }
 
 // NewEngine builds the fully wired Gin engine for the Alex Meet server.
 func NewEngine() *gin.Engine {
-	s := &vcServer{
+	s := &meetServer{
 		meetHTML:  loadHTML("meet.html"),
 		loginHTML: loadHTML("meet_login.html"),
-		debugHTML: loadHTML("meet_debug.html"),
 	}
 
 	r := gin.New()
@@ -72,11 +71,9 @@ func NewEngine() *gin.Engine {
 	r.GET("/api/meetings/:code", handleMeetingInfo)
 	r.GET("/ws", handleWS)
 
-	// Admin debug console for Alex Meet
-	r.POST("/api/debug/report", handleDebugReport)
-	r.GET("/admin/debug", handleDebugPage(s))
-	r.GET("/api/debug/snapshot", handleDebugSnapshot)
-	r.GET("/api/debug/events", handleDebugSSE)
+	// Clients stream real-time actions here; the centralized debug console
+	// lives in the admin panel (reads the shared debug_events table).
+	r.POST("/api/debug/report", debuglog.ReportHandler("meet"))
 
 	return r
 }
@@ -113,7 +110,7 @@ func volcJoinPayload(roomID string, pid int) gin.H {
 
 // ---------- HTML routes ----------
 
-func (s *vcServer) handleRoot(c *gin.Context) {
+func (s *meetServer) handleRoot(c *gin.Context) {
 	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
 	if user == nil {
 		c.Redirect(http.StatusFound, "/login")
@@ -122,7 +119,7 @@ func (s *vcServer) handleRoot(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.meetHTML))
 }
 
-func (s *vcServer) handleMeetingPage(c *gin.Context) {
+func (s *meetServer) handleMeetingPage(c *gin.Context) {
 	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
 	if user == nil {
 		// Guests may load the page when the meeting allows them; everyone
@@ -140,7 +137,7 @@ func (s *vcServer) handleMeetingPage(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.meetHTML))
 }
 
-func (s *vcServer) handleLoginPage(c *gin.Context) {
+func (s *meetServer) handleLoginPage(c *gin.Context) {
 	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
 	if user != nil {
 		c.Redirect(http.StatusFound, safeNext(c.Query("next")))
@@ -232,6 +229,7 @@ func handleCreateMeeting(c *gin.Context) {
 		createdAt: db.NowTS(),
 	}
 	meetMu.Unlock()
+	debuglog.Emit("meet", "info", "meeting_created", "Meeting created", map[string]any{"code": code, "mode": mode})
 	c.JSON(http.StatusOK, gin.H{"code": code, "mode": mode})
 }
 

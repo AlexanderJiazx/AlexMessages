@@ -1,4 +1,4 @@
-// Package db is the SQLite layer for AlexMessage.
+// Package db is the SQLite layer for Alex Messages.
 //
 // The original Python used a connection-per-call pattern in autocommit mode.
 // Go's database/sql gives us a connection pool with the same effect: each
@@ -136,6 +136,25 @@ CREATE TABLE IF NOT EXISTS dm_state (
     force_unread INTEGER NOT NULL DEFAULT 0,   -- explicit "Mark as unread" sticky flag
     PRIMARY KEY (user_id, channel),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Live debug-console ring buffer. Written by both client-facing servers (Alex
+-- Messages and Alex Meet) and read by the admin panel, which is a separate
+-- process; the shared SQLite file is how those processes meet. Capped to the
+-- most recent rows by PruneDebugEvents, so this is intentionally not durable
+-- history. Bounded scans over a small table, so no extra indexes are needed.
+CREATE TABLE IF NOT EXISTS debug_events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms     INTEGER NOT NULL,             -- event time, unix milliseconds
+    app       TEXT    NOT NULL,             -- 'messages' | 'meet' | 'server'
+    level     TEXT    NOT NULL,             -- 'debug' | 'info' | 'warn' | 'error'
+    user_id   INTEGER,                      -- resolved server-side; null for guests
+    username  TEXT    NOT NULL DEFAULT '',  -- display label for the actor
+    session   TEXT    NOT NULL DEFAULT '',  -- client-supplied per-tab id
+    event     TEXT    NOT NULL DEFAULT '',  -- short action name, e.g. 'ws_open'
+    message   TEXT    NOT NULL DEFAULT '',
+    context   TEXT    NOT NULL DEFAULT '',  -- optional JSON blob
+    ip        TEXT    NOT NULL DEFAULT ''   -- reporter IP, for abuse triage
 );
 `
 
@@ -347,7 +366,7 @@ func UpdateUserProfile(userID int, displayName, bio *string) error {
 	return err
 }
 
-// SetUserAvatar stores the public avatar URL ('' clears it).
+// SetUserAvatar stores the public avatar URL (” clears it).
 func SetUserAvatar(userID int, avatar string) error {
 	_, err := pool.Exec("UPDATE users SET avatar = ? WHERE id = ?", avatar, userID)
 	return err
@@ -629,8 +648,8 @@ func ListRecentCalls(userID, limit int) ([]Call, error) {
 	out := []Call{}
 	for rows.Next() {
 		var (
-			c                              Call
-			caller, callee, answered       sql.NullInt64
+			c                        Call
+			caller, callee, answered sql.NullInt64
 		)
 		if err := rows.Scan(&c.ID, &caller, &callee, &c.StartedAt, &answered, &c.EndedAt, &c.Status); err != nil {
 			return nil, err
@@ -699,9 +718,9 @@ func ListPushSubscriptions(userID int) ([]PushSubscription, error) {
 
 // DMState carries the four per-user flags for a DM thread.
 type DMState struct {
-	Pinned     bool
-	LastReadAt int64
-	ClearedAt  int64
+	Pinned      bool
+	LastReadAt  int64
+	ClearedAt   int64
 	ForceUnread bool
 }
 
@@ -712,8 +731,8 @@ func GetDMState(userID int, channel string) (DMState, error) {
 		userID, channel,
 	)
 	var (
-		st                               DMState
-		pinned, forceUnread              int
+		st                  DMState
+		pinned, forceUnread int
 	)
 	err := row.Scan(&pinned, &st.LastReadAt, &st.ClearedAt, &forceUnread)
 	if err == sql.ErrNoRows {

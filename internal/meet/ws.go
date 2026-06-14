@@ -1,4 +1,4 @@
-package voicecall
+package meet
 
 import (
 	"encoding/json"
@@ -12,6 +12,7 @@ import (
 
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
+	"alexmessage/internal/debuglog"
 	"alexmessage/internal/httpx"
 )
 
@@ -192,7 +193,7 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 	if user != nil {
 		p.user = userPublic(user)
 	} else {
-		p.user = vcUser{ID: -p.pid, Username: "guest", DisplayName: guestName, Guest: true}
+		p.user = meetUser{ID: -p.pid, Username: "guest", DisplayName: guestName, Guest: true}
 	}
 	rm.parts[p.pid] = p
 	rm.order = append(rm.order, p.pid)
@@ -254,6 +255,10 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 		}
 		oc.send(announce)
 	}
+
+	debuglog.Emit("meet", "info", "join", "Participant joined", map[string]any{
+		"code": code, "pid": p.pid, "user": p.user.DisplayName, "guest": p.user.Guest, "host_pid": hostPid,
+	})
 }
 
 // detachLocked removes cn's participant from its room, reassigning the host
@@ -304,11 +309,16 @@ func notifyLeft(notify []*conn, pid, hostPid int, hostChanged bool) {
 // notifies the remaining participants, reassigning the host role if needed.
 func leaveRoom(cn *conn) {
 	meetMu.Lock()
+	code := ""
+	if rm := connRoom[cn]; rm != nil {
+		code = rm.code
+	}
 	notify, pid, hostPid, hostChanged := detachLocked(cn)
 	meetMu.Unlock()
 	if pid == 0 {
 		return
 	}
+	debuglog.Emit("meet", "info", "leave", "Participant left", map[string]any{"code": code, "pid": pid, "host_changed": hostChanged})
 	notifyLeft(notify, pid, hostPid, hostChanged)
 }
 

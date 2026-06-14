@@ -1,4 +1,4 @@
-// Package adminapp is the AlexMessage admin control panel (mirrors admin.py).
+// Package adminapp is the Alex Messages admin control panel (mirrors admin.py).
 //
 // It runs as a separate process on its own port, shares the same SQLite
 // database and uploads as the user app, and is cookie-authenticated with admin
@@ -52,6 +52,8 @@ func NewEngine() *gin.Engine {
 
 	r.GET("/api/stats", handleStats)
 	r.POST("/api/purge_messages", handlePurgeMessages)
+
+	registerDebugRoutes(r)
 
 	return r
 }
@@ -332,9 +334,9 @@ func handleDeleteUser(c *gin.Context) {
 		}
 	}
 	_ = db.DeleteUserSessions(userID)
-	_ = db.DeleteUser(userID)         // cascades messages/attachments/contacts via FK
-	db.DeleteUserUploads(userID)      // remove storage directory on disk
-	db.DeleteUserAvatarFiles(userID)  // remove profile photo files on disk
+	_ = db.DeleteUser(userID)        // cascades messages/attachments/contacts via FK
+	db.DeleteUserUploads(userID)     // remove storage directory on disk
+	db.DeleteUserAvatarFiles(userID) // remove profile photo files on disk
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

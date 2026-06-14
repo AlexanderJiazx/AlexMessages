@@ -1,4 +1,4 @@
-// Package httpx holds tiny HTTP helpers shared by all three AlexMessage
+// Package httpx holds tiny HTTP helpers shared by all three Alex Messages
 // servers: FastAPI-compatible error responses and session-cookie handling.
 package httpx
 

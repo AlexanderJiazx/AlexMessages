@@ -1,4 +1,4 @@
-package voicecall
+package meet
 
 // VolcEngine RTC AccessToken generation, ported from the reference
 // implementations shipped in github.com/volcengine/VolcEngineRTC (the Java

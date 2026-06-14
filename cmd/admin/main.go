@@ -1,7 +1,7 @@
-// Command admin is the AlexMessage admin control panel (mirrors admin.py).
+// Command admin is the Alex Messages admin control panel.
 //
-// Runs on its own port (default 8001) sharing the user app's database. Listen
-// address comes from ADMIN_HOST/ADMIN_PORT.
+// Runs on its own port (default 8001) sharing the user app's database. The
+// listen address comes from ADMIN_HOST/ADMIN_PORT.
 package main
 
 import (
@@ -13,6 +13,7 @@ import (
 	"alexmessage/internal/adminapp"
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
+	"alexmessage/internal/httpx"
 )
 
 func main() {
@@ -24,12 +25,10 @@ func main() {
 	if err := auth.BootstrapAdmin(); err != nil {
 		log.Fatalf("admin bootstrap: %v", err)
 	}
+	db.StartBackgroundMaintenance()
 
-	host := envOr("ADMIN_HOST", "127.0.0.1")
-	port := envOr("ADMIN_PORT", "8001")
-	addr := host + ":" + port
-	log.Printf("[alexmessage] admin panel listening on %s", addr)
-	if err := adminapp.NewEngine().Run(addr); err != nil {
+	addr := envOr("ADMIN_HOST", "127.0.0.1") + ":" + envOr("ADMIN_PORT", "8001")
+	if err := httpx.Serve("alex-admin", addr, adminapp.NewEngine()); err != nil {
 		log.Fatalf("admin server: %v", err)
 	}
 }

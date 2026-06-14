@@ -45,10 +45,17 @@ There are **three independent server binaries** that share one SQLite database:
 | Binary            | Default addr        | Purpose |
 |-------------------|---------------------|---------|
 | `cmd/server`      | `0.0.0.0:8765`      | User-facing chat app + `/ws` |
-| `cmd/admin`       | `127.0.0.1:8001`    | Admin control panel |
-| `cmd/voicecall`   | `127.0.0.1:8002`    | **Alex Meet** — multi-party meetings |
+| `cmd/admin`       | `127.0.0.1:8001`    | Admin control panel (+ debug console) |
+| `cmd/meet`        | `127.0.0.1:8002`    | **Alex Meet** — multi-party meetings |
 
-## Alex Meet (cmd/voicecall, internal/voicecall)
+All three are served through `httpx.Serve` (in `internal/httpx/serve.go`), which
+adds slow-loris timeouts (`ReadHeaderTimeout`/`IdleTimeout`, but **no**
+`WriteTimeout` — that would kill the WS control plane and the SSE debug stream)
+and drains in-flight requests on SIGINT/SIGTERM. Each `main` also calls
+`db.StartBackgroundMaintenance()`, a 10-minute sweep that prunes expired
+sessions and caps the debug ring buffer.
+
+## Alex Meet (cmd/meet, internal/meet)
 
 The former 1:1 "AlexMessage Call" was replaced wholesale by **Alex Meet**, a
 Google Meet-style meeting app (audio + video + screen share, 4–5 people in
@@ -68,7 +75,7 @@ chosen per meeting from a lobby dropdown:
 - **`volc` — VolcEngine RTC ("Better performance in China").** Media flows
   through the VolcEngine Web SDK (vendored at
   `static/vendor/volc-rtc-4.68.5.min.js`, UMD global `VERTC`); the server
-  mints per-participant **AccessTokens** (`internal/voicecall/volctoken.go`,
+  mints per-participant **AccessTokens** (`internal/meet/volctoken.go`,
   ported from the reference implementation in volcengine/VolcEngineRTC —
   little-endian packing, HMAC-SHA256, golden-tested in `volctoken_test.go`).
   Credentials come from `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY` (defaults are
@@ -90,7 +97,7 @@ server sends `hello` (`me` is `null` for anonymous connections) / `joined`
 `force_mute` / `kicked` / `replaced` / `guests_changed {allowed}` / `error` /
 `pong`.
 
-Rooms (`internal/voicecall/state.go`) are in-memory only, keyed by
+Rooms (`internal/meet/state.go`) are in-memory only, keyed by
 `xxx-xxxx-xxx` codes (no i/l/o). The first joiner is host; when the host
 leaves, the longest-present participant inherits (`host_changed`). Empty rooms
 survive a 5-minute grace (refresh-proof) and never-joined rooms an hour, then
@@ -108,7 +115,7 @@ falling back to a "Connection lost" screen.
 **Guest access**: each room has a host-toggled `allowGuests` flag (the switch
 lives in the People panel; `set_guests` over WS). When on, non-registered
 visitors get the meeting page instead of the login redirect and join by just
-entering a name; guests are synthetic `vcUser`s with a negative id,
+entering a name; guests are synthetic `meetUser`s with a negative id,
 `username "guest"`, and `guest: true`. The host can also kick anyone
 (`host_kick` → `kicked` to the target, who sees a "removed" screen).
 
@@ -116,9 +123,10 @@ Routes: `GET /` (lobby) and `GET /m/:code` (meeting page; anonymous users are
 redirected through `/login?next=…` unless the room allows guests),
 `POST /api/meetings {mode}` → `{code}`, `GET /api/meetings/:code` →
 `{mode, participants, allow_guests}` (deliberately public so the page can pick
-gate vs. login before auth), plus login/logout/me. The meet server mounts
+gate vs. login before auth), plus login/logout/me and the debug-console
+ingest `POST /api/debug/report`. The meet server mounts
 `/static`, `/fonts`, `/sound`, and `/avatars` (so meeting tiles can show
-profile photos; `vcUser` = `{id, username, display_name, avatar, guest?}`,
+profile photos; `meetUser` = `{id, username, display_name, avatar, guest?}`,
 still no bio). The legacy 1:1 `calls` table remains in the DB but Alex Meet
 does not write meeting history.
 
@@ -185,23 +193,46 @@ listener on mesh tile videos).
 
 ```
 cmd/
-  server/main.go      entrypoint: bootstrap + serve user app
-  admin/main.go       entrypoint: bootstrap + serve admin panel
-  voicecall/main.go   entrypoint: bootstrap + serve Alex Meet
+  server/main.go   entrypoint: bootstrap + serve user app
+  admin/main.go    entrypoint: bootstrap + serve admin panel
+  meet/main.go     entrypoint: bootstrap + serve Alex Meet
 internal/
-  db/        SQLite schema + every query helper (was db.py)
-  auth/      scrypt hashing, session tokens, admin bootstrap (was auth.py)
-  push/      VAPID bootstrap + Web Push delivery (was push.py)
+  db/        SQLite schema + every query helper; debug.go (ring buffer) + maintenance.go (sweeps)
+  auth/      scrypt hashing, session tokens, admin bootstrap
+  push/      VAPID bootstrap + Web Push delivery
   runtime/   main-app shared state: presence, visibility, broadcasts
-  httpx/     tiny shared HTTP helpers: {"detail": …} errors + session cookies
+  httpx/     tiny shared HTTP helpers: {"detail": …} errors, cookies, graceful Serve
+  debuglog/  debug-console ingestion: rate-limited /api/debug/report + server-side Emit
   webapp/    the user app: engine + one file per route module
-  adminapp/  the admin panel (was admin.py)
-  voicecall/ Alex Meet (state.go, ws.go, routes.go, volctoken.go)
+  adminapp/  the admin panel + adminapp/debug.go (debug-console read API)
+  meet/      Alex Meet (state.go, ws.go, routes.go, volctoken.go)
 ```
 
 The webapp route files: `pages.go`, `auth_routes.go`, `me.go`, `users.go`,
 `uploads.go`, `push_routes.go`, `dm_state.go`, `history.go`, `ws.go`, plus
 `avatar.go` (profile photos) and `linkpreview.go` (link previews).
+
+## Debug console (admin panel)
+
+A centralized, real-time debug console lives in the **admin panel**. Because the
+three binaries are separate processes that share only the SQLite file, the
+shared `debug_events` table (a capped ring buffer; `db/debug.go`) is the channel
+between them:
+
+- **Ingestion** — both client-facing servers expose `POST /api/debug/report`
+  (built from `debuglog.ReportHandler`). The browser clients batch real-time
+  actions (`Debug.info/warn/error/debug(event, message, ctx)` in `static/app.js`
+  and `meet.html`) and stream them there; server code records its own status
+  with `debuglog.Emit(app, level, event, message, ctx)` (e.g. ws connect/
+  disconnect, meeting create/join/leave). The actor's identity is resolved
+  server-side from the session cookie — never trusted from the body.
+- **Abuse prevention** — per-IP token bucket, 64 KB body cap, 50-event batch
+  cap, per-field length limits, level whitelist. Over-budget events are dropped
+  but the endpoint always returns `200 {"ok":true}`.
+- **Reading** — the admin panel (`adminapp/debug.go`) serves `GET /api/debug/events`
+  (filtered snapshot), `GET /api/debug/stream` (SSE live tail; polls the table
+  on a 1s tick since the writers are other processes), and `POST /api/debug/clear`.
+  The admin UI filters by **app, level, user, session, and free-text** search.
 
 ## Run / develop
 
@@ -217,7 +248,7 @@ ADMIN_PASSWORD=changeme PORT=80   go run ./cmd/server   # prod
 ADMIN_PASSWORD=changeme go run ./cmd/admin
 
 # Alex Meet (default 127.0.0.1:8002)
-ADMIN_PASSWORD=changeme go run ./cmd/voicecall
+ADMIN_PASSWORD=changeme go run ./cmd/meet
 ```
 
 Build standalone binaries with `go build -o bin/server ./cmd/server` (etc.).
@@ -230,7 +261,7 @@ Environment variables (same semantics as the Python version):
 - `VAPID_SUBJECT` (default `mailto:admin@alexanderjia.com`) — Web Push contact URI.
 - `HOST` / `PORT` (user app), `ADMIN_HOST` / `ADMIN_PORT`, `CALL_HOST` / `CALL_PORT`.
 - `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY` — VolcEngine RTC credentials for Alex
-  Meet's `volc` backend (defaults baked into `internal/voicecall/routes.go`).
+  Meet's `volc` backend (defaults baked into `internal/meet/routes.go`).
 
 `go vet ./...` and `go build ./...` should both stay clean.
 
@@ -240,11 +271,13 @@ fine for development, but production Alex Meet must be served over HTTPS.
 ### Testing
 
 Unit tests live next to the code (`internal/db/db_test.go`,
-`internal/webapp/linkpreview_test.go`, `internal/webapp/uploads_test.go`,
-`internal/voicecall/volctoken_test.go`) and cover the DB layer (DM state, read
-receipts, attachment dimensions, paging), the link-preview parser/SSRF guard,
-image-dimension extraction, and the VolcEngine AccessToken wire format
-(golden + round-trip). Run with `go test ./...`. The DB tests point the
+`internal/db/debug_test.go`, `internal/webapp/linkpreview_test.go`,
+`internal/webapp/uploads_test.go`, `internal/meet/volctoken_test.go`,
+`internal/debuglog/debuglog_test.go`) and cover the DB layer (DM state, read
+receipts, attachment dimensions, paging, debug-event filters/prune), the
+link-preview parser/SSRF guard, image-dimension extraction, the VolcEngine
+AccessToken wire format (golden + round-trip), and the debug ingest
+rate-limiter/sanitizers. Run with `go test ./...`. The DB tests point the
 package-level path vars at a temp dir.
 
 For end-to-end checks, run the binaries and exercise the flow by hand:
@@ -291,7 +324,7 @@ Responses are byte-compatible with FastAPI where it matters:
   `edited_at`) serialize as JSON `null`, not omitted.
 - The three different public-user views are preserved: `runtime.PublicUser`
   (`{id, username, display_name, bio, avatar}`), `db.UserToPublic` (admin: adds
-  `status`, `is_admin`, `created_at`), and the meet server's `vcUser`
+  `status`, `is_admin`, `created_at`), and the meet server's `meetUser`
   (`{id, username, display_name, avatar}`, no bio).
 
 ### Web Push / VAPID
@@ -339,8 +372,16 @@ Alex Meet rooms are in-memory only — a meet-server restart ends all meetings.
 ## Endpoints
 
 See the route files under `internal/webapp/` (user app),
-`internal/adminapp/adminapp.go` (admin), and `internal/voicecall/routes.go`
-(Alex Meet). The main-app WebSocket protocol: client sends
-`message`/`edit`/`switch`/`open_dm`/`ping`; server sends `init`/`message`/
+`internal/adminapp/` (admin; `adminapp.go` + `debug.go`), and
+`internal/meet/routes.go` (Alex Meet). The main-app WebSocket protocol: client
+sends `message`/`edit`/`switch`/`open_dm`/`ping`; server sends `init`/`message`/
 `message_edited`/`presence`/`profile_update`/`dm_opened`/`dm_read`. The Alex
 Meet control-plane protocol is documented above.
+
+Debug console (admin): `GET /api/debug/events` (filtered snapshot),
+`GET /api/debug/stream` (SSE live tail), `POST /api/debug/clear`. Ingestion:
+`POST /api/debug/report` on both the user app and the meet server. See the
+**Debug console** section above.
+
+See also `DEPLOY.md` (build/run/deploy for humans and agents) and
+`Investigation.md` (the problem/threat audit from the FreshRefactor pass).

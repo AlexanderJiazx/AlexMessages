@@ -1,5 +1,5 @@
 // Package voicecall is the Alex Meet server: Google Meet-style multi-party
-// meetings on top of the shared AlexMessage account database. It serves the
+// meetings on top of the shared Alex Messages account database. It serves the
 // lobby/meeting pages and runs the WebSocket control plane that every meeting
 // participant stays connected to, regardless of which media backend the
 // meeting uses:
@@ -14,7 +14,7 @@
 // mutate under the lock, snapshot the recipients, then send after releasing
 // it. Each socket carries its own write mutex so concurrent fan-outs never
 // interleave a frame on the same connection.
-package voicecall
+package meet
 
 import (
 	"crypto/rand"
@@ -56,7 +56,7 @@ func (c *conn) send(payload any) bool {
 // two tabs is two participants with distinct pids.
 type participant struct {
 	pid      int
-	user     vcUser
+	user     meetUser
 	c        *conn
 	clientID string // per-tab id from the client; identifies reconnects/guests
 	joinedAt int64

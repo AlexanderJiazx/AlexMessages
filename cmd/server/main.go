@@ -1,4 +1,4 @@
-// Command server is the user-facing AlexMessage app (mirrors server.py).
+// Command server is the user-facing Alex Messages app.
 //
 // It runs DB + admin + VAPID bootstrap, then serves the Gin engine. The listen
 // address comes from HOST/PORT (defaults 0.0.0.0:8765 for local dev; use port
@@ -13,6 +13,7 @@ import (
 
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
+	"alexmessage/internal/httpx"
 	"alexmessage/internal/push"
 	"alexmessage/internal/webapp"
 )
@@ -29,24 +30,17 @@ func main() {
 	if err := push.BootstrapVAPID(); err != nil {
 		log.Fatalf("vapid bootstrap: %v", err)
 	}
+	db.StartBackgroundMaintenance()
 
-	addr := listenAddr("0.0.0.0", "8765")
-	log.Printf("[alexmessage] user app listening on %s", addr)
-
-	//Start engine on addr
-	if err := webapp.NewEngine().Run(addr); err != nil {
+	addr := envOr("HOST", "0.0.0.0") + ":" + envOr("PORT", "8765")
+	if err := httpx.Serve("alex-messages", addr, webapp.NewEngine()); err != nil {
 		log.Fatalf("server: %v", err)
 	}
 }
 
-func listenAddr(defaultHost, defaultPort string) string {
-	host := os.Getenv("HOST")
-	if host == "" {
-		host = defaultHost
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = defaultPort
-	}
-	return host + ":" + port
+	return def
 }

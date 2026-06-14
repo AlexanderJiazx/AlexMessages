@@ -66,7 +66,7 @@ func BootstrapVAPID() error {
 				return os.WriteFile(vapidPublicPath, []byte(vapidPublicB64), 0o644)
 			}
 		}
-		fmt.Fprintln(os.Stderr, "[alexmessage] existing VAPID key unreadable; regenerating")
+		fmt.Fprintln(os.Stderr, "[alex-messages] existing VAPID key unreadable; regenerating")
 	}
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -85,7 +85,7 @@ func BootstrapVAPID() error {
 	if err := os.WriteFile(vapidPublicPath, []byte(vapidPublicB64), 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "[alexmessage] generated new VAPID key pair")
+	fmt.Fprintln(os.Stderr, "[alex-messages] generated new VAPID key pair")
 	return nil
 }
 
@@ -138,7 +138,7 @@ func sendOne(sub db.PushSubscription, data []byte) bool {
 		Urgency:         pushUrgency,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[alexmessage] push send error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[alex-messages] push send error: %v\n", err)
 		return false
 	}
 	defer resp.Body.Close()
@@ -149,7 +149,7 @@ func sendOne(sub db.PushSubscription, data []byte) bool {
 	if status == 404 || status == 410 {
 		_ = db.RemovePushSubscription(sub.Endpoint)
 	} else {
-		fmt.Fprintf(os.Stderr, "[alexmessage] push send failed (%d)\n", status)
+		fmt.Fprintf(os.Stderr, "[alex-messages] push send failed (%d)\n", status)
 	}
 	return false
 }

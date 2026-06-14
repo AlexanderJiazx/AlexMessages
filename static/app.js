@@ -38,6 +38,52 @@
   function loadLastChannel() {
     try { return localStorage.getItem(LAST_CHANNEL_KEY) || null; } catch { return null; }
   }
+
+  // ──────── Debug reporter ────────
+  // Streams real-time client actions to the admin debug console over a
+  // rate-limited tunnel (POST /api/debug/report). Events are batched and sent
+  // on a short timer so we never spam the network or the server.
+  const Debug = (() => {
+    const SESSION_KEY = "am_dbg_session";
+    let session = "anon";
+    try {
+      session = sessionStorage.getItem(SESSION_KEY) || "";
+      if (!session) { session = Math.random().toString(36).slice(2, 10); sessionStorage.setItem(SESSION_KEY, session); }
+    } catch {}
+
+    let queue = [];
+    let timer = null;
+    function flush() {
+      timer = null;
+      if (!queue.length) return;
+      const events = queue.splice(0, 50);
+      try {
+        fetch("/api/debug/report", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          keepalive: true,
+          body: JSON.stringify({ session, events }),
+        }).catch(() => {});
+      } catch {}
+    }
+    function log(level, event, message, context) {
+      queue.push({ ts_ms: Date.now(), level, event, message: message == null ? "" : String(message), context });
+      if (queue.length >= 25) flush();
+      else if (!timer) timer = setTimeout(flush, 2000);
+    }
+    window.addEventListener("error", (e) => log("error", "window.error", e.message, { src: e.filename, line: e.lineno }));
+    window.addEventListener("unhandledrejection", (e) => {
+      const r = e.reason; log("error", "unhandledrejection", (r && r.message) || String(r));
+    });
+    window.addEventListener("pagehide", flush);
+    return {
+      debug: (ev, msg, ctx) => log("debug", ev, msg, ctx),
+      info:  (ev, msg, ctx) => log("info", ev, msg, ctx),
+      warn:  (ev, msg, ctx) => log("warn", ev, msg, ctx),
+      error: (ev, msg, ctx) => log("error", ev, msg, ctx),
+    };
+  })();
   function channelExists(id) {
     if (!id) return false;
     if (state.dmThreads.find(t => t.channel === id)) return true;
@@ -1318,6 +1364,7 @@
     ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.addEventListener("open", () => {
       wsReady = true;
+      Debug.info("ws_open", "WebSocket connected", { queued: pendingSend.length });
       pendingSend.forEach(p => ws.send(JSON.stringify(p)));
       pendingSend = [];
     });
@@ -1328,15 +1375,18 @@
     ws.addEventListener("close", (e) => {
       wsReady = false;
       if (e.code === 4401) {
+        Debug.warn("ws_close", "Session expired (4401), redirecting to login");
         window.location.href = "/login";
         return;
       }
+      Debug.warn("ws_close", "WebSocket closed, reconnecting", { code: e.code });
       toast("Disconnected — reconnecting…", true);
       setTimeout(connect, 1500);
     });
-    ws.addEventListener("error", () => {});
+    ws.addEventListener("error", () => Debug.error("ws_error", "WebSocket error"));
   }
   function send(payload) {
+    Debug.debug("ws_send", payload && payload.type, payload && payload.channel ? { channel: payload.channel } : undefined);
     if (wsReady) ws.send(JSON.stringify(payload));
     else pendingSend.push(payload);
   }
@@ -1355,6 +1405,7 @@
       state.historyLoading = {};
       state.pageSize = data.page_size || PAGE_SIZE_DEFAULT;
       state.maxUpload = data.max_upload || state.maxUpload;
+      Debug.info("init", "Session initialized", { users: (data.users || []).length, threads: (data.dm_threads || []).length });
       state.dmState = {};
       Object.entries(data.dm_state || {}).forEach(([ch, s]) => {
         state.dmState[ch] = {

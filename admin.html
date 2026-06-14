@@ -180,6 +180,45 @@
   }
   .toast.err { background: var(--danger); }
   @keyframes toast-in { from { opacity:0; transform: translateY(8px) } to { opacity:1; transform: translateY(0) } }
+
+  /* Debug console */
+  .dbg-filters {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 12px 16px; border-bottom: 1px solid var(--line-2); background: var(--surface);
+  }
+  .dbg-filters input, .dbg-filters select {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 10px; font-size: 12.5px; color: var(--ink); outline: none;
+  }
+  .dbg-filters input:focus, .dbg-filters select:focus { border-color: var(--sage); box-shadow: 0 0 0 3px rgba(79,122,94,.16); }
+  .dbg-filters input.search { min-width: 180px; flex: 1; }
+  .dbg-spacer { flex: 1; }
+  .dbg-live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .dbg-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .dbg-dot.on { background: var(--sage); box-shadow: 0 0 0 3px rgba(79,122,94,.18); }
+  .dbg-dot.err { background: var(--danger); }
+  .dbg-log {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; line-height: 1.5; max-height: 460px; overflow-y: auto;
+    padding: 6px 0;
+  }
+  .dbg-row {
+    display: grid; grid-template-columns: 92px 64px 150px 1fr; gap: 10px;
+    padding: 4px 16px; border-bottom: 1px solid var(--line-2); align-items: baseline;
+  }
+  .dbg-row:hover { background: var(--sage-tint); }
+  .dbg-row .ts { color: var(--faint); white-space: nowrap; }
+  .dbg-row .who { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dbg-row .who .sess { color: var(--faint); }
+  .dbg-row .body { word-break: break-word; color: var(--ink-2); }
+  .dbg-row .ev { color: var(--sage-deep); font-weight: 600; margin-right: 6px; }
+  .dbg-row .ctx { display: block; color: var(--muted); margin-top: 2px; white-space: pre-wrap; }
+  .lvl { display: inline-block; padding: 1px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+  .lvl.debug { background: #ECECEC; color: var(--muted); }
+  .lvl.info  { background: #DCE9F5; color: #2C4A6F; }
+  .lvl.warn  { background: #FBF1D8; color: #8A6A1F; }
+  .lvl.error { background: #FBECEA; color: #7E2D2A; }
+  .app-pill { display: inline-block; padding: 1px 6px; border-radius: 6px; font-size: 10px; font-weight: 600; background: var(--sage-tint); color: var(--sage-deep); }
 </style>
 </head>
 <body>
@@ -250,6 +289,38 @@
       <button class="btn danger" id="purgeBtn">Purge all messages</button>
       <span style="margin-left: 10px; color: var(--muted); font-size: 12px;">Deletes every message and attachment record. Files on disk are retained.</span>
     </div>
+  </div>
+
+  <div class="section">
+    <div class="hd">
+      <h2 class="serif">Debug console</h2>
+      <span class="dbg-live">
+        <span class="dbg-dot" id="dbgDot"></span>
+        <span id="dbgCount" style="color:var(--muted); font-size:12px;">0 events</span>
+      </span>
+    </div>
+    <div class="dbg-filters">
+      <select id="dbgApp">
+        <option value="">All apps</option>
+        <option value="messages">Messages</option>
+        <option value="meet">Meet</option>
+        <option value="server">Server</option>
+      </select>
+      <select id="dbgLevel">
+        <option value="">All levels</option>
+        <option value="debug">Debug</option>
+        <option value="info">Info</option>
+        <option value="warn">Warn</option>
+        <option value="error">Error</option>
+      </select>
+      <input id="dbgUser" placeholder="user…" style="width:120px;" />
+      <input id="dbgSession" placeholder="session…" style="width:120px;" />
+      <input id="dbgSearch" class="search" placeholder="search event / message…" />
+      <span class="dbg-spacer"></span>
+      <button class="btn small" id="dbgPause">Pause</button>
+      <button class="btn small danger" id="dbgClear">Clear</button>
+    </div>
+    <div class="dbg-log" id="dbgLog"></div>
   </div>
 </div>
 
@@ -358,9 +429,11 @@
       $("dashView").style.display = "";
       $("adminWho").textContent = "@" + r.data.user.username;
       await refreshAll();
+      dbgStart();
     } else {
       $("loginView").style.display = "";
       $("dashView").style.display = "none";
+      dbgStop();
     }
   }
 
@@ -582,6 +655,120 @@
   document.querySelectorAll(".modal").forEach(m => {
     m.addEventListener("click", (e) => { if (e.target === m) m.classList.remove("on"); });
   });
+
+  // ──────── Debug console ────────
+  const dbg = {
+    es: null,
+    paused: false,
+    latestId: 0,
+    count: 0,
+    rows: 0,
+    MAX_ROWS: 2000,
+  };
+
+  function dbgFilters() {
+    const p = new URLSearchParams();
+    const app = $("dbgApp").value;       if (app) p.set("app", app);
+    const lvl = $("dbgLevel").value;     if (lvl) p.set("level", lvl);
+    const usr = $("dbgUser").value.trim();     if (usr) p.set("user", usr);
+    const ses = $("dbgSession").value.trim();  if (ses) p.set("session", ses);
+    const q   = $("dbgSearch").value.trim();   if (q) p.set("q", q);
+    return p;
+  }
+
+  function dbgFmtTs(ms) {
+    const d = new Date(ms);
+    const t = d.toLocaleTimeString(undefined, { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return t + "." + String(d.getMilliseconds()).padStart(3, "0");
+  }
+
+  function dbgRow(ev) {
+    const el = document.createElement("div");
+    el.className = "dbg-row";
+    const lvl = (ev.level || "info").toLowerCase();
+    const who = ev.username ? escapeHTML(ev.username) : "—";
+    const sess = ev.session ? ` <span class="sess">${escapeHTML(ev.session)}</span>` : "";
+    let ctx = "";
+    if (ev.context) {
+      let pretty = ev.context;
+      try { pretty = JSON.stringify(JSON.parse(ev.context)); } catch {}
+      ctx = `<span class="ctx">${escapeHTML(pretty)}</span>`;
+    }
+    el.innerHTML =
+      `<div class="ts">${escapeHTML(dbgFmtTs(ev.ts_ms))}</div>` +
+      `<div><span class="app-pill">${escapeHTML(ev.app || "?")}</span></div>` +
+      `<div class="who" title="${who}">${who}${sess}</div>` +
+      `<div class="body"><span class="lvl ${lvl}">${escapeHTML(lvl)}</span>` +
+      (ev.event ? `<span class="ev">${escapeHTML(ev.event)}</span>` : "") +
+      escapeHTML(ev.message || "") + ctx + `</div>`;
+    return el;
+  }
+
+  function dbgAppend(ev) {
+    const log = $("dbgLog");
+    const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    log.appendChild(dbgRow(ev));
+    dbg.rows++;
+    while (dbg.rows > dbg.MAX_ROWS && log.firstChild) { log.removeChild(log.firstChild); dbg.rows--; }
+    if (ev.id > dbg.latestId) dbg.latestId = ev.id;
+    dbg.count++;
+    $("dbgCount").textContent = dbg.count + " events";
+    if (nearBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  function dbgSetDot(cls) { $("dbgDot").className = "dbg-dot" + (cls ? " " + cls : ""); }
+
+  function dbgCloseStream() {
+    if (dbg.es) { dbg.es.close(); dbg.es = null; }
+    dbgSetDot("");
+  }
+
+  function dbgOpenStream() {
+    dbgCloseStream();
+    if (dbg.paused) return;
+    const p = dbgFilters();
+    p.set("since", String(dbg.latestId));
+    const es = new EventSource("/api/debug/stream?" + p.toString());
+    es.onopen = () => dbgSetDot("on");
+    es.onerror = () => dbgSetDot("err");
+    es.onmessage = (e) => { try { dbgAppend(JSON.parse(e.data)); } catch {} };
+    dbg.es = es;
+  }
+
+  async function dbgReload() {
+    dbgCloseStream();
+    $("dbgLog").innerHTML = "";
+    dbg.rows = 0; dbg.count = 0; dbg.latestId = 0;
+    $("dbgCount").textContent = "0 events";
+    const p = dbgFilters();
+    p.set("since", "0");
+    p.set("limit", "500");
+    const r = await api("/api/debug/events?" + p.toString());
+    if (r.ok && r.data && r.data.events) r.data.events.forEach(dbgAppend);
+    dbgOpenStream();
+  }
+
+  let dbgDebounce = null;
+  function dbgFilterChanged() {
+    clearTimeout(dbgDebounce);
+    dbgDebounce = setTimeout(dbgReload, 250);
+  }
+  ["dbgApp", "dbgLevel"].forEach(id => $(id).addEventListener("change", dbgFilterChanged));
+  ["dbgUser", "dbgSession", "dbgSearch"].forEach(id => $(id).addEventListener("input", dbgFilterChanged));
+
+  $("dbgPause").addEventListener("click", () => {
+    dbg.paused = !dbg.paused;
+    $("dbgPause").textContent = dbg.paused ? "Resume" : "Pause";
+    if (dbg.paused) dbgCloseStream(); else dbgOpenStream();
+  });
+  $("dbgClear").addEventListener("click", async () => {
+    const r = await api("/api/debug/clear", { method: "POST" });
+    if (r.ok) { dbgReload(); toast("Debug log cleared"); }
+    else toast(r.data?.detail || "Failed", true);
+  });
+
+  function dbgStart() { dbg.paused = false; $("dbgPause").textContent = "Pause"; dbgReload(); }
+  function dbgStop() { dbgCloseStream(); }
 
   // ──────── Boot ────────
   async function refreshAll() {

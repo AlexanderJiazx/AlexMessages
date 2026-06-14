@@ -169,7 +169,7 @@ func fetchLinkPreview(ctx context.Context, u *url.URL) LinkPreview {
 	if err != nil {
 		return empty
 	}
-	req.Header.Set("User-Agent", "AlexMessage-LinkPreview/1.0")
+	req.Header.Set("User-Agent", "AlexMessages-LinkPreview/1.0")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 	res, err := linkPreviewClient.Do(req)
 	if err != nil {

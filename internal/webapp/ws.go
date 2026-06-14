@@ -13,6 +13,7 @@ import (
 
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
+	"alexmessage/internal/debuglog"
 	"alexmessage/internal/httpx"
 	"alexmessage/internal/push"
 	"alexmessage/internal/runtime"
@@ -95,6 +96,7 @@ func handleWS(c *gin.Context) {
 	presence := runtime.PresenceTracker()
 	client := &runtime.Client{Conn: conn, UserID: user.ID}
 	presence.Add(client)
+	debuglog.Emit("messages", "info", "ws_connect", "User connected", map[string]any{"user": user.Username})
 
 	runtime.SendJSON(client, buildInitPayload(user))
 	runtime.BroadcastPresence()
@@ -102,6 +104,7 @@ func handleWS(c *gin.Context) {
 	defer func() {
 		presence.Remove(client)
 		runtime.BroadcastPresence()
+		debuglog.Emit("messages", "info", "ws_disconnect", "User disconnected", map[string]any{"user": user.Username})
 	}()
 
 	for {

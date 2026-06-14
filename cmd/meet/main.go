@@ -1,6 +1,6 @@
-// Command voicecall is the Alex Meet server: Google Meet-style multi-party
-// meetings (standard WebRTC mesh or VolcEngine RTC) sharing the user app's
-// database. Listen address comes from CALL_HOST/CALL_PORT.
+// Command meet is the Alex Meet server: Google Meet-style multi-party meetings
+// (standard WebRTC mesh or VolcEngine RTC) sharing the Alex Messages account
+// database. The listen address comes from CALL_HOST/CALL_PORT.
 package main
 
 import (
@@ -11,7 +11,8 @@ import (
 
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
-	"alexmessage/internal/voicecall"
+	"alexmessage/internal/httpx"
+	"alexmessage/internal/meet"
 )
 
 func main() {
@@ -23,12 +24,10 @@ func main() {
 	if err := auth.BootstrapAdmin(); err != nil {
 		log.Fatalf("admin bootstrap: %v", err)
 	}
+	db.StartBackgroundMaintenance()
 
-	host := envOr("CALL_HOST", "127.0.0.1")
-	port := envOr("CALL_PORT", "8002")
-	addr := host + ":" + port
-	log.Printf("[alexmessage] Alex Meet server listening on %s", addr)
-	if err := voicecall.NewEngine().Run(addr); err != nil {
+	addr := envOr("CALL_HOST", "127.0.0.1") + ":" + envOr("CALL_PORT", "8002")
+	if err := httpx.Serve("alex-meet", addr, meet.NewEngine()); err != nil {
 		log.Fatalf("meet server: %v", err)
 	}
 }

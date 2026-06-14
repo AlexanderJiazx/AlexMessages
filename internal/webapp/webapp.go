@@ -1,4 +1,4 @@
-// Package webapp is the user-facing AlexMessage server: the Gin engine, static
+// Package webapp is the user-facing Alex Messages server: the Gin engine, static
 // mounts, the cookie-authenticated request helpers, and every route module
 // that the Python `routes/` package contained. It mirrors server.py.
 package webapp
@@ -12,6 +12,7 @@ import (
 
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
+	"alexmessage/internal/debuglog"
 	"alexmessage/internal/httpx"
 )
 
@@ -62,6 +63,10 @@ func NewEngine() *gin.Engine {
 	registerHistoryRoutes(r)
 	registerLinkPreviewRoutes(r)
 	registerWS(r)
+
+	// Clients stream real-time actions to the centralized debug console (which
+	// lives in the admin panel and reads the shared debug_events table).
+	r.POST("/api/debug/report", debuglog.ReportHandler("messages"))
 
 	return r
 }

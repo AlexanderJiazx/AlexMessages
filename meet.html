@@ -797,77 +797,65 @@
     }
   }
 
-  // ──────── Debug reporter (sends errors to admin console) ────────
-  const debugReporter = {
-    sent: 0,
-    max: 50,
-    last: 0,
-    delay: 2000,
-    queue: [],
-    timer: null,
-    flush() {
-      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-      while (this.queue.length) {
-        const ev = this.queue.shift();
-        if (this.sent >= this.max) continue;
-        const now = Date.now();
-        if (now - this.last < this.delay) {
-          this.queue.unshift(ev);
-          this.timer = setTimeout(() => this.flush(), this.delay - (now - this.last));
-          return;
-        }
-        this.last = now;
-        this.sent++;
-        fetch("/api/debug/report", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(ev),
-          credentials: "same-origin",
-        }).catch(() => {});
-      }
-    },
-    send(type, message, stack = "") {
+  // ──────── Debug reporter (streams actions to the admin debug console) ────────
+  // Batched + rate-limited; the server tunnel (/api/debug/report) applies the
+  // hard limits. Context is enriched with the live meeting code/mode/pid so the
+  // admin can filter a single meeting.
+  const Debug = (() => {
+    let session = "anon";
+    try {
+      session = sessionStorage.getItem("meet_dbg_session") || "";
+      if (!session) { session = Math.random().toString(36).slice(2, 10); sessionStorage.setItem("meet_dbg_session", session); }
+    } catch {}
+    let queue = [];
+    let timer = null;
+    function safeJSON(x) { try { return JSON.stringify(x); } catch { return String(x); } }
+    function ctxBase(extra) {
       const st = (typeof state !== "undefined" ? state : {}) || {};
       const me = st.me || {};
-      const user = st.me
-        ? (me.display_name || me.username || "user")
-        : (st.guestName || "guest");
-      this.queue.push({
-        type,
-        message,
-        stack,
-        context: {
-          code: st.code || "",
-          mode: st.mode || "",
-          pid: st.selfPid ?? "",
-          user,
-          guest: !st.me,
-          url: location.href,
-          ua: navigator.userAgent,
-        },
-      });
-      this.flush();
-    },
-  };
-  const _origError = console.error;
-  const _origWarn = console.warn;
-  console.error = function(...args) {
-    _origError.apply(this, args);
-    debugReporter.send("error", args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
-  };
-  console.warn = function(...args) {
-    _origWarn.apply(this, args);
-    debugReporter.send("warn", args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
-  };
-  window.addEventListener("error", (e) => {
-    debugReporter.send("error", e.message, e.error && e.error.stack ? e.error.stack : "");
-  });
-  window.addEventListener("unhandledrejection", (e) => {
-    const reason = e.reason;
-    const msg = reason instanceof Error ? reason.message : String(reason);
-    const stack = reason instanceof Error ? reason.stack : "";
-    debugReporter.send("error", "Unhandled rejection: " + msg, stack);
-  });
+      return Object.assign({
+        code: st.code || "",
+        mode: st.mode || "",
+        pid: st.selfPid ?? "",
+        user: st.me ? (me.display_name || me.username || "user") : (st.guestName || "guest"),
+        guest: !st.me,
+      }, extra || {});
+    }
+    function flush() {
+      timer = null;
+      if (!queue.length) return;
+      const events = queue.splice(0, 50);
+      try {
+        fetch("/api/debug/report", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          keepalive: true,
+          body: JSON.stringify({ session, events }),
+        }).catch(() => {});
+      } catch {}
+    }
+    function log(level, event, message, context) {
+      queue.push({ ts_ms: Date.now(), level, event, message: message == null ? "" : String(message), context: ctxBase(context) });
+      if (queue.length >= 25) flush();
+      else if (!timer) timer = setTimeout(flush, 2000);
+    }
+    const _err = console.error, _warn = console.warn;
+    console.error = function(...a) { _err.apply(this, a); log("error", "console.error", a.map(x => typeof x === "string" ? x : safeJSON(x)).join(" ")); };
+    console.warn = function(...a) { _warn.apply(this, a); log("warn", "console.warn", a.map(x => typeof x === "string" ? x : safeJSON(x)).join(" ")); };
+    window.addEventListener("error", (e) => log("error", "window.error", e.message, { stack: e.error && e.error.stack ? e.error.stack : "" }));
+    window.addEventListener("unhandledrejection", (e) => {
+      const r = e.reason; const msg = r instanceof Error ? r.message : String(r);
+      log("error", "unhandledrejection", msg, { stack: r instanceof Error ? r.stack : "" });
+    });
+    window.addEventListener("pagehide", flush);
+    return {
+      debug: (ev, msg, ctx) => log("debug", ev, msg, ctx),
+      info:  (ev, msg, ctx) => log("info", ev, msg, ctx),
+      warn:  (ev, msg, ctx) => log("warn", ev, msg, ctx),
+      error: (ev, msg, ctx) => log("error", ev, msg, ctx),
+    };
+  })();
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -967,6 +955,7 @@
     ws.onopen = () => {
       if (state.ws !== ws) return;
       state.wsReady = true;
+      Debug.info("ws_open", state.reconnecting ? "Control socket reopened (reconnect)" : "Control socket connected");
       // A socket opened mid-reconnect must re-announce us first; the server
       // evicts our stale ghost (matched by client_id) and replies "joined".
       if (state.reconnecting) sendJoin();
@@ -983,12 +972,14 @@
       state.wsReady = false;
       state.ws = null;
       if (e.code === 4401) {
+        Debug.warn("ws_close", "Session expired (4401), redirecting to login");
         const next = location.pathname.startsWith("/m/") ? "?next=" + encodeURIComponent(location.pathname) : "";
         location.href = "/login" + next;
         return;
       }
       if (state.leaving) return;            // intentional exit
       if (state.reconnecting) return;       // the reconnect timer drives retries
+      Debug.warn("ws_close", "Control socket dropped", { code: e.code, phase: state.phase });
       if (state.phase === "inmeeting" || state.phase === "joining") beginReconnect();
     };
     ws.onerror = () => {};
@@ -1022,6 +1013,7 @@
     state.reconnectDeadline = Date.now() + RECONNECT_WINDOW_MS;
     state.pendingSend = [];
     showReconnecting(true);
+    Debug.warn("reconnect_begin", "Lost connection, retrying");
     tryReconnect();
   }
   function tryReconnect() {
@@ -1049,6 +1041,7 @@
     if (state.ws) { const old = state.ws; state.ws = null; try { old.close(); } catch {} }
     teardownMedia();
     state.phase = "left";
+    Debug.error("reconnect_failed", "Gave up reconnecting to the meeting");
     showInterstitial("Connection lost", msg || "We couldn't reconnect to the meeting.");
   }
 
@@ -1082,6 +1075,7 @@
         });
         state.volc = data.volc || null;
         state.phase = "inmeeting";
+        Debug.info(reconnect ? "rejoined" : "joined", reconnect ? "Reconnected to meeting" : "Joined meeting", { participants: state.roster.size, host: state.hostPid });
         // Someone already sharing? Open on them instead of the grid.
         for (const [pid, p] of state.roster) {
           if (p.sharing && pid !== state.selfPid) { state.grid = false; state.autoFocusPid = pid; break; }
