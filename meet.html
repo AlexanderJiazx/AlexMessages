@@ -192,8 +192,8 @@
   }
   .gate-preview video {
     width: 100%; height: 100%; object-fit: contain; display: block;
-    transform: scaleX(-1); /* selfie mirror */
   }
+  .gate-preview.mirror video { transform: scaleX(-1); } /* front camera only */
   .gate-preview .gp-off {
     position: absolute; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 8px;
@@ -901,6 +901,7 @@
     fillMode: "fill",    // focused-tile video scaling: "fill" (cover) | "fit" (contain)
     mainPid: null,       // pid currently in the focus/main view (for volc render mode)
     gateStream: null,    // pre-join preview stream (adopted by mesh on join)
+    camFacingFront: true, // is the active camera front/selfie-facing? (mirror only if so)
     // mesh
     localStream: null,
     screenStream: null,
@@ -1258,6 +1259,33 @@
     return t;
   }
 
+  // ──────── Front/back camera detection ────────
+  // Selfie (front) cameras are shown mirrored, matching how every video app
+  // behaves; a back/rear camera must NOT be mirrored or text/scenes read
+  // backwards. We trust the track's reported facingMode first (set by mobile
+  // browsers), then its capabilities, then the device label, and finally
+  // default to "front" — desktop/laptop webcams report no facingMode and are
+  // selfie-oriented, so they stay mirrored as before.
+  function facingFromLabel(label) {
+    const l = (label || "").toLowerCase();
+    if (/\b(back|rear|environment)\b/.test(l)) return false;
+    if (/\b(front|user|face|selfie)\b/.test(l)) return true;
+    return true;
+  }
+  function isFrontFacing(track) {
+    if (!track) return true;
+    const s = (track.getSettings && track.getSettings()) || {};
+    if (s.facingMode === "user") return true;
+    if (s.facingMode === "environment" || s.facingMode === "left" || s.facingMode === "right") return false;
+    let caps = {};
+    try { caps = track.getCapabilities ? track.getCapabilities() : {}; } catch {}
+    if (Array.isArray(caps.facingMode) && caps.facingMode.length) {
+      if (caps.facingMode.includes("user")) return true;
+      if (caps.facingMode.includes("environment")) return false;
+    }
+    return facingFromLabel(track.label);
+  }
+
   function updateTile(pid) {
     const t = tiles.get(pid);
     const p = state.roster.get(pid);
@@ -1267,7 +1295,8 @@
     t.el.classList.toggle("is-muted", !!p.muted);
     t.el.classList.toggle("sharing", !!p.sharing);
     t.el.classList.toggle("cam-off", !p.camOn && !p.sharing);
-    t.el.classList.toggle("mirror", isSelf && state.mode === "mesh" && !p.sharing);
+    // Mirror the self tile only for a front camera (mesh; volc mirrors via the SDK).
+    t.el.classList.toggle("mirror", isSelf && state.mode === "mesh" && !p.sharing && state.camFacingFront);
   }
 
   // Create/remove tile elements to match the roster, then lay out.
@@ -1756,7 +1785,18 @@
   async function setCamDevice(deviceId) {
     state.camDevice = deviceId;
     if (state.mode === "volc") {
-      try { await state.volcEngine.setVideoCaptureDevice(deviceId); toast("Camera switched", "ok"); }
+      try {
+        await state.volcEngine.setVideoCaptureDevice(deviceId);
+        // No MediaStreamTrack from the SDK to read facingMode off, so infer the
+        // new camera's facing from its device label, then re-apply the mirror.
+        try {
+          const cams = await VERTC.enumerateVideoCaptureDevices();
+          const dev = (cams || []).find(d => d.deviceId === deviceId);
+          if (dev) state.camFacingFront = facingFromLabel(dev.label);
+        } catch {}
+        applyVolcMirror();
+        toast("Camera switched", "ok");
+      }
       catch { toast("Couldn't switch camera", "err"); }
       return;
     }
@@ -1923,6 +1963,7 @@
     }
     const track = kind === "audio" ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0];
     if (!track) return null;
+    if (kind === "video") state.camFacingFront = isFrontFacing(track);
     if (!state.localStream) state.localStream = new MediaStream();
     const old = kind === "audio" ? state.localStream.getAudioTracks()[0] : state.localStream.getVideoTracks()[0];
     if (old) {
@@ -1944,7 +1985,7 @@
       }
     }
     if (kind === "audio") meshWatchMic(state.selfPid, track);
-    if (kind === "video") refreshSelfPreview();
+    if (kind === "video") { refreshSelfPreview(); if (state.selfPid != null) updateTile(state.selfPid); }
     return track;
   }
 
@@ -2338,6 +2379,18 @@
         renderDom: t.vMain, userId: state.volc.user_id, renderMode: volcFitMode(),
       });
     } catch (err) { console.warn("[volc] local player failed", err); }
+    applyVolcMirror();
+  }
+
+  // volc has no CSS mirror — the SDK mirrors the local render. MIRROR_TYPE_RENDER
+  // flips only our own preview (not what peers receive); back cameras get NONE.
+  function applyVolcMirror() {
+    if (state.mode !== "volc" || !state.volcEngine || !state.volcEngine.setLocalVideoMirrorType) return;
+    try {
+      const M = window.VERTC && VERTC.MirrorType;
+      const type = state.camFacingFront ? (M ? M.MIRROR_TYPE_RENDER : 1) : (M ? M.MIRROR_TYPE_NONE : 0);
+      state.volcEngine.setLocalVideoMirrorType(type);
+    } catch (err) { console.warn("[volc] mirror set failed", err); }
   }
 
   function attachVolcRemote(pid, screen) {
@@ -2676,6 +2729,9 @@
     const v = $("gateVideo");
     const vt = state.gateStream ? state.gateStream.getVideoTracks()[0] : null;
     if (vt) vt.enabled = state.camOn;
+    if (vt) state.camFacingFront = isFrontFacing(vt);
+    const box = v.closest(".gate-preview");
+    if (box) box.classList.toggle("mirror", state.camFacingFront);
     if (v.srcObject !== state.gateStream) v.srcObject = state.gateStream;
     const showVideo = !!vt && state.camOn;
     $("gateOff").hidden = showVideo;
