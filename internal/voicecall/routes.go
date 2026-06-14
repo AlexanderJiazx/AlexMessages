@@ -35,6 +35,7 @@ func userPublic(u *db.User) vcUser {
 type vcServer struct {
 	meetHTML  string
 	loginHTML string
+	debugHTML string
 }
 
 // NewEngine builds the fully wired Gin engine for the Alex Meet server.
@@ -42,6 +43,7 @@ func NewEngine() *gin.Engine {
 	s := &vcServer{
 		meetHTML:  loadHTML("meet.html"),
 		loginHTML: loadHTML("meet_login.html"),
+		debugHTML: loadHTML("meet_debug.html"),
 	}
 
 	r := gin.New()
@@ -69,6 +71,12 @@ func NewEngine() *gin.Engine {
 	r.POST("/api/meetings", handleCreateMeeting)
 	r.GET("/api/meetings/:code", handleMeetingInfo)
 	r.GET("/ws", handleWS)
+
+	// Admin debug console for Alex Meet
+	r.POST("/api/debug/report", handleDebugReport)
+	r.GET("/admin/debug", handleDebugPage(s))
+	r.GET("/api/debug/snapshot", handleDebugSnapshot)
+	r.GET("/api/debug/events", handleDebugSSE)
 
 	return r
 }

@@ -277,7 +277,7 @@
   .meet-body.stack-bottom .stack {
     width: 100%; flex-direction: row; overflow-x: auto; overflow-y: hidden;
   }
-  .meet-body.stack-bottom .stack .tile { width: 152px; height: auto; }
+  .meet-body.stack-bottom .stack .tile { width: 152px; height: auto; flex-shrink: 0; }
 
   /* grid (group view) — tiles are sized in px by layout(), which picks the
      row/column split that maximizes tile area for the current window ratio */
@@ -781,6 +781,94 @@
     $("toasts").appendChild(el);
     setTimeout(() => el.remove(), 2800);
   }
+  function mediaErrorToast(kind, err) {
+    const name = err && err.name;
+    const label = kind === "audio" ? "Microphone" : "Camera";
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+      toast(label + " permission denied. Check your browser settings.", "err");
+    } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      toast("No " + (kind === "audio" ? "microphone" : "camera") + " found.", "err");
+    } else if (name === "NotReadableError" || name === "TrackStartError") {
+      toast(label + " is in use by another app.", "err");
+    } else if (name === "AbortError") {
+      toast(label + " request was cancelled.", "warn");
+    } else {
+      toast(label + " unavailable", "err");
+    }
+  }
+
+  // ──────── Debug reporter (sends errors to admin console) ────────
+  const debugReporter = {
+    sent: 0,
+    max: 50,
+    last: 0,
+    delay: 2000,
+    queue: [],
+    timer: null,
+    flush() {
+      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+      while (this.queue.length) {
+        const ev = this.queue.shift();
+        if (this.sent >= this.max) continue;
+        const now = Date.now();
+        if (now - this.last < this.delay) {
+          this.queue.unshift(ev);
+          this.timer = setTimeout(() => this.flush(), this.delay - (now - this.last));
+          return;
+        }
+        this.last = now;
+        this.sent++;
+        fetch("/api/debug/report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(ev),
+          credentials: "same-origin",
+        }).catch(() => {});
+      }
+    },
+    send(type, message, stack = "") {
+      const st = (typeof state !== "undefined" ? state : {}) || {};
+      const me = st.me || {};
+      const user = st.me
+        ? (me.display_name || me.username || "user")
+        : (st.guestName || "guest");
+      this.queue.push({
+        type,
+        message,
+        stack,
+        context: {
+          code: st.code || "",
+          mode: st.mode || "",
+          pid: st.selfPid ?? "",
+          user,
+          guest: !st.me,
+          url: location.href,
+          ua: navigator.userAgent,
+        },
+      });
+      this.flush();
+    },
+  };
+  const _origError = console.error;
+  const _origWarn = console.warn;
+  console.error = function(...args) {
+    _origError.apply(this, args);
+    debugReporter.send("error", args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+  };
+  console.warn = function(...args) {
+    _origWarn.apply(this, args);
+    debugReporter.send("warn", args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+  };
+  window.addEventListener("error", (e) => {
+    debugReporter.send("error", e.message, e.error && e.error.stack ? e.error.stack : "");
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const reason = e.reason;
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    const stack = reason instanceof Error ? reason.stack : "";
+    debugReporter.send("error", "Unhandled rejection: " + msg, stack);
+  });
+
   function loadScript(src) {
     return new Promise((resolve, reject) => {
       const s = document.createElement("script");
@@ -1166,6 +1254,7 @@
       });
       t.vbox.appendChild(v);
       t.video = v;
+      applyAudioOut(p.pid, v); // ensure volume/sink is wired even before srcObject arrives
     }
     el.addEventListener("click", () => onTileClick(p.pid));
     el.querySelector(".tile-fs").addEventListener("click", (e) => { e.stopPropagation(); toggleFullscreen(el); });
@@ -1382,7 +1471,12 @@
     if (state.grid) { state.pinned = null; state.autoFocusPid = null; }
     layout();
   });
-  window.addEventListener("resize", () => { if (state.phase === "inmeeting") layout(); });
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    if (state.phase !== "inmeeting") return;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { resizeTimer = null; layout(); }, 120);
+  });
   $("gridPrev").addEventListener("click", () => { state.gridPage = Math.max(0, state.gridPage - 1); layout(); });
   $("gridNext").addEventListener("click", () => { state.gridPage = state.gridPage + 1; layout(); });
 
@@ -1478,14 +1572,20 @@
         state.micOn = on;
       } catch (err) {
         console.warn("[volc] mic toggle failed", err);
-        toast("Microphone unavailable", "err");
+        mediaErrorToast("audio", err);
         state.micOn = false;
       }
     } else {
       let track = state.localStream?.getAudioTracks()[0];
       if (on && !track) {
-        track = await acquireTrack("audio", state.micDevice);
-        if (!track) { toast("Microphone unavailable", "err"); state.micOn = false; updateSelfRoster(); return; }
+        try {
+          track = await acquireTrack("audio", state.micDevice);
+        } catch (err) {
+          mediaErrorToast("audio", err);
+          state.micOn = false;
+          updateSelfRoster();
+          return;
+        }
       }
       if (track) track.enabled = on;
       state.micOn = on && !!track;
@@ -1620,6 +1720,7 @@
     const sld = vol.querySelector("#volSlider");
     const val = vol.querySelector(".vol-val");
     sld.addEventListener("input", () => { setVolume(parseInt(sld.value, 10)); val.textContent = state.volume + "%"; });
+    sld.addEventListener("change", () => { setVolume(parseInt(sld.value, 10)); val.textContent = state.volume + "%"; });
     sld.addEventListener("click", (e) => e.stopPropagation()); // keep menu open
     const sep0 = document.createElement("div"); sep0.className = "sep"; menu.appendChild(sep0);
 
@@ -1649,9 +1750,13 @@
       catch { toast("Couldn't switch microphone", "err"); }
       return;
     }
-    const track = await acquireTrack("audio", deviceId, true);
-    if (track) { track.enabled = state.micOn; toast("Microphone switched", "ok"); }
-    else toast("Couldn't switch microphone", "err");
+    try {
+      const track = await acquireTrack("audio", deviceId, true);
+      track.enabled = state.micOn;
+      toast("Microphone switched", "ok");
+    } catch (err) {
+      mediaErrorToast("audio", err);
+    }
   }
 
   async function setCamDevice(deviceId) {
@@ -1661,14 +1766,15 @@
       catch { toast("Couldn't switch camera", "err"); }
       return;
     }
-    const track = await acquireTrack("video", deviceId, true);
-    if (track) {
+    try {
+      const track = await acquireTrack("video", deviceId, true);
       track.enabled = state.camOn;
       refreshSelfPreview();
       applyQuality(); // the fresh track starts at default resolution
       toast("Camera switched", "ok");
+    } catch (err) {
+      mediaErrorToast("video", err);
     }
-    else toast("Couldn't switch camera", "err");
   }
 
   async function setSpeakerDevice(deviceId) {
@@ -1801,23 +1907,25 @@
       ? { audio: dev ? { deviceId: { exact: dev }, ...AUDIO_CONSTRAINTS } : AUDIO_CONSTRAINTS }
       : { video: dev ? { deviceId: { exact: dev } } : true };
     let stream;
+    let lastErr;
     try {
       stream = await navigator.mediaDevices.getUserMedia(build(deviceId));
     } catch (err) {
       // A specific device that vanished or is busy throws Overconstrained/
       // NotFound — fall back to the system default before giving up, so a
       // stale device selection can't make the mic/camera unusable.
+      lastErr = err;
       if (deviceId) {
         try {
           stream = await navigator.mediaDevices.getUserMedia(build(null));
         } catch (err2) {
-          console.warn(`[mesh] getUserMedia(${kind}) failed`, err2 && err2.name || err2);
-          return null;
+          lastErr = err2;
         }
-      } else {
-        console.warn(`[mesh] getUserMedia(${kind}) failed`, err && err.name || err);
-        return null;
       }
+    }
+    if (!stream) {
+      console.warn(`[mesh] getUserMedia(${kind}) failed`, lastErr && lastErr.name || lastErr);
+      throw lastErr || new Error("getUserMedia failed");
     }
     const track = kind === "audio" ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0];
     if (!track) return null;
@@ -1851,21 +1959,31 @@
     const want = { audio: state.micOn, video: state.camOn };
     state.localStream = new MediaStream();
     if (!want.audio && !want.video) return;
+    let audioErr, videoErr;
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: want.audio ? AUDIO_CONSTRAINTS : false, video: want.video });
       s.getTracks().forEach(t => state.localStream.addTrack(t));
     } catch (err) {
+      videoErr = err;
       // Retry audio-only before giving up (camera may be missing/blocked).
-      if (want.video && want.audio) {
+      if (want.audio) {
         try {
           const s = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS });
           s.getTracks().forEach(t => state.localStream.addTrack(t));
-        } catch {}
+        } catch (err2) { audioErr = err2; }
       }
     }
     state.micOn = state.micOn && state.localStream.getAudioTracks().length > 0;
     state.camOn = state.camOn && state.localStream.getVideoTracks().length > 0;
-    if (!state.micOn && !state.camOn) toast("Joined without mic and camera", "warn");
+    if (!state.micOn && !state.camOn) {
+      if (audioErr) mediaErrorToast("audio", audioErr);
+      else if (videoErr) mediaErrorToast("video", videoErr);
+      else toast("Joined without mic and camera", "warn");
+    } else if (!state.micOn && want.audio) {
+      mediaErrorToast("audio", audioErr);
+    } else if (!state.camOn && want.video) {
+      mediaErrorToast("video", videoErr);
+    }
   }
 
   function refreshSelfPreview() {
@@ -1875,6 +1993,8 @@
     if (t.video.srcObject !== src) {
       t.video.srcObject = src;
       t.video.play().catch(() => {}); // Safari: autoplay may have been consumed
+      queueMicrotask(() => { if (t.video.paused) t.video.play().catch(() => {}); });
+      requestAnimationFrame(() => { if (t.video.paused) t.video.play().catch(() => {}); });
     }
   }
 
@@ -1921,6 +2041,9 @@
         t.video.srcObject = remote;          // audio rides along, in sync
         applyAudioOut(pid, t.video);         // volume + chosen output device
         t.video.play().catch(() => {}); // Safari: autoplay may have been consumed
+        // Aggressive resume: mobile browsers sometimes pause after srcObject swap.
+        queueMicrotask(() => { if (t.video.paused) t.video.play().catch(() => {}); });
+        requestAnimationFrame(() => { if (t.video.paused) t.video.play().catch(() => {}); });
       }
       if (ev.track.kind === "audio") meshWatchMic(pid, ev.track);
     };
@@ -2277,6 +2400,10 @@
     on("onUserPublishScreen", (e) => {
       const pid = pidFromVolcUid(e.userId);
       if (pid == null) return;
+      // Ensure the tile styling reflects a screen share before the SDK paints,
+      // so the v-screen element is visible when setRemoteVideoPlayer runs.
+      const p = state.roster.get(pid);
+      if (p && !p.sharing) { p.sharing = true; updateTile(pid); layout(); }
       // isAutoSubscribeVideo only covers main (camera/mic) streams — without
       // an explicit subscription the screen stays black for everyone else.
       const media = e.mediaType || VERTC.MediaType.VIDEO;
@@ -2338,17 +2465,27 @@
     // Release the pre-join preview only now (it stayed live through the join
     // handshake), just before the SDK opens the same devices.
     stopGatePreview();
+    let micErr, camErr;
     if (state.micOn) {
-      try { await engine.startAudioCapture(state.micDevice || undefined); } catch (err) { console.warn("[volc] mic", err && err.name || err); state.micOn = false; }
+      try { await engine.startAudioCapture(state.micDevice || undefined); }
+      catch (err) { micErr = err; console.warn("[volc] mic", err && err.name || err); state.micOn = false; }
     }
     if (state.camOn) {
-      try { await engine.startVideoCapture(state.camDevice || undefined); attachVolcLocalMain(); } catch (err) { console.warn("[volc] cam", err && err.name || err); state.camOn = false; }
+      try { await engine.startVideoCapture(state.camDevice || undefined); attachVolcLocalMain(); }
+      catch (err) { camErr = err; console.warn("[volc] cam", err && err.name || err); state.camOn = false; }
     }
     // Re-assert the saved quality tier now that capture is running: some SDK
     // builds only latch the encoder config once a capture stream exists, so an
     // apply done before startVideoCapture can be silently dropped.
     await applyQuality();
-    if (!state.micOn && !state.camOn) toast("Joined without mic and camera", "warn");
+    if (!state.micOn && !state.camOn) {
+      if (micErr) mediaErrorToast("audio", micErr);
+      else if (camErr) mediaErrorToast("video", camErr);
+      else toast("Joined without mic and camera", "warn");
+    } else {
+      if (micErr) mediaErrorToast("audio", micErr);
+      if (camErr) mediaErrorToast("video", camErr);
+    }
     updateSelfRoster();
   }
 
@@ -2364,6 +2501,7 @@
       for (const pid of state.order) {
         if (pid !== state.selfPid) meshEnsurePeer(pid);
       }
+      applyVolume();
       updateSelfRoster();
     }
   }

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Alex Meet · Debug Console</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="theme-color" content="#1B241F" />
+<link href="/fonts/fonts.css" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0F1410;
+    --surface: #18231D;
+    --ink: #E2E8E4;
+    --ink-2: #B0BBAF;
+    --muted: #7A8A78;
+    --line: #2A3A30;
+    --line-2: #223528;
+    --sage: #7ED491;
+    --danger: #E07A75;
+    --warn: #E5B86A;
+    --info: #7EB8E5;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--ink); margin: 0; height: 100%; }
+  body { font-family: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; }
+  .top {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+    background: var(--surface); position: sticky; top: 0; z-index: 10;
+  }
+  .top h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .02em; }
+  .top .meta { color: var(--muted); font-size: 12px; margin-left: auto; }
+  .filters {
+    display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line);
+    background: var(--bg);
+  }
+  .filters input, .filters select {
+    background: var(--surface); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 8px; padding: 6px 10px; font-size: 12px; outline: none;
+  }
+  .filters input { min-width: 200px; }
+  .filters select { min-width: 120px; }
+  .log {
+    padding: 8px 16px 40px; display: flex; flex-direction: column; gap: 6px;
+    font-family: var(--mono); font-size: 12px; line-height: 1.45;
+    overflow-y: auto; flex: 1;
+  }
+  .row {
+    display: grid; grid-template-columns: 140px 200px 1fr;
+    gap: 10px; align-items: start;
+    padding: 6px 8px; border-radius: 8px;
+    border: 1px solid transparent;
+  }
+  .row:hover { background: rgba(126,212,145,.06); border-color: var(--line-2); }
+  .row .ts { color: var(--muted); white-space: nowrap; }
+  .row .origin { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .body { word-break: break-word; }
+  .tag {
+    display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: .04em; margin-right: 6px;
+  }
+  .tag.error { background: rgba(224,122,117,.15); color: var(--danger); }
+  .tag.warn { background: rgba(229,184,106,.15); color: var(--warn); }
+  .tag.info { background: rgba(126,184,229,.15); color: var(--info); }
+  .tag.log { background: rgba(126,212,145,.12); color: var(--sage); }
+  .stack {
+    color: var(--muted); font-size: 11px; margin-top: 4px; white-space: pre-wrap;
+    max-height: 200px; overflow: auto; border-left: 2px solid var(--line); padding-left: 8px;
+  }
+  .empty { color: var(--muted); padding: 24px; text-align: center; font-family: ui-sans-serif; }
+  .status { color: var(--sage); font-size: 11px; }
+  .status.off { color: var(--danger); }
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>Alex Meet · Debug Console</h1>
+  <span class="status" id="connStatus">Live</span>
+  <span class="meta" id="countMeta">0 events</span>
+</div>
+<div class="filters">
+  <input id="codeFilter" placeholder="Filter by meeting code…" />
+  <select id="typeFilter">
+    <option value="">All types</option>
+    <option value="error">Error</option>
+    <option value="warn">Warn</option>
+    <option value="info">Info</option>
+    <option value="log">Log</option>
+  </select>
+  <button class="filters" style="margin-left:auto; background:var(--surface); border:1px solid var(--line); color:var(--ink); border-radius:8px; padding:6px 12px; cursor:pointer;" onclick="clearLog()">Clear</button>
+</div>
+<div class="log" id="log"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+const events = [];
+let es = null;
+
+function fmtTs(unix) {
+  const d = new Date(unix * 1000);
+  return d.toLocaleTimeString(undefined, { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function originText(ctx) {
+  if (!ctx || typeof ctx !== 'object') return '—';
+  const parts = [];
+  if (ctx.code) parts.push(ctx.code);
+  if (ctx.mode) parts.push(ctx.mode);
+  if (ctx.user) parts.push(typeof ctx.user === 'string' ? ctx.user : (ctx.user.display_name || ctx.user.username || 'guest'));
+  if (!parts.length) return '—';
+  return parts.join(' · ');
+}
+
+function shouldShow(ev) {
+  const code = ($('codeFilter').value || '').trim().toLowerCase();
+  const type = $('typeFilter').value;
+  if (code) {
+    const hay = JSON.stringify(ev.context || {}).toLowerCase();
+    if (!hay.includes(code)) return false;
+  }
+  if (type && (ev.type || '').toLowerCase() !== type) return false;
+  return true;
+}
+
+function renderRow(ev) {
+  const el = document.createElement('div');
+  el.className = 'row';
+  const kind = (ev.type || 'log').toLowerCase();
+  const tagClass = { error: 'error', warn: 'warn', info: 'info', log: 'log' }[kind] || 'log';
+  const stack = (ev.stack || '').trim();
+  el.innerHTML = `
+    <div class="ts">${escapeHTML(fmtTs(ev.time))}</div>
+    <div class="origin" title="${escapeHTML(JSON.stringify(ev.context || {}))}">${escapeHTML(originText(ev.context))}</div>
+    <div class="body">
+      <span class="tag ${tagClass}">${escapeHTML(ev.type || 'log')}</span>
+      ${escapeHTML(ev.message || '')}
+      ${stack ? `<div class="stack">${escapeHTML(stack)}</div>` : ''}
+    </div>`;
+  return el;
+}
+
+function escapeHTML(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function appendEvent(ev) {
+  events.push(ev);
+  if (!shouldShow(ev)) return;
+  const row = renderRow(ev);
+  logEl.appendChild(row);
+  if (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 120) {
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  $('countMeta').textContent = events.length + ' events';
+}
+
+function clearLog() {
+  events.length = 0;
+  logEl.innerHTML = '';
+  $('countMeta').textContent = '0 events';
+}
+
+function reapplyFilter() {
+  logEl.innerHTML = '';
+  for (const ev of events) {
+    if (shouldShow(ev)) logEl.appendChild(renderRow(ev));
+  }
+}
+
+$('codeFilter').addEventListener('input', reapplyFilter);
+$('typeFilter').addEventListener('change', reapplyFilter);
+
+async function init() {
+  try {
+    const r = await fetch('/api/debug/snapshot', { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('snapshot ' + r.status);
+    const data = await r.json();
+    (data.events || []).forEach(appendEvent);
+  } catch (e) {
+    logEl.innerHTML = '<div class="empty">Failed to load snapshot: ' + escapeHTML(e.message) + '</div>';
+  }
+
+  es = new EventSource('/api/debug/events');
+  es.onmessage = (e) => {
+    try { appendEvent(JSON.parse(e.data)); } catch {}
+  };
+  es.onerror = () => {
+    $('connStatus').textContent = 'Reconnecting…';
+    $('connStatus').className = 'status off';
+  };
+  es.onopen = () => {
+    $('connStatus').textContent = 'Live';
+    $('connStatus').className = 'status';
+  };
+}
+
+init();
+</script>
+</body>
+</html>
