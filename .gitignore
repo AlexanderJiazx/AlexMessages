@@ -2,6 +2,13 @@
 data/
 .claude/
 .idea/
+/Android/
+
+# Secrets — VolcEngine RTC creds, admin password, etc. are supplied via env.
+# Keep any local env files out of the repo.
+.env
+.env.*
+*.local.env
 
 # Go
 /bin/

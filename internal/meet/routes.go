@@ -80,8 +80,12 @@ func NewEngine() *gin.Engine {
 
 // ---------- VolcEngine RTC configuration ----------
 
-func volcAppID() string  { return envOr("VOLC_RTC_APP_ID", "6a2b39c655bc950177ce22c0") }
-func volcAppKey() string { return envOr("VOLC_RTC_APP_KEY", "41353f9216a74e3fb1869164910dd5c6") }
+// Credentials are supplied at runtime via the VOLC_RTC_APP_ID / VOLC_RTC_APP_KEY
+// environment variables — no defaults are baked into the source. The app key is
+// an HMAC signing secret and must never be committed. When unset, the volc
+// backend simply can't mint join tokens (the mesh backend is unaffected).
+func volcAppID() string  { return envOr("VOLC_RTC_APP_ID", "") }
+func volcAppKey() string { return envOr("VOLC_RTC_APP_KEY", "") }
 
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {

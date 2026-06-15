@@ -10,13 +10,15 @@ import (
 	"testing"
 )
 
-// TestVolcTokenGolden pins the serialized token against a value produced by an
-// independent implementation of the reference algorithm (VolcEngineRTC's Java
-// ByteBuf/AccessToken pair), so any packing/endianness regression fails loudly.
+// TestVolcTokenGolden pins the serialized token against a fixed vector so any
+// packing/endianness regression in the wire format fails loudly. The inputs are
+// synthetic placeholders (the real app id/key are never committed); the golden
+// was regenerated from this implementation, and TestVolcTokenRoundTrip below
+// independently verifies the HMAC construction against the reference algorithm.
 func TestVolcTokenGolden(t *testing.T) {
 	tok := &volcToken{
-		appID:      "6a2b39c655bc950177ce22c0",
-		appKey:     "41353f9216a74e3fb1869164910dd5c6",
+		appID:      "test-app-id",
+		appKey:     "test-app-key",
 		roomID:     "abc-defg-hjk",
 		userID:     "p42",
 		issuedAt:   1750000000,
@@ -27,7 +29,7 @@ func TestVolcTokenGolden(t *testing.T) {
 	tok.addPrivilege(volcPrivPublishStream, 1750086400)
 	tok.addPrivilege(volcPrivSubscribeStream, 1750086400)
 
-	const golden = "0016a2b39c655bc950177ce22c0PwBOYbwAgOFOaAAzUGgMAGFiYy1kZWZnLWhqawMAcDQyBQAAAAAzUGgBAAAzUGgCAAAzUGgDAAAzUGgEAAAzUGggAIkgziP0FrfKjp4xvrr7GYUB7sIBzYIabyjmRPE0PiZC"
+	const golden = "001test-app-idPwBOYbwAgOFOaAAzUGgMAGFiYy1kZWZnLWhqawMAcDQyBQAAAAAzUGgBAAAzUGgCAAAzUGgDAAAzUGgEAAAzUGggALcPixzjY0TUeeLE5dSmsot5v3nplq5zDaDMbyPriBoz"
 	if got := tok.serialize(); got != golden {
 		t.Fatalf("serialize mismatch:\n got %s\nwant %s", got, golden)
 	}
@@ -36,8 +38,8 @@ func TestVolcTokenGolden(t *testing.T) {
 // TestVolcTokenRoundTrip parses a freshly generated token back apart and
 // verifies structure plus HMAC, mimicking the reference Parse/Verify pair.
 func TestVolcTokenRoundTrip(t *testing.T) {
-	appID := "6a2b39c655bc950177ce22c0"
-	appKey := "41353f9216a74e3fb1869164910dd5c6"
+	appID := "test-app-id"
+	appKey := "test-app-key"
 	tok := newVolcToken(appID, appKey, "room-1", "p7")
 	exp := tok.issuedAt + 86400
 	tok.expireTime(exp)

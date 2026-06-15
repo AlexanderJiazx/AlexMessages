@@ -21,8 +21,8 @@ Note that the difference is purely in backend, they should have the same UI and 
 For WebRTC, just use WebRTC for video/audio call, make sure you handle the backend correctly and make sure the experience is stable (because the current old version of AlexMessage Call doesn't work well)
 For VolceEngine WebRTC, this is more complex, because you need to call VolceEngine SDK/API, please check their API documentation
 https://www.volcengine.com/docs/6348/66812
-My AppId: 6a2b39c655bc950177ce22c0
-My AppKey: 41353f9216a74e3fb1869164910dd5c6
+My AppId: <redacted — supplied at runtime via the VOLC_RTC_APP_ID env var>
+My AppKey: <redacted — supplied at runtime via the VOLC_RTC_APP_KEY env var>
 
 Make sure the API works seamlessly from frontend to backend.
 

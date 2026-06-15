@@ -78,8 +78,10 @@ chosen per meeting from a lobby dropdown:
   mints per-participant **AccessTokens** (`internal/meet/volctoken.go`,
   ported from the reference implementation in volcengine/VolcEngineRTC —
   little-endian packing, HMAC-SHA256, golden-tested in `volctoken_test.go`).
-  Credentials come from `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY` (defaults are
-  baked in). VolcEngine user ids are `p<pid>` so streams map back to roster
+  Credentials come from `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY` (required at
+  runtime — no defaults are committed; the app key is an HMAC secret). The
+  `volc` backend can't mint join tokens when they're unset, but `mesh` is
+  unaffected. VolcEngine user ids are `p<pid>` so streams map back to roster
   entries. Screen shares capture with `startScreenCapture({enableAudio: true})`
   and publish `AUDIO_AND_VIDEO` (falling back to `VIDEO`). Gotcha:
   `isAutoSubscribeVideo` covers only main (camera/mic) streams — remote screen
@@ -261,7 +263,8 @@ Environment variables (same semantics as the Python version):
 - `VAPID_SUBJECT` (default `mailto:admin@alexanderjia.com`) — Web Push contact URI.
 - `HOST` / `PORT` (user app), `ADMIN_HOST` / `ADMIN_PORT`, `CALL_HOST` / `CALL_PORT`.
 - `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY` — VolcEngine RTC credentials for Alex
-  Meet's `volc` backend (defaults baked into `internal/meet/routes.go`).
+  Meet's `volc` backend. Required at runtime (no defaults are committed — the
+  app key is an HMAC signing secret); read in `internal/meet/routes.go`.
 
 `go vet ./...` and `go build ./...` should both stay clean.
 
