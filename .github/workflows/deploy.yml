@@ -1,0 +1,96 @@
+name: Deploy
+
+# Seamless deploy chain. Every push to FreshRefactor runs the full test suite;
+# only when it is green does the deploy job cross-compile the three linux/amd64
+# binaries, ship them to the production host over SSH, restart the systemd
+# units, and health-check them (rolling the binaries back if a unit fails to
+# come up). Manual runs are available from the Actions tab (workflow_dispatch).
+#
+# The deploy job is gated on the repo variable DEPLOY_ENABLED == 'true', so the
+# workflow is inert (tests only) until you have configured the secrets and the
+# server (see DEPLOY.md → "Continuous deployment"). Flip that variable on once
+# everything is in place.
+
+on:
+  push:
+    branches: [FreshRefactor]
+  workflow_dispatch:
+
+# Never let two deploys race; let an in-flight deploy finish rather than
+# interrupt a half-applied release.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  deploy:
+    name: Ship to production
+    needs: test
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cross-compile linux/amd64 binaries
+        run: |
+          mkdir -p bin
+          for c in server admin meet; do
+            GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+              go build -trimpath -ldflags='-s -w' -o "bin/$c" "./cmd/$c"
+          done
+
+      - name: Bundle release (binaries + assets, never data/)
+        run: |
+          tar czf release.tgz \
+            bin/ static/ fonts/ sound/ \
+            index.html login.html admin.html meet.html meet_login.html
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY"     > ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Ship & restart
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          HEALTH_PORTS: ${{ vars.HEALTH_PORTS }}
+        run: |
+          set -euo pipefail
+          ssh_opts=(-i ~/.ssh/deploy_key
+                    -o UserKnownHostsFile=~/.ssh/known_hosts
+                    -o IdentitiesOnly=yes
+                    -o BatchMode=yes)
+          scp "${ssh_opts[@]}" release.tgz \
+            "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/release.tgz"
+          ssh "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "APP_DIR='$DEPLOY_PATH' HEALTH_PORTS='${HEALTH_PORTS:-8765 9090 9091}' bash -s" \
+            < deploy/remote_deploy.sh
