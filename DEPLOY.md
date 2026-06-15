@@ -87,13 +87,17 @@ Host: `me@35.226.215.209` (Debian/amd64). App dir `/home/me/alexmessage`.
   its binary and must pass WebSocket upgrade headers (`Upgrade`/`Connection`)
   through for `/ws` and **not buffer** `text/event-stream` for the admin debug
   stream (the handler already sends `X-Accel-Buffering: no`).
+- **Service account**: the three units run as the **unprivileged `deploy` user**
+  (`User=deploy`/`Group=deploy`), which also owns `/home/me/alexmessage`.
+  `deploy` has scoped `NOPASSWD` sudo for *only* the three `systemctl restart`s
+  and no other privileges, so the CI deploy key can't reach root even though it
+  can replace binaries (see Continuous deployment below).
 - **Deploy**: the agent TL;DR above. After extracting, `systemctl restart` the
   three units.
 
-> **Binary rename note:** this branch renamed `cmd/voicecall` → `cmd/meet`, so
-> the built binary is now `bin/meet` (was `bin/voicecall`). Update the
-> `alexmessage-voice` unit's `ExecStart` to point at `bin/meet` on the next
-> deploy.
+> **Binary rename note:** `cmd/voicecall` → `cmd/meet`, so the built binary is
+> `bin/meet`. The `alexmessage-voice` unit's `ExecStart` already points at
+> `bin/meet`.
 
 ## Continuous deployment (GitHub Actions)
 
@@ -115,24 +119,40 @@ so until you finish the one-time setup the workflow just runs tests.
 
 ### One-time setup
 
-**1. Create a dedicated deploy key** (no passphrase — CI can't type one):
+**1. Dedicated `deploy` user + key.** Both the services and the CI deploy run as
+an unprivileged `deploy` user (no general sudo), so a leaked deploy key can't
+reach root. Generate a passphrase-less key (CI can't type one) and reproduce the
+account on a fresh host:
 
 ```bash
 ssh-keygen -t ed25519 -N '' -C 'alexmessages-deploy' -f ~/.ssh/alexmessages_deploy
+
+sudo useradd -m -s /bin/bash deploy && sudo passwd -l deploy        # key-only login
+sudo install -d -m700 -o deploy -g deploy /home/deploy/.ssh
+sudo tee /home/deploy/.ssh/authorized_keys < ~/.ssh/alexmessages_deploy.pub >/dev/null
+sudo chown deploy:deploy /home/deploy/.ssh/authorized_keys && sudo chmod 600 /home/deploy/.ssh/authorized_keys
+
+# hand the app + data to deploy and run the three services as it:
+sudo chown -R deploy:deploy /home/me/alexmessage
+sudo sed -i 's/^User=me$/User=deploy/; s/^Group=me$/Group=deploy/' /etc/systemd/system/alexmessage*.service
+sudo systemctl daemon-reload
+sudo systemctl restart alexmessage alexmessage-admin alexmessage-voice
 ```
 
-Add the **public** half to the host's authorized keys:
+> The app dir stays under `/home/me`, so **`/home/me` must remain traversable**
+> (`chmod 755 /home/me`) for `deploy` to reach it. If you ever lock `/home/me`
+> down to `700`, relocate the app (e.g. to `/opt/alexmessage`) and update
+> `WorkingDirectory`/`ExecStart` + `DEPLOY_PATH` to match.
 
-```bash
-ssh-copy-id -i ~/.ssh/alexmessages_deploy.pub me@35.226.215.209
-# or append ~/.ssh/alexmessages_deploy.pub to me@HOST:~/.ssh/authorized_keys
+**2. Scoped passwordless restart** — `deploy` can't type a sudo password over
+non-interactive SSH, so grant *only* the restarts. As root,
+`visudo -f /etc/sudoers.d/alexmessage-deploy` (mode `0440`):
+
 ```
-
-**2. Allow passwordless restart** on the host (the deploy user can't type a
-sudo password over non-interactive SSH). As root, `visudo -f /etc/sudoers.d/alexmessage-deploy`:
-
-```
-me ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage alexmessage-admin alexmessage-voice, /usr/bin/systemctl restart alexmessage, /usr/bin/systemctl restart alexmessage-admin, /usr/bin/systemctl restart alexmessage-voice
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage alexmessage-admin alexmessage-voice
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage-admin
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage-voice
 ```
 
 (`which systemctl` → adjust the path if it isn't `/usr/bin/systemctl`.)
@@ -145,7 +165,7 @@ me ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage alexmessage-admin
 | `DEPLOY_SSH_KEY` | contents of the **private** key `~/.ssh/alexmessages_deploy` |
 | `DEPLOY_KNOWN_HOSTS` | output of `ssh-keyscan 35.226.215.209` (pins the host key) |
 | `DEPLOY_HOST` | `35.226.215.209` |
-| `DEPLOY_USER` | `me` |
+| `DEPLOY_USER` | `deploy` |
 | `DEPLOY_PATH` | `/home/me/alexmessage` |
 
 **4. Add the repo variables** (same screen → *Variables*):
@@ -160,9 +180,9 @@ me ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage alexmessage-admin
 > your units actually bind, or the post-deploy check will roll back a healthy
 > release.
 
-**5. Confirm the host is ready** — the app dir exists, the `VOLC_RTC_APP_ID` /
-`VOLC_RTC_APP_KEY` (and `ADMIN_PASSWORD`) live in the systemd units, and
-`alexmessage-voice`'s `ExecStart` points at `bin/meet` (rename note above).
+**5. Confirm the host is ready** — the app dir exists and is owned by `deploy`,
+and the `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY` (and `ADMIN_PASSWORD`) live in the
+systemd units.
 
 Then flip `DEPLOY_ENABLED=true` and push (or *Run workflow*). Watch it under the
 repo's **Actions** tab.
