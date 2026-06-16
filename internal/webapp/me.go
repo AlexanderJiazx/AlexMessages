@@ -21,7 +21,11 @@ func handleGetMe(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"user": runtime.UserPublic(user), "is_admin": user.IsAdmin})
+	c.JSON(http.StatusOK, gin.H{
+		"user":       runtime.UserPublic(user),
+		"is_admin":   user.IsAdmin,
+		"created_at": user.CreatedAt,
+	})
 }
 
 func handlePatchMe(c *gin.Context) {

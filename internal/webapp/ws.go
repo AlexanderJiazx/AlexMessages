@@ -72,6 +72,10 @@ type broadcastMessage struct {
 	Attachments []db.Attachment     `json:"attachments"`
 	CreatedAt   int64               `json:"created_at"`
 	EditedAt    *int64              `json:"edited_at"`
+	// ClientID echoes the sender's optimistic-message nonce so their client can
+	// reconcile the locally rendered bubble with the persisted message. Other
+	// recipients have no matching pending bubble and simply ignore it.
+	ClientID string `json:"client_id,omitempty"`
 }
 
 // ---------- handler ----------
@@ -322,6 +326,9 @@ func handleWSMessage(userID int, data map[string]any) {
 
 	uid := userID
 	msg := makeMessagePayload(&uid, channel, text, replyTo, cleanAtts, "message")
+	if cid, ok := data["client_id"].(string); ok {
+		msg.ClientID = truncateRunes(cid, 64)
+	}
 	runtime.Broadcast(
 		gin.H{"type": "message", "channel": channel, "message": msg},
 		runtime.RecipientsForChannel(channel),

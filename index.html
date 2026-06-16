@@ -33,14 +33,7 @@
             <!-- LEFT RAIL -->
             <aside class="pane left" id="leftPane">
                 <div class="rail-hd">
-                    <div class="logo"></div>
-                    <div class="ws-name">
-                        <b>Alex Messages</b>
-                        <span class="net"
-                            ><span class="dot"></span
-                            ><span id="netLabel">connecting…</span></span
-                        >
-                    </div>
+                    <h1 class="rail-title serif">Messages</h1>
                     <button
                         class="iconbtn compose-btn"
                         id="newDmBtn"
@@ -48,8 +41,8 @@
                         aria-label="New conversation"
                     >
                         <svg
-                            width="17"
-                            height="17"
+                            width="18"
+                            height="18"
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="currentColor"
@@ -79,6 +72,38 @@
                     </div>
                     <div class="dms" id="dms"></div>
                 </div>
+
+                <!-- Bottom-left account trigger: avatar + name/username.
+                     Opens Settings (Profile tab). -->
+                <button
+                    class="rail-account"
+                    id="accountTrigger"
+                    aria-label="Settings"
+                    title="Settings"
+                >
+                    <span class="rail-account-av" id="accountAvatar"></span>
+                    <span class="rail-account-meta">
+                        <b id="accountName">—</b>
+                        <span id="accountHandle"></span>
+                    </span>
+                    <span class="rail-account-cog" aria-hidden="true">
+                        <svg
+                            width="16"
+                            height="16"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.7"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        >
+                            <path
+                                d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
+                            />
+                            <circle cx="12" cy="12" r="3" />
+                        </svg>
+                    </span>
+                </button>
             </aside>
 
             <!-- CENTER -->
@@ -111,26 +136,6 @@
                             ><span id="chSubText">online</span></span
                         >
                     </div>
-                    <button
-                        class="iconbtn profile-toggle"
-                        id="profileToggle"
-                        aria-label="Your profile"
-                        title="Your profile"
-                    >
-                        <svg
-                            width="18"
-                            height="18"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="1.6"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                        >
-                            <circle cx="12" cy="8" r="4" />
-                            <path d="M4 21a8 8 0 0 1 16 0" />
-                        </svg>
-                    </button>
                 </div>
                 <div class="stream" id="stream"></div>
                 <div class="composer-wrap">
@@ -245,7 +250,97 @@
             <img id="lightboxImg" alt="" />
         </div>
 
-        <!-- Settings / profile floating sheet -->
+        <!-- Settings overlay: Apple-style vertical tabs (Profile / Account /
+             Notifications / Data / Admin). Content rendered by app.js. -->
+        <div class="modal settings-modal" id="settingsModal">
+            <div class="settings-card">
+                <button
+                    class="settings-close iconbtn"
+                    id="settingsClose"
+                    aria-label="Close"
+                    title="Close"
+                >
+                    <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                    >
+                        <path d="M6 6l12 12M18 6L6 18" />
+                    </svg>
+                </button>
+                <nav class="settings-nav">
+                    <div class="settings-nav-title serif">Settings</div>
+                    <div class="settings-tabs" id="settingsTabs"></div>
+                </nav>
+                <div class="settings-main">
+                    <div class="settings-content" id="settingsContent"></div>
+                    <div class="settings-save-bar" id="settingsSaveBar">
+                        <button class="btn ghost" id="pfCancel">Cancel</button>
+                        <button class="btn primary" id="pfSave">
+                            Save changes
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Delete-account confirmation (password-verified) -->
+        <div class="modal" id="deleteAccountModal">
+            <div class="card">
+                <h3 class="serif">Delete account</h3>
+                <div
+                    style="
+                        color: var(--muted);
+                        font-size: 12.5px;
+                        line-height: 1.55;
+                        margin-bottom: 14px;
+                    "
+                >
+                    This permanently deletes your account, profile, and entire
+                    message history. This cannot be undone. Enter your password
+                    to confirm.
+                </div>
+                <input
+                    type="password"
+                    id="delPassword"
+                    placeholder="Your password"
+                    autocomplete="current-password"
+                    style="
+                        width: 100%;
+                        padding: 10px 12px;
+                        border: 1px solid var(--line);
+                        border-radius: 10px;
+                        background: var(--surface);
+                        font-size: 14px;
+                        outline: none;
+                    "
+                />
+                <div
+                    id="delError"
+                    style="
+                        color: var(--danger);
+                        font-size: 12px;
+                        margin-top: 8px;
+                        display: none;
+                    "
+                ></div>
+                <div
+                    class="btn-row"
+                    style="justify-content: flex-end; margin-top: 14px"
+                >
+                    <button class="btn ghost" id="delCancel">Cancel</button>
+                    <button class="btn danger" id="delConfirm">
+                        Delete forever
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Peer profile floating sheet -->
         <div class="modal" id="profileSheet">
             <div class="card sheet-card">
                 <div class="detail-hd">

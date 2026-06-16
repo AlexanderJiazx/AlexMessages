@@ -88,7 +88,13 @@ func handleLogin(c *gin.Context) {
 }
 
 func handleLogout(c *gin.Context) {
-	if token := httpx.Cookie(c, auth.UserCookie); token != "" {
+	token := httpx.Cookie(c, auth.UserCookie)
+	// Sign out everywhere: a valid session drops all of the user's sessions
+	// (matching the "log out from all of your devices" action); fall back to
+	// dropping just this token when the session can't be resolved.
+	if user := auth.ResolveSession(token, "user"); user != nil {
+		_ = db.DeleteUserSessions(user.ID)
+	} else if token != "" {
 		_ = db.DeleteSession(token)
 	}
 	httpx.ClearSessionCookie(c, auth.UserCookie)

@@ -27,11 +27,37 @@ the app has **diverged** from the Python original:
 - **Link previews** — `GET /api/link-preview?url=` fetches OpenGraph metadata
   server-side (SSRF-guarded dialer, in-memory TTL cache) for preview cards.
 - **UI refresh** — message bubbles (own messages right-aligned), sidebar rows
-  show avatar + name + last-message preview, settings/account in a floating
-  sheet, compose icon in the rail header starts a new chat. The composer is a
+  show avatar + name + last-message preview, compose icon in the rail header
+  starts a new chat. The left rail header is a large **"Messages"** navigation
+  title (Instrument Serif); the signed-in account lives in a **bottom-left
+  trigger** (avatar + name + @handle) that opens Settings. The composer is a
   long pill (iMessage-style) with a circular arrow-up send button and image
   thumbnails for pending attachments; the recipient's online status is a chip
   under their name in the topbar (single source of truth, no duplicate).
+- **Optimistic send** — a sent message renders immediately with a
+  **Sending… → Delivered** footnote (iMessage-style, only under the latest own
+  message; flips to **Read** once the peer's read receipt covers it). The
+  client tags each send with a `client_id` nonce; the server echoes it in the
+  broadcast so the optimistic bubble is reconciled in place (no duplicate). If
+  no echo arrives within 10s the bubble shows **Failed to send · Retry**;
+  Retry re-sends with the same nonce. The "Reconnecting…" banner only appears
+  after the WS has stayed down for >3s, and clears on reconnect.
+- **Settings overlay** — opened from the bottom-left trigger (or clicking your
+  own name in chat). An Apple-System-Settings-style overlay with vertical tabs
+  (**Profile / Account / Notifications / Data / Admin** — Admin only for
+  admins; tabs collapse to a horizontal scroller on narrow screens). Profile:
+  centered avatar with a camera button (upload/remove menu), name, bio, and a
+  Save/Cancel bar that appears on edit. Account: account info, password change
+  (`POST /api/me/password` — verifies the current password, rotates sessions,
+  keeps this device), log out — which now **ends every session**
+  (`POST /api/logout` drops all of the user's sessions, "log out from all of
+  your devices") — and delete account (`POST /api/me/delete` —
+  password-verified, refuses the last admin). Notifications: a **toggle** for
+  direct-message push alerts. Data: JSON export (`GET /api/me/export`). Admin:
+  link to the admin panel. Notifications/Data/log-out use a shared
+  label-left / control-right row (dimmed description on the panel background,
+  no boxed field). Peer profiles still use the separate read-only floating
+  sheet.
 - **Branding** — user-visible name is **"Alex Messages"** (title, rail header,
   manifest, service-worker notifications, login/admin pages). The Go module
   remains `alexmessage`.
@@ -210,7 +236,8 @@ internal/
   meet/      Alex Meet (state.go, ws.go, routes.go, volctoken.go)
 ```
 
-The webapp route files: `pages.go`, `auth_routes.go`, `me.go`, `users.go`,
+The webapp route files: `pages.go`, `auth_routes.go`, `me.go`, `account.go`
+(password change / account deletion / data export), `users.go`,
 `uploads.go`, `push_routes.go`, `dm_state.go`, `history.go`, `ws.go`, plus
 `avatar.go` (profile photos) and `linkpreview.go` (link previews).
 
@@ -377,9 +404,10 @@ Alex Meet rooms are in-memory only — a meet-server restart ends all meetings.
 See the route files under `internal/webapp/` (user app),
 `internal/adminapp/` (admin; `adminapp.go` + `debug.go`), and
 `internal/meet/routes.go` (Alex Meet). The main-app WebSocket protocol: client
-sends `message`/`edit`/`switch`/`open_dm`/`ping`; server sends `init`/`message`/
-`message_edited`/`presence`/`profile_update`/`dm_opened`/`dm_read`. The Alex
-Meet control-plane protocol is documented above.
+sends `message` (with an optional `client_id` optimistic-send nonce)/`edit`/
+`switch`/`open_dm`/`ping`; server sends `init`/`message` (echoes `client_id`
+back to the sender)/`message_edited`/`presence`/`profile_update`/`dm_opened`/
+`dm_read`. The Alex Meet control-plane protocol is documented above.
 
 Debug console (admin): `GET /api/debug/events` (filtered snapshot),
 `GET /api/debug/stream` (SSE live tail), `POST /api/debug/clear`. Ingestion:

@@ -55,6 +55,7 @@ func NewEngine() *gin.Engine {
 	s.registerPages(r)
 	registerAuthRoutes(r)
 	registerMeRoutes(r)
+	registerAccountRoutes(r)
 	registerAvatarRoutes(r)
 	registerUserRoutes(r)
 	registerUploadRoutes(r)

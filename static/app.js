@@ -19,8 +19,12 @@
     linkPreviews: {},        // url -> preview object | "none" (negative cache)
     pendingAtt: [],
     replyTo: null,
-    sheetView: null,         // null | "me" | "peer" (floating sheet)
+    sheetView: null,         // null | "peer" (peer profile floating sheet)
     sheetPeerId: null,
+    settingsOpen: false,     // Settings overlay visibility
+    settingsTab: "profile",  // active Settings tab
+    meCreatedAt: 0,          // own account creation epoch (for Account tab)
+    pending: {},             // client_id -> {timer, channel} for optimistic sends
     editing: false,
     pageSize: PAGE_SIZE_DEFAULT,
     maxUpload: 20 * 1024 * 1024,
@@ -98,6 +102,25 @@
   // ──────── Helpers ────────
   const $ = (id) => document.getElementById(id);
   const PEER_COLORS = ["#4F7A5E","#7BA17F","#39604A","#A3B581","#6F8A6E","#8FAE92","#5A7773","#94A36B","#5B8A6C","#6A8E5F"];
+
+  // ──────── Icons (Lucide, same set as Alex Meet) ────────
+  const ICON_PATHS = {
+    user:     '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 1 0-16 0"/>',
+    shield:   '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
+    bell:     '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+    database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
+    lock:     '<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    camera:   '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>',
+    upload:   '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>',
+    trash:    '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+    logout:   '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
+    download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>',
+    external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  };
+  function icon(name, size = 16, sw = 1.7) {
+    const p = ICON_PATHS[name] || "";
+    return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
+  }
 
   function hash(s) {
     let h = 0;
@@ -511,8 +534,16 @@
   // private. Users are only ever surfaced through DM threads, contacts, or
   // messages the viewer can already see. Contact management lives in the
   // peer profile pane on the right.
-  function renderNetLabel() {
-    $("netLabel").textContent = "online";
+  // The bottom-left rail trigger mirrors the signed-in account (avatar + name +
+  // @handle) and opens Settings.
+  function renderAccountTrigger() {
+    if (!state.me) return;
+    const av = $("accountAvatar");
+    if (av) av.innerHTML = avatarHTML(state.me.id);
+    const nm = $("accountName");
+    if (nm) nm.textContent = state.me.display_name || state.me.username;
+    const h = $("accountHandle");
+    if (h) h.textContent = "@" + state.me.username;
   }
 
   async function toggleContact(uid) {
@@ -571,32 +602,52 @@
       appendMessageEl(m, prev, msgs);
       if (m.type !== "system") prev = m;
     });
-    updateReadRemark();
+    updateStatusRemarks();
     requestAnimationFrame(() => { stream.scrollTop = stream.scrollHeight; });
   }
 
-  // ──────── Read remark ────────
-  // Shows "Read" under the newest own message the peer has read.
-  function updateReadRemark() {
+  // ──────── Delivery / read remarks ────────
+  // Adds the iMessage-style footnotes under own messages:
+  //   • every failed send gets its own "Failed to send · Retry" line, and
+  //   • the most-recent own message shows a single Sending… / Delivered / Read.
+  function updateStatusRemarks() {
     const stream = $("stream");
-    stream.querySelectorAll(".read-remark").forEach(el => el.remove());
+    stream.querySelectorAll(".read-remark, .send-status").forEach(el => el.remove());
     const ch = state.activeChannel;
     if (!isDM(ch) || !state.me) return;
-    const st = dmStateFor(ch);
-    if (!st.peerLastReadAt) return;
     const arr = state.history[ch] || [];
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const m = arr[i];
-      if (m.type === "system" || m.user_id !== state.me.id) continue;
-      if ((m.created_at || 0) > st.peerLastReadAt) continue;
+    const st = dmStateFor(ch);
+
+    // Failed sends — each retryable on its own.
+    arr.forEach(m => {
+      if (m.type === "system" || m.user_id !== state.me.id || m._status !== "failed") return;
       const el = document.getElementById("msg-" + m.id);
-      if (el) {
-        const remark = document.createElement("div");
-        remark.className = "read-remark";
-        remark.textContent = "Read";
-        (el.querySelector(".msg-col") || el).appendChild(remark);
-      }
-      return;
+      if (!el) return;
+      const r = document.createElement("div");
+      r.className = "send-status failed";
+      r.innerHTML = `<span>Failed to send</span><span aria-hidden="true">·</span><button class="retry" type="button">Retry</button>`;
+      r.querySelector(".retry").addEventListener("click", () => retrySend(m.client_id || m.id));
+      (el.querySelector(".msg-col") || el).appendChild(r);
+    });
+
+    // Status under the most-recent message, only when it's ours and not failed.
+    let lastOwn = null;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      if (arr[i].type === "system") continue;
+      lastOwn = arr[i].user_id === state.me.id ? arr[i] : null;
+      break;
+    }
+    if (!lastOwn || lastOwn._status === "failed") return;
+    let label;
+    if (st.peerLastReadAt && (lastOwn.created_at || 0) <= st.peerLastReadAt) label = "Read";
+    else if (lastOwn._status === "sending") label = "Sending…";
+    else label = "Delivered";
+    const el = document.getElementById("msg-" + lastOwn.id);
+    if (el) {
+      const remark = document.createElement("div");
+      remark.className = "send-status";
+      remark.textContent = label;
+      (el.querySelector(".msg-col") || el).appendChild(remark);
     }
   }
 
@@ -887,7 +938,7 @@
       if (arr[i].type !== "system") { prev = arr[i]; break; }
     }
     el.replaceWith(renderMessage(arr[idx], prev, arr));
-    updateReadRemark();
+    updateStatusRemarks();
   }
 
   // Swaps the bubble content for a textarea with Save/Cancel (own messages only).
@@ -968,166 +1019,391 @@
     });
   }
 
-  // ──────── Settings / profile floating sheet ────────
+  // ──────── Peer profile floating sheet ────────
+  // `openProfile("me")` is routed to the new Settings overlay; "peer" opens the
+  // read-only profile sheet.
   function openProfile(view, uid) {
-    state.sheetView = view;
+    if (view === "me") { openSettings("profile"); return; }
+    state.sheetView = "peer";
     state.sheetPeerId = uid ?? null;
-    state.editing = false;
     renderSheet();
     $("profileSheet").classList.add("on");
   }
   function closeSheet() {
     state.sheetView = null;
     state.sheetPeerId = null;
-    state.editing = false;
     $("profileSheet").classList.remove("on");
   }
   $("sheetClose").addEventListener("click", closeSheet);
   $("profileSheet").addEventListener("click", (e) => {
     if (e.target === $("profileSheet")) closeSheet();
   });
+
+  function renderSheet() {
+    if (state.sheetView !== "peer" || state.sheetPeerId == null) return;
+    const title = $("sheetTitle");
+    const body = $("sheetBody");
+    const uid = state.sheetPeerId;
+    const u = userFor(uid) || { id: uid, username: "?", display_name: "?", bio: "" };
+    const online = state.online.has(uid);
+    const isContact = state.contacts.has(uid);
+    title.textContent = "Profile";
+    body.innerHTML = `
+      <div class="profile-banner"></div>
+      <div class="profile-row">
+        ${avatarHTML(uid, true)}
+        <div class="name-block">
+          <div class="name">${escapeHTML(u.display_name)}</div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Bio</label>
+        <div class="read-only ${u.bio ? "" : "empty"}">${u.bio ? escapeHTML(u.bio) : "No bio yet."}</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" id="dmBtn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9 6 9-6"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg>
+          Message
+        </button>
+        <button class="btn" id="contactBtn">
+          ${isContact ? "Remove from contacts" : "Add to contacts"}
+        </button>
+      </div>
+      <div class="field" style="margin-top:18px">
+        <label>Account</label>
+        <div class="net-card">
+          <div class="row"><span class="k">Username</span><span class="v">@${escapeHTML(u.username)}</span></div>
+          <div class="row"><span class="k">User ID</span><span class="v">#${u.id}</span></div>
+          <div class="row"><span class="k">Status</span><span class="v" style="color:${online ? "var(--sage-deep)" : "var(--muted)"}">${online ? "online" : "offline"}</span></div>
+        </div>
+      </div>`;
+    $("dmBtn").addEventListener("click", () => { closeSheet(); openDM(uid); });
+    $("contactBtn").addEventListener("click", () => { toggleContact(uid).then(renderSheet); });
+  }
+
+  // ──────── Settings overlay (Apple-style vertical tabs) ────────
+  function settingsTabDefs() {
+    const tabs = [
+      { id: "profile", label: "Profile", icon: "user" },
+      { id: "account", label: "Account", icon: "shield" },
+      { id: "notifications", label: "Notifications", icon: "bell" },
+      { id: "data", label: "Data", icon: "database" },
+    ];
+    if (state.isAdmin) tabs.push({ id: "admin", label: "Admin", icon: "lock" });
+    return tabs;
+  }
+
+  function openSettings(tab) {
+    if (!state.me) return;
+    state.settingsOpen = true;
+    state.settingsTab = tab || state.settingsTab || "profile";
+    renderSettingsTabs();
+    renderSettingsContent();
+    $("settingsModal").classList.add("on");
+  }
+  function closeSettings() {
+    state.settingsOpen = false;
+    closeAvatarMenu();
+    $("settingsSaveBar").classList.remove("on");
+    $("settingsModal").classList.remove("on");
+  }
+  function setSettingsTab(id) {
+    state.settingsTab = id;
+    renderSettingsTabs();
+    renderSettingsContent();
+  }
+  $("settingsClose").addEventListener("click", closeSettings);
+  $("settingsModal").addEventListener("click", (e) => {
+    if (e.target === $("settingsModal")) closeSettings();
+  });
+  // Single Escape handler for both overlays.
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && state.sheetView) closeSheet();
+    if (e.key !== "Escape") return;
+    if (state.settingsOpen) { closeSettings(); return; }
+    if (state.sheetView) closeSheet();
   });
 
-  function pushSettingsHTML() {
+  function renderSettingsTabs() {
+    const cont = $("settingsTabs");
+    if (!cont) return;
+    cont.innerHTML = "";
+    settingsTabDefs().forEach(t => {
+      const btn = document.createElement("button");
+      btn.className = "settings-tab" + (t.id === state.settingsTab ? " active" : "");
+      btn.innerHTML = `${icon(t.icon, 17)}<span>${t.label}</span>`;
+      btn.addEventListener("click", () => setSettingsTab(t.id));
+      cont.appendChild(btn);
+    });
+  }
+
+  function renderSettingsContent() {
+    const c = $("settingsContent");
+    if (!c || !state.me) return;
+    // The Save/Cancel bar only belongs to the Profile tab.
+    $("settingsSaveBar").classList.remove("on");
+    switch (state.settingsTab) {
+      case "profile":       renderProfileTab(c); break;
+      case "account":       renderAccountTab(c); break;
+      case "notifications": renderNotificationsTab(c); break;
+      case "data":          renderDataTab(c); break;
+      case "admin":         renderAdminTab(c); break;
+      default:              renderProfileTab(c);
+    }
+  }
+
+  // ---- Profile tab ----
+  function renderProfileTab(c) {
+    const me = state.me;
+    c.innerHTML = `
+      <h2 class="settings-h">Profile</h2>
+      <div class="avatar-editor">
+        ${avatarHTML(me.id, true)}
+        <button class="avatar-cam" id="avatarCam" aria-label="Change photo" title="Change photo">${icon("camera", 16, 1.7)}</button>
+      </div>
+      <input class="profile-name-input" id="pfName" maxlength="40" value="${escapeHTML(me.display_name)}" placeholder="Your name" />
+      <div class="settings-group" style="margin-top:18px">
+        <div class="settings-group-label">Bio</div>
+        <textarea class="bio" id="pfBio" maxlength="280" placeholder="A line or two about you…">${escapeHTML(me.bio || "")}</textarea>
+      </div>`;
+    const nameEl = $("pfName"), bioEl = $("pfBio");
+    const autosize = () => { bioEl.style.height = "auto"; bioEl.style.height = Math.min(220, bioEl.scrollHeight) + "px"; };
+    const checkDirty = () => {
+      const dirty = nameEl.value.trim() !== (me.display_name || "") || bioEl.value.trim() !== (me.bio || "");
+      $("settingsSaveBar").classList.toggle("on", dirty);
+    };
+    nameEl.addEventListener("input", checkDirty);
+    bioEl.addEventListener("input", () => { autosize(); checkDirty(); });
+    $("avatarCam").addEventListener("click", openAvatarMenu);
+    autosize();
+  }
+
+  function saveProfileTab() {
+    const nameEl = $("pfName"), bioEl = $("pfBio");
+    if (!nameEl || !bioEl) return;
+    saveProfile(nameEl.value.trim(), bioEl.value.trim());
+  }
+  function cancelProfileTab() {
+    renderProfileTab($("settingsContent"));
+    $("settingsSaveBar").classList.remove("on");
+  }
+  $("pfSave").addEventListener("click", saveProfileTab);
+  $("pfCancel").addEventListener("click", cancelProfileTab);
+
+  // ---- Avatar photo menu (upload / remove) ----
+  function closeAvatarMenu() {
+    const m = document.getElementById("avatarMenu");
+    if (m) m.remove();
+  }
+  function openAvatarMenu(e) {
+    e.stopPropagation();
+    closeAvatarMenu();
+    // No existing photo → go straight to the file picker.
+    if (!state.me.avatar) { $("avatarInput").click(); return; }
+    const anchor = e.currentTarget;
+    const menu = document.createElement("div");
+    menu.id = "avatarMenu";
+    menu.className = "avatar-menu";
+    menu.innerHTML = `
+      <button data-act="upload">${icon("upload", 15)}<span>Upload photo</span></button>
+      <button data-act="remove" class="danger">${icon("trash", 15)}<span>Remove photo</span></button>`;
+    document.body.appendChild(menu);
+    const r = anchor.getBoundingClientRect();
+    menu.style.position = "fixed";
+    let left = r.right - 170;
+    if (left < 8) left = 8;
+    menu.style.left = left + "px";
+    menu.style.top = (r.bottom + 8) + "px";
+    requestAnimationFrame(() => {
+      const mr = menu.getBoundingClientRect();
+      if (mr.bottom > window.innerHeight - 8) menu.style.top = (r.top - mr.height - 8) + "px";
+    });
+    menu.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("button[data-act]");
+      if (!btn) return;
+      const act = btn.getAttribute("data-act");
+      closeAvatarMenu();
+      if (act === "upload") $("avatarInput").click();
+      else if (act === "remove") removeAvatar();
+    });
+  }
+  document.addEventListener("click", (e) => {
+    if (!document.getElementById("avatarMenu")) return;
+    if (!e.target.closest("#avatarMenu") && !e.target.closest("#avatarCam")) closeAvatarMenu();
+  });
+
+  // ---- Account tab ----
+  function fmtAccountDate(ts) {
+    if (!ts) return "—";
+    try { return new Date(ts * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }); }
+    catch { return "—"; }
+  }
+  function renderAccountTab(c) {
+    const me = state.me;
+    c.innerHTML = `
+      <h2 class="settings-h">Account</h2>
+      <div class="settings-group">
+        <div class="settings-group-label">Account info</div>
+        <div class="net-card">
+          <div class="row"><span class="k">Username</span><span class="v">@${escapeHTML(me.username)}</span></div>
+          <div class="row"><span class="k">User ID</span><span class="v">#${me.id}</span></div>
+          <div class="row"><span class="k">Member since</span><span class="v">${escapeHTML(fmtAccountDate(state.meCreatedAt))}</span></div>
+          <div class="row"><span class="k">Status</span><span class="v" style="color:var(--sage-deep)">approved</span></div>
+        </div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-label">Change password</div>
+        <div class="pw-form">
+          <input type="password" id="pwCurrent" placeholder="Current password" autocomplete="current-password"/>
+          <input type="password" id="pwNew" placeholder="New password (8–128 chars)" autocomplete="new-password"/>
+          <input type="password" id="pwConfirm" placeholder="Confirm new password" autocomplete="new-password"/>
+          <div id="pwMsg" class="settings-sub" style="margin:2px 0 0"></div>
+          <div class="btn-row"><button class="btn primary" id="pwSubmit">Update password</button></div>
+        </div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-label">Session</div>
+        ${rowHTML("Log out from all of your devices", "Ends every active session, including this one.",
+          `<button class="btn" id="acLogout">${icon("logout", 14)} Log out</button>`)}
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-label">Danger zone</div>
+        <div class="danger-zone">
+          <div class="dz-title">Delete account</div>
+          <div class="dz-desc">Permanently deletes your account, profile, and message history. This can't be undone.</div>
+          <button class="btn danger" id="acDelete">Delete my account…</button>
+        </div>
+      </div>`;
+    $("pwSubmit").addEventListener("click", submitPasswordChange);
+    $("acLogout").addEventListener("click", doLogout);
+    $("acDelete").addEventListener("click", openDeleteAccount);
+  }
+
+  async function submitPasswordChange() {
+    const cur = $("pwCurrent").value, nw = $("pwNew").value, cf = $("pwConfirm").value;
+    const msg = $("pwMsg");
+    const setMsg = (t, ok) => { msg.textContent = t; msg.style.color = ok ? "var(--sage-deep)" : "var(--danger)"; };
+    if (nw.length < 8 || nw.length > 128) { setMsg("New password must be 8–128 characters.", false); return; }
+    if (nw !== cf) { setMsg("New passwords don't match.", false); return; }
+    try {
+      const r = await fetch("/api/me/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ current_password: cur, new_password: nw }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => null);
+        setMsg((j && j.detail) || "Couldn't update password.", false);
+        return;
+      }
+      $("pwCurrent").value = ""; $("pwNew").value = ""; $("pwConfirm").value = "";
+      setMsg("Password updated. Other devices were signed out.", true);
+      toast("Password updated");
+    } catch {
+      setMsg("Couldn't update password.", false);
+    }
+  }
+
+  // ---- Delete-account modal ----
+  function openDeleteAccount() {
+    $("delPassword").value = "";
+    $("delError").style.display = "none";
+    $("deleteAccountModal").classList.add("on");
+    setTimeout(() => $("delPassword").focus(), 0);
+  }
+  function closeDeleteAccount() { $("deleteAccountModal").classList.remove("on"); }
+  async function confirmDeleteAccount() {
+    const pw = $("delPassword").value;
+    const err = $("delError");
+    err.style.display = "none";
+    if (!pw) { err.textContent = "Enter your password."; err.style.display = "block"; return; }
+    try {
+      const r = await fetch("/api/me/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ password: pw }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => null);
+        err.textContent = (j && j.detail) || "Couldn't delete account.";
+        err.style.display = "block";
+        return;
+      }
+      window.location.href = "/login";
+    } catch {
+      err.textContent = "Couldn't delete account.";
+      err.style.display = "block";
+    }
+  }
+  $("delCancel").addEventListener("click", closeDeleteAccount);
+  $("delConfirm").addEventListener("click", confirmDeleteAccount);
+  $("deleteAccountModal").addEventListener("click", (e) => {
+    if (e.target === $("deleteAccountModal")) closeDeleteAccount();
+  });
+  $("delPassword").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); confirmDeleteAccount(); }
+  });
+
+  // ---- Notifications tab ----
+  function renderNotificationsTab(c) {
+    c.innerHTML = `<h2 class="settings-h">Notifications</h2>` + pushSettingsBody();
+    const t = $("notifToggle");
+    if (t && !t.disabled) {
+      t.addEventListener("click", () => {
+        if (t.classList.contains("on")) disablePushFlow();
+        else enablePushFlow();
+      });
+    }
+  }
+  function pushSettingsBody() {
     if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
-      return "";
+      return rowHTML("Direct message alerts", "Push notifications aren't supported in this browser.", "");
     }
     const perm = Notification.permission;
     const enabled = state.pushSubscribed && perm === "granted";
-    let body, btn;
+    let desc, disabled = false;
     if (perm === "denied") {
-      body = `Blocked by your browser. Open the site settings (click the lock icon in the address bar) to allow notifications.`;
-      btn = "";
+      desc = `Blocked by your browser. Open the site settings (click the lock icon in the address bar) to allow notifications.`;
+      disabled = true;
     } else if (enabled) {
-      body = `You'll get a system notification for new direct messages while Alex Messages isn't open or focused.`;
-      btn = `<button class="btn" id="notifDisable">Turn off notifications</button>`;
+      desc = `You'll get a system notification for new direct messages while Alex Messages isn't open or focused.`;
     } else {
-      body = `Get a system notification for new direct messages even when Alex Messages is in the background.`;
-      btn = `<button class="btn primary" id="notifEnable">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
-        Enable notifications
-      </button>`;
+      desc = `Get a system notification for new direct messages even when Alex Messages is in the background.`;
     }
+    const toggle = `<button class="toggle${enabled ? " on" : ""}" id="notifToggle" role="switch"
+      aria-checked="${enabled}" aria-label="Toggle notifications"${disabled ? " disabled" : ""}></button>`;
+    return rowHTML("Direct message alerts", desc, toggle);
+  }
+
+  // rowHTML builds a label-left / control-right setting row: a primary line, a
+  // dimmed description on the panel background, and a control on the right.
+  function rowHTML(title, desc, control) {
     return `
-      <div class="field" style="margin-top:18px">
-        <label>Notifications</label>
-        <div class="read-only" style="line-height:1.5;">${body}</div>
-        ${btn ? `<div class="btn-row">${btn}</div>` : ""}
+      <div class="settings-row">
+        <div class="settings-row-label">
+          <div class="t">${escapeHTML(title)}</div>
+          ${desc ? `<div class="d">${escapeHTML(desc)}</div>` : ""}
+        </div>
+        ${control}
       </div>`;
   }
 
-  function renderSheet() {
-    const title = $("sheetTitle");
-    const body = $("sheetBody");
-    if (state.sheetView === "me" && state.me) {
-      title.textContent = "Settings & account";
-      const me = state.me;
-      body.innerHTML = `
-        <div class="profile-banner"></div>
-        <div class="profile-row">
-          ${avatarHTML(me.id, true)}
-          <div class="name-block">
-            <div class="name">${escapeHTML(me.display_name)}</div>
-          </div>
-        </div>
-        <div class="btn-row" style="margin-bottom:14px">
-          <button class="btn" id="avatarChange">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            ${me.avatar ? "Change photo" : "Add photo"}
-          </button>
-          ${me.avatar ? `<button class="btn ghost" id="avatarRemove">Remove photo</button>` : ""}
-        </div>
-        ${state.editing ? `
-          <div class="field">
-            <label>Display name <span class="hint">Shown to others</span></label>
-            <input type="text" class="text" id="editName" maxlength="40" value="${escapeHTML(me.display_name)}" placeholder="e.g. Alex" />
-          </div>
-          <div class="field">
-            <label>Bio <span class="hint">A line or two</span></label>
-            <textarea class="bio" id="editBio" maxlength="280" placeholder="What you're up to, where you are, anything…">${escapeHTML(me.bio || "")}</textarea>
-          </div>
-          <div class="btn-row">
-            <button class="btn primary" id="saveProfile">Save</button>
-            <button class="btn ghost" id="cancelEdit">Cancel</button>
-          </div>
-        ` : `
-          <div class="field">
-            <label>Bio</label>
-            <div class="read-only ${me.bio ? "" : "empty"}">${me.bio ? escapeHTML(me.bio) : "No bio yet — click edit to add one."}</div>
-          </div>
-          <div class="btn-row">
-            <button class="btn primary" id="editProfile">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M14 6l4 4"/></svg>
-              Edit profile
-            </button>
-            <button class="btn danger" id="logoutBtn">Sign out</button>
-            ${state.isAdmin ? `<a class="btn" href="${adminUrl()}" target="_blank">Admin panel</a>` : ""}
-          </div>
-        `}
-        ${pushSettingsHTML()}
-        <div class="field" style="margin-top:18px">
-          <label>Account</label>
-          <div class="net-card">
-            <div class="row"><span class="k">Username</span><span class="v">@${escapeHTML(me.username)}<span class="badge-you">YOU</span></span></div>
-            <div class="row"><span class="k">User ID</span><span class="v">#${me.id}</span></div>
-            <div class="row"><span class="k">Status</span><span class="v" style="color:var(--sage-deep)">online</span></div>
-          </div>
-        </div>`;
+  // ---- Data tab ----
+  function renderDataTab(c) {
+    c.innerHTML = `<h2 class="settings-h">Data</h2>` + rowHTML(
+      "Export my data",
+      "Download a copy of your account, contacts, and full message history as a JSON file.",
+      `<a class="btn" id="exportBtn" href="/api/me/export" download>${icon("download", 14)} Export</a>`
+    );
+  }
 
-      if (state.editing) {
-        $("saveProfile").addEventListener("click", saveProfile);
-        $("cancelEdit").addEventListener("click", () => { state.editing = false; renderSheet(); });
-      } else {
-        $("editProfile").addEventListener("click", () => { state.editing = true; renderSheet(); setTimeout(() => $("editName")?.focus(), 0); });
-        $("logoutBtn").addEventListener("click", doLogout);
-      }
-      $("avatarChange").addEventListener("click", () => $("avatarInput").click());
-      $("avatarRemove")?.addEventListener("click", removeAvatar);
-      $("notifEnable")?.addEventListener("click", () => enablePushFlow());
-      $("notifDisable")?.addEventListener("click", () => disablePushFlow());
-    } else if (state.sheetView === "peer" && state.sheetPeerId != null) {
-      const uid = state.sheetPeerId;
-      const u = userFor(uid) || { id: uid, username: "?", display_name: "?", bio: "" };
-      const online = state.online.has(uid);
-      const isContact = state.contacts.has(uid);
-      title.textContent = "Profile";
-      body.innerHTML = `
-        <div class="profile-banner"></div>
-        <div class="profile-row">
-          ${avatarHTML(uid, true)}
-          <div class="name-block">
-            <div class="name">${escapeHTML(u.display_name)}</div>
-          </div>
-        </div>
-        <div class="field">
-          <label>Bio</label>
-          <div class="read-only ${u.bio ? "" : "empty"}">${u.bio ? escapeHTML(u.bio) : "No bio yet."}</div>
-        </div>
-        <div class="btn-row">
-          <button class="btn primary" id="dmBtn">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9 6 9-6"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg>
-            Message
-          </button>
-          <button class="btn" id="contactBtn">
-            ${isContact ? "Remove from contacts" : "Add to contacts"}
-          </button>
-        </div>
-        <div class="field" style="margin-top:18px">
-          <label>Account</label>
-          <div class="net-card">
-            <div class="row"><span class="k">Username</span><span class="v">@${escapeHTML(u.username)}</span></div>
-            <div class="row"><span class="k">User ID</span><span class="v">#${u.id}</span></div>
-            <div class="row"><span class="k">Status</span><span class="v" style="color:${online ? "var(--sage-deep)" : "var(--muted)"}">${online ? "online" : "offline"}</span></div>
-          </div>
-        </div>`;
-      $("dmBtn").addEventListener("click", () => { closeSheet(); openDM(uid); });
-      $("contactBtn").addEventListener("click", () => { toggleContact(uid).then(renderSheet); });
-    } else {
-      title.textContent = "—";
-      body.innerHTML = "";
-    }
+  // ---- Admin tab ----
+  function renderAdminTab(c) {
+    c.innerHTML = `
+      <h2 class="settings-h">Admin</h2>
+      <div class="settings-sub" style="margin-top:0">You have administrator access. The control panel opens in a new tab.</div>
+      <div class="btn-row"><a class="btn primary" href="${adminUrl()}" target="_blank" rel="noopener">${icon("external", 14)} Open admin panel</a></div>`;
   }
 
   // ──────── Profile photo upload ────────
@@ -1169,7 +1445,9 @@
   function applyOwnProfile(user) {
     state.me = { ...state.me, ...user };
     state.users[state.me.id] = { ...(state.users[state.me.id] || {}), ...user };
-    if (state.sheetView) renderSheet();
+    renderAccountTrigger();
+    if (state.sheetView === "peer") renderSheet();
+    if (state.settingsOpen && state.settingsTab === "profile") renderSettingsContent();
     renderDMs();
     renderStream();
     renderTopbar();
@@ -1180,9 +1458,7 @@
     return `${location.protocol}//${location.hostname}:${port}/`;
   }
 
-  async function saveProfile() {
-    const name = $("editName").value.trim();
-    const bio = $("editBio").value.trim();
+  async function saveProfile(name, bio) {
     try {
       const r = await fetch("/api/me", {
         method: "PATCH",
@@ -1192,7 +1468,7 @@
       });
       if (!r.ok) throw new Error();
       const j = await r.json();
-      state.editing = false;
+      $("settingsSaveBar").classList.remove("on");
       applyOwnProfile(j.user);
       toast("Profile saved");
     } catch {
@@ -1254,7 +1530,7 @@
   function closeLeft() { $("leftPane").classList.remove("open"); $("backdrop").classList.remove("on"); }
   $("menuBtn").addEventListener("click", openLeft);
   $("leftClose").addEventListener("click", closeLeft);
-  $("profileToggle").addEventListener("click", () => openProfile("me"));
+  $("accountTrigger").addEventListener("click", () => openSettings("profile"));
   $("backdrop").addEventListener("click", closeLeft);
 
   // ──────── Lightbox ────────
@@ -1282,17 +1558,61 @@
   });
   $("sendBtn").addEventListener("click", doSend);
 
+  // How long to wait for the server's broadcast echo before flagging a send as
+  // failed (so the user gets a Retry).
+  const SEND_TIMEOUT_MS = 10000;
+
+  // doSend renders the message optimistically (immediately), then sends it with
+  // a client-side nonce. The server echoes that nonce in its broadcast so we
+  // can reconcile the local bubble; until then the footnote reads "Sending…",
+  // flipping to "Delivered" on echo or "Failed to send" after the timeout.
   function doSend() {
     if (!state.activeChannel) return;
     const text = input.value.trim();
     if (!text && !state.pendingAtt.length) return;
-    send({
+    const channel = state.activeChannel;
+    const cid = "c" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    const optimistic = {
+      id: cid,
+      client_id: cid,
       type: "message",
-      channel: state.activeChannel,
+      channel,
+      user_id: state.me.id,
       text,
       reply_to: state.replyTo ? state.replyTo.id : null,
-      attachments: state.pendingAtt,
+      attachments: state.pendingAtt.slice(),
+      created_at: Math.floor(Date.now() / 1000),
+      edited_at: null,
+      _status: "sending",
+    };
+
+    const arr = state.history[channel] = state.history[channel] || [];
+    const prev = arr.length ? arr[arr.length - 1] : null;
+    arr.push(optimistic);
+    while (arr.length > 200) arr.shift();
+    // Surface a new (or previously deleted) DM thread.
+    if (isDM(channel) && !state.dmThreads.find(t => t.channel === channel)) {
+      const peer = dmPeerOf(channel);
+      if (peer != null) state.dmThreads.push({ channel, peer_id: peer });
+    }
+    if (channel === state.activeChannel) {
+      const stream = $("stream");
+      appendMessageEl(optimistic, prev && prev.type !== "system" ? prev : null, arr);
+      updateStatusRemarks();
+      requestAnimationFrame(() => { stream.scrollTop = stream.scrollHeight; });
+    }
+    renderDMs();
+
+    send({
+      type: "message",
+      channel,
+      text,
+      reply_to: optimistic.reply_to,
+      attachments: optimistic.attachments,
+      client_id: cid,
     });
+    state.pending[cid] = { channel, timer: setTimeout(() => markSendFailed(channel, cid), SEND_TIMEOUT_MS) };
+
     input.value = "";
     input.style.height = "auto";
     state.pendingAtt = [];
@@ -1300,6 +1620,40 @@
     renderPendingAtt();
     renderReplyBar();
     updateSendState();
+  }
+
+  function findOptimistic(channel, cid) {
+    const arr = state.history[channel] || [];
+    return arr.find(m => m.client_id === cid);
+  }
+
+  function markSendFailed(channel, cid) {
+    const p = state.pending[cid];
+    if (p && p.timer) clearTimeout(p.timer);
+    if (state.pending[cid]) state.pending[cid] = { channel, timer: null };
+    const m = findOptimistic(channel, cid);
+    if (!m) return;
+    m._status = "failed";
+    if (channel === state.activeChannel) { rerenderMessage(channel, m.id); }
+    renderDMs();
+  }
+
+  function retrySend(cid) {
+    const p = state.pending[cid];
+    const channel = p ? p.channel : state.activeChannel;
+    const m = findOptimistic(channel, cid);
+    if (!m) return;
+    m._status = "sending";
+    if (channel === state.activeChannel) rerenderMessage(channel, m.id);
+    send({
+      type: "message",
+      channel,
+      text: m.text,
+      reply_to: m.reply_to,
+      attachments: m.attachments,
+      client_id: cid,
+    });
+    state.pending[cid] = { channel, timer: setTimeout(() => markSendFailed(channel, cid), SEND_TIMEOUT_MS) };
   }
 
   // ──────── File upload ────────
@@ -1358,12 +1712,30 @@
   let ws;
   let wsReady = false;
   let pendingSend = [];
+  // Reconnect bookkeeping: the "Reconnecting…" banner only appears once the
+  // socket has stayed down for >3s, so a quick blip doesn't flash a toast.
+  let reconnectAttemptTimer = null;
+  let reconnBannerTimer = null;
+  let connBannerEl = null;
+
+  function showConnBanner() {
+    if (connBannerEl) return;
+    connBannerEl = document.createElement("div");
+    connBannerEl.className = "conn-banner";
+    connBannerEl.innerHTML = `<span class="conn-spinner"></span><span>Reconnecting…</span>`;
+    $("toasts").appendChild(connBannerEl);
+  }
+  function clearConnBanner() {
+    if (reconnBannerTimer) { clearTimeout(reconnBannerTimer); reconnBannerTimer = null; }
+    if (connBannerEl) { connBannerEl.remove(); connBannerEl = null; }
+  }
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.addEventListener("open", () => {
       wsReady = true;
+      clearConnBanner();
       Debug.info("ws_open", "WebSocket connected", { queued: pendingSend.length });
       pendingSend.forEach(p => ws.send(JSON.stringify(p)));
       pendingSend = [];
@@ -1380,8 +1752,14 @@
         return;
       }
       Debug.warn("ws_close", "WebSocket closed, reconnecting", { code: e.code });
-      toast("Disconnected — reconnecting…", true);
-      setTimeout(connect, 1500);
+      // Arm the banner once; it only shows if we're still down after 3s.
+      if (!reconnBannerTimer && !connBannerEl) {
+        reconnBannerTimer = setTimeout(() => { reconnBannerTimer = null; showConnBanner(); }, 3000);
+      }
+      // Schedule a single reconnect attempt.
+      if (!reconnectAttemptTimer) {
+        reconnectAttemptTimer = setTimeout(() => { reconnectAttemptTimer = null; connect(); }, 1500);
+      }
     });
     ws.addEventListener("error", () => Debug.error("ws_error", "WebSocket error"));
   }
@@ -1420,13 +1798,18 @@
       state.activeChannel = channelExists(saved) ? saved : null;
       fetch("/api/me", { credentials: "same-origin" })
         .then(r => r.ok ? r.json() : null)
-        .then(j => { state.isAdmin = !!(j && j.is_admin); if (state.sheetView === "me") renderSheet(); })
+        .then(j => {
+          state.isAdmin = !!(j && j.is_admin);
+          state.meCreatedAt = (j && j.created_at) || 0;
+          if (state.settingsOpen) { renderSettingsTabs(); renderSettingsContent(); }
+        })
         .catch(() => {});
-      renderNetLabel();
+      renderAccountTrigger();
       renderDMs();
       renderTopbar();
       renderStream();
-      if (state.sheetView) renderSheet();
+      if (state.sheetView === "peer") renderSheet();
+      if (state.settingsOpen) renderSettingsContent();
       if (state.activeChannel) {
         send({ type: "switch", channel: state.activeChannel });
         if (isDM(state.activeChannel) && isUnread(state.activeChannel)) {
@@ -1438,6 +1821,31 @@
       const msg = data.message;
       if (msg.author && msg.author.id != null) {
         state.users[msg.author.id] = { ...(state.users[msg.author.id] || {}), ...msg.author };
+      }
+      // Reconcile our own optimistic bubble (matched by the echoed client_id)
+      // rather than appending a duplicate.
+      if (msg.client_id && state.pending[msg.client_id] && state.me && msg.user_id === state.me.id) {
+        const cid = msg.client_id;
+        const p = state.pending[cid];
+        if (p && p.timer) clearTimeout(p.timer);
+        delete state.pending[cid];
+        const arr = state.history[data.channel] || [];
+        const m = arr.find(x => x.client_id === cid);
+        if (m) {
+          const oldId = m.id;
+          m.id = msg.id;
+          m.created_at = msg.created_at;
+          m.edited_at = msg.edited_at ?? null;
+          m._status = "delivered";
+          const el = document.getElementById("msg-" + oldId);
+          if (el && data.channel === state.activeChannel) {
+            el.id = "msg-" + msg.id;
+            rerenderMessage(data.channel, msg.id);
+          }
+          renderDMs();
+          return;
+        }
+        // Optimistic bubble already evicted (rare) — fall through to append.
       }
       let presenceChanged = false;
       if (msg.user_id != null && !state.online.has(msg.user_id)) {
@@ -1489,11 +1897,14 @@
       if (!isSelf && !state.users[p.id]) return; // ignore strangers
       state.users[p.id] = { ...(state.users[p.id] || {}), ...p };
       if (isSelf) state.me = { ...state.me, ...p };
+      if (isSelf) renderAccountTrigger();
       renderDMs();
       renderTopbar();
       renderStream();
       if (state.sheetView === "peer" && state.sheetPeerId === p.id) renderSheet();
-      if (state.sheetView === "me" && isSelf && !state.editing) renderSheet();
+      // Refresh open Settings on a self-update (skip the Profile tab while the
+      // user is mid-edit, to avoid clobbering unsaved field values).
+      if (isSelf && state.settingsOpen && state.settingsTab !== "profile") renderSettingsContent();
     } else if (data.type === "message_edited") {
       const arr = state.history[data.channel] || [];
       const m = arr.find(x => x.id === data.id);
@@ -1510,7 +1921,7 @@
         renderDMs();
       } else {
         state.dmState[ch] = { ...st, peerLastReadAt: data.last_read_at || 0 };
-        if (ch === state.activeChannel) updateReadRemark();
+        if (ch === state.activeChannel) updateStatusRemarks();
       }
     } else if (data.type === "dm_opened") {
       state.history[data.channel] = data.history || [];
@@ -1649,7 +2060,7 @@
           ? "Notifications are blocked — enable them in your browser settings"
           : "Notifications were declined");
         state.pushSubscribed = false;
-        if (state.sheetView === "me") renderSheet();
+        if (state.settingsOpen && state.settingsTab === "notifications") renderSettingsContent();
         return false;
       }
       const keyRes = await fetch("/api/push/public-key", { credentials: "same-origin" });
@@ -1660,7 +2071,7 @@
       try { localStorage.removeItem(PUSH_DECLINED_KEY); } catch (_) {}
       state.pushSubscribed = true;
       toast("Notifications enabled");
-      if (state.sheetView === "me") renderSheet();
+      if (state.settingsOpen && state.settingsTab === "notifications") renderSettingsContent();
       return true;
     } catch (err) {
       console.error("[push] enable flow failed", err);
@@ -1688,7 +2099,7 @@
       state.pushSubscribed = false;
       try { localStorage.setItem(PUSH_DECLINED_KEY, "1"); } catch (_) {}
       toast("Notifications disabled");
-      if (state.sheetView === "me") renderSheet();
+      if (state.settingsOpen && state.settingsTab === "notifications") renderSettingsContent();
     } catch (err) {
       console.error("[push] disable flow failed", err);
     }
@@ -1733,7 +2144,7 @@
       const sub = await getOrCreateSubscription(reg, vapidKey);
       await postSubscriptionToServer(sub);
       state.pushSubscribed = true;
-      if (state.sheetView === "me") renderSheet();
+      if (state.settingsOpen && state.settingsTab === "notifications") renderSettingsContent();
     } catch (err) {
       console.warn("[push] reconcile failed", err);
     }
