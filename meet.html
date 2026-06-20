@@ -781,17 +781,33 @@
     $("toasts").appendChild(el);
     setTimeout(() => el.remove(), 2800);
   }
+  function mediaErrorDetails(err) {
+    const cause = err && (err.cause || err.originError || err.error);
+    return {
+      name: String((err && err.name) || (cause && cause.name) || "Error"),
+      message: String((err && err.message) || (cause && cause.message) || err || "Unknown error"),
+      code: String((err && (err.code || err.errorCode)) || (cause && (cause.code || cause.errorCode)) || ""),
+      cause_name: cause && cause.name ? String(cause.name) : "",
+      cause_message: cause && cause.message ? String(cause.message) : "",
+    };
+  }
   function mediaErrorToast(kind, err) {
-    const name = err && err.name;
+    const details = mediaErrorDetails(err);
+    const name = details.cause_name || details.name;
+    const code = details.code;
     const label = kind === "audio" ? "Microphone" : "Camera";
     if (name === "NotAllowedError" || name === "PermissionDeniedError") {
       toast(label + " permission denied. Check your browser settings.", "err");
     } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
       toast("No " + (kind === "audio" ? "microphone" : "camera") + " found.", "err");
-    } else if (name === "NotReadableError" || name === "TrackStartError") {
+    } else if (name === "NotReadableError" || name === "TrackStartError" || code === "GET_AUDIO_TRACK_FAILED" || code === "GET_VIDEO_TRACK_FAILED") {
       toast(label + " is in use by another app.", "err");
     } else if (name === "AbortError") {
       toast(label + " request was cancelled.", "warn");
+    } else if (code === "REPEAT_CAPTURE") {
+      toast(label + " was already active. Please try again.", "warn");
+    } else if (code === "NOT_CONNECTED_YET" || code === "RECONNECT_FAILED" || code === "UNEXPECTED_ERROR") {
+      toast(label + " couldn't reconnect. Try again.", "err");
     } else {
       toast(label + " unavailable", "err");
     }
@@ -819,6 +835,10 @@
         pid: st.selfPid ?? "",
         user: st.me ? (me.display_name || me.username || "user") : (st.guestName || "guest"),
         guest: !st.me,
+        visibility: document.visibilityState || "unknown",
+        mic_desired: st.micDesired ?? "",
+        mic_on: st.micOn ?? "",
+        volc_generation: st.volcGeneration ?? "",
       }, extra || {});
     }
     function flush() {
@@ -890,7 +910,13 @@
     gridPage: 0,
     autoFocusPid: null,  // pid we auto-focused for a screen share
     allowGuests: false,
+    micDesired: true,     // user/host intent; micOn is confirmed capture state
     micOn: true,
+    micRequestSeq: 0,
+    micRequest: null,
+    micTransition: null,
+    micRecoveryTimer: null,
+    volcMicLastError: null,
     camOn: true,
     sharing: false,
     micDevice: null,
@@ -910,6 +936,7 @@
     // volc
     volc: null,          // join payload {app_id, room_id, user_id, token}
     volcEngine: null,
+    volcGeneration: 0,   // invalidates callbacks from replaced/destroyed engines
     volcShareMedia: null, // MediaType we published for the current screen share
     ws: null,
     wsReady: false,
@@ -1084,7 +1111,10 @@
         showView("meetView");
         syncTiles();
         if (reconnect) {
-          reconnectMedia();
+          reconnectMedia().catch(err => {
+            console.error("[meet] volc reconnect failed", err);
+            toast("Couldn't restore audio/video", "err");
+          });
         } else {
           startMedia().catch(err => {
             console.error("[meet] media start failed", err);
@@ -1174,8 +1204,8 @@
         break;
       }
       case "force_mute": {
-        if (state.micOn) {
-          setMic(false);
+        if (state.micOn || state.micDesired) {
+          setMic(false, { source: "host_mute" });
           toast("The host muted your microphone", "warn");
         }
         break;
@@ -1568,12 +1598,16 @@
 
   // ──────── Controls ────────
   function updateControls() {
+    const micBusy = !!state.micTransition;
     $("micBtn").innerHTML = state.micOn ? ICONS.mic : ICONS.micOff;
     $("camBtn").innerHTML = state.camOn ? ICONS.cam : ICONS.camOff;
     $("micSplit").classList.toggle("off", !state.micOn);
     $("camSplit").classList.toggle("off", !state.camOn);
     $("shareBtn").classList.toggle("on", state.sharing);
-    $("micBtn").title = state.micOn ? "Turn off microphone" : "Turn on microphone";
+    $("micBtn").setAttribute("aria-busy", micBusy ? "true" : "false");
+    $("micBtn").title = micBusy
+      ? (state.micDesired ? "Turning on microphone…" : "Turning off microphone…")
+      : (state.micOn ? "Turn off microphone" : "Turn on microphone");
     $("camBtn").title = state.camOn ? "Turn off camera" : "Turn on camera";
   }
 
@@ -1587,33 +1621,201 @@
     sendState();
   }
 
-  async function setMic(on) {
-    if (state.mode === "volc") {
+  function currentVolcAudioTrack(engine = state.volcEngine) {
+    if (!engine || !window.VERTC || !VERTC.StreamIndex || !engine.getLocalStreamTrack) return null;
+    try { return engine.getLocalStreamTrack(VERTC.StreamIndex.STREAM_INDEX_MAIN, "audio") || null; }
+    catch { return null; }
+  }
+
+  function isCurrentVolcEngine(engine, generation) {
+    return !!engine && state.volcEngine === engine && state.volcGeneration === generation
+      && state.phase === "inmeeting" && !state.leaving;
+  }
+
+  function volcMicContext(engine, generation, extra) {
+    const track = currentVolcAudioTrack(engine);
+    return Object.assign({
+      engine_generation: generation,
+      mic_desired: state.micDesired,
+      mic_on: state.micOn,
+      track_state: track ? track.readyState : "none",
+      track_muted: track ? !!track.muted : false,
+      visibility: document.visibilityState || "unknown",
+    }, extra || {});
+  }
+
+  function retryableVolcMicError(err) {
+    const d = mediaErrorDetails(err);
+    if (d.code === "REPEAT_CAPTURE") return true;
+    if (["GET_AUDIO_TRACK_FAILED", "STREAM_TYPE_NOT_MATCH"].includes(d.code)) return false;
+    return !["NotAllowedError", "PermissionDeniedError", "NotFoundError", "DevicesNotFoundError", "NotReadableError", "TrackStartError"].includes(d.cause_name || d.name);
+  }
+
+  function micTrackError(message) {
+    const err = new Error(message);
+    err.code = "AUDIO_TRACK_NOT_LIVE";
+    return err;
+  }
+
+  async function stopVolcMicCapture(engine, generation, reason) {
+    if (!engine) return { ok: true, error: null };
+    let firstError = null;
+    try {
+      await engine.stopAudioCapture();
+    } catch (err) {
+      firstError = err;
+      Debug.warn("volc_mic_stop_error", "Volc microphone stop failed", volcMicContext(engine, generation, Object.assign({ reason }, mediaErrorDetails(err))));
+    }
+
+    // stopAudioCapture normally clears the SDK's local-track sentinel before
+    // publishing the mute. If it rejected earlier, force the browser track to
+    // stop and ask the SDK to clear its sentinel once more.
+    let track = currentVolcAudioTrack(engine);
+    if (track && track.readyState === "live") {
+      try { track.enabled = false; track.stop(); } catch {}
+      try { await engine.stopAudioCapture(); } catch (err) {
+        if (!firstError) firstError = err;
+        Debug.warn("volc_mic_stop_retry_error", "Volc microphone cleanup retry failed", volcMicContext(engine, generation, Object.assign({ reason }, mediaErrorDetails(err))));
+      }
+      track = currentVolcAudioTrack(engine);
+    }
+    return { ok: !track || track.readyState !== "live", error: firstError };
+  }
+
+  async function applyVolcMicRequest(req) {
+    const engine = state.volcEngine;
+    const generation = state.volcGeneration;
+    if (!isCurrentVolcEngine(engine, generation)) return { ok: false, stale: true };
+
+    if (!req.desired) {
+      const stopped = await stopVolcMicCapture(engine, generation, req.source);
+      if (!isCurrentVolcEngine(engine, generation)) return { ok: false, stale: true };
+      state.micOn = false;
+      state.volcMicLastError = stopped.ok ? null : stopped.error;
+      updateSelfRoster();
+      Debug.info("volc_mic_off", "Volc microphone stopped", volcMicContext(engine, generation, { source: req.source, cleanup_ok: stopped.ok }));
+      return { ok: true };
+    }
+
+    // If application state says the mic is off while Volc still owns a track,
+    // normalize to a clean stopped state before attempting capture again.
+    const existingTrack = currentVolcAudioTrack(engine);
+    if (state.micOn && existingTrack && existingTrack.readyState === "live" && !existingTrack.muted) {
+      state.volcMicLastError = null;
+      Debug.info("volc_mic_already_on", "Volc microphone was already healthy", volcMicContext(engine, generation, { source: req.source }));
+      return { ok: true };
+    }
+    if (existingTrack) {
+      Debug.warn("volc_mic_stale_capture", "Cleaning up a leftover Volc microphone track", volcMicContext(engine, generation, { source: req.source }));
+      await stopVolcMicCapture(engine, generation, "normalize_" + req.source);
+      if (!isCurrentVolcEngine(engine, generation)) return { ok: false, stale: true };
+    }
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      Debug.info("volc_mic_start", "Starting Volc microphone capture", volcMicContext(engine, generation, { source: req.source, attempt }));
       try {
-        if (on) await state.volcEngine.startAudioCapture(state.micDevice || undefined);
-        else await state.volcEngine.stopAudioCapture();
-        state.micOn = on;
+        await engine.startAudioCapture(state.micDevice || undefined);
+        if (!isCurrentVolcEngine(engine, generation)) return { ok: false, stale: true };
+        const track = currentVolcAudioTrack(engine);
+        if (!track || track.readyState !== "live") throw micTrackError("Volc returned without a live microphone track");
+        state.micOn = true;
+        state.volcMicLastError = null;
+        updateSelfRoster();
+        Debug.info("volc_mic_on", "Volc microphone capture started", volcMicContext(engine, generation, { source: req.source, attempt }));
+        return { ok: true };
       } catch (err) {
-        console.warn("[volc] mic toggle failed", err);
+        lastError = err;
+        Debug.warn("volc_mic_start_error", "Volc microphone start failed", volcMicContext(engine, generation, Object.assign({ source: req.source, attempt }, mediaErrorDetails(err))));
+        await stopVolcMicCapture(engine, generation, "rollback_" + req.source);
+        if (!isCurrentVolcEngine(engine, generation)) return { ok: false, stale: true };
+        if (req.seq !== state.micRequestSeq || !state.micDesired) return { ok: false, superseded: true };
+        if (attempt === 1 && retryableVolcMicError(err)) {
+          await new Promise(resolve => setTimeout(resolve, 180));
+          continue;
+        }
+        break;
+      }
+    }
+
+    if (!isCurrentVolcEngine(engine, generation)) return { ok: false, stale: true };
+    state.micOn = false;
+    state.volcMicLastError = lastError;
+    updateSelfRoster();
+    return { ok: false, error: lastError };
+  }
+
+  async function drainVolcMicRequests() {
+    let handled = -1;
+    while (state.micRequest && handled !== state.micRequest.seq) {
+      const req = Object.assign({}, state.micRequest);
+      handled = req.seq;
+      const result = await applyVolcMicRequest(req);
+      if (!result.ok && !result.stale && !result.superseded && req.seq === state.micRequestSeq) {
+        if (req.desired) state.micDesired = false;
+        if (req.showError !== false && result.error) mediaErrorToast("audio", result.error);
+        updateControls();
+      }
+    }
+  }
+
+  async function setMic(on, options = {}) {
+    state.micDesired = !!on;
+    if (!state.micDesired && state.micRecoveryTimer) {
+      clearTimeout(state.micRecoveryTimer);
+      state.micRecoveryTimer = null;
+    }
+    if (state.mode === "volc") {
+      state.micRequestSeq++;
+      state.micRequest = {
+        seq: state.micRequestSeq,
+        desired: state.micDesired,
+        source: options.source || "control",
+        showError: options.showError,
+      };
+      Debug.info("volc_mic_request", state.micDesired ? "Microphone requested on" : "Microphone requested off", volcMicContext(state.volcEngine, state.volcGeneration, { source: state.micRequest.source, request_seq: state.micRequestSeq }));
+      if (!state.micTransition) {
+        const runner = drainVolcMicRequests();
+        const wrapped = runner.finally(() => {
+          if (state.micTransition === wrapped) state.micTransition = null;
+          updateControls();
+        });
+        state.micTransition = wrapped;
+      }
+      updateControls();
+      return state.micTransition;
+    } else {
+      try {
+        let track = state.localStream?.getAudioTracks()[0];
+        if (on && !track) track = await acquireTrack("audio", state.micDevice);
+        if (track) track.enabled = on;
+        state.micOn = on && !!track;
+      } catch (err) {
         mediaErrorToast("audio", err);
+        state.micDesired = false;
         state.micOn = false;
       }
-    } else {
-      let track = state.localStream?.getAudioTracks()[0];
-      if (on && !track) {
-        try {
-          track = await acquireTrack("audio", state.micDevice);
-        } catch (err) {
-          mediaErrorToast("audio", err);
-          state.micOn = false;
-          updateSelfRoster();
-          return;
-        }
-      }
-      if (track) track.enabled = on;
-      state.micOn = on && !!track;
     }
     updateSelfRoster();
+  }
+
+  function scheduleVolcMicRecovery(reason, delay = 800) {
+    if (state.micRecoveryTimer) clearTimeout(state.micRecoveryTimer);
+    state.micRecoveryTimer = setTimeout(() => {
+      state.micRecoveryTimer = null;
+      if (state.mode !== "volc" || state.phase !== "inmeeting" || state.leaving
+          || !state.micDesired || document.visibilityState === "hidden") return;
+      const engine = state.volcEngine;
+      const generation = state.volcGeneration;
+      if (!isCurrentVolcEngine(engine, generation)) return;
+      const track = currentVolcAudioTrack(engine);
+      if (state.micOn && track && track.readyState === "live" && !track.muted) {
+        Debug.info("volc_mic_healthy", "Volc microphone recovered without intervention", volcMicContext(engine, generation, { reason }));
+        return;
+      }
+      Debug.warn("volc_mic_recovery", "Recovering interrupted Volc microphone", volcMicContext(engine, generation, { reason }));
+      setMic(true, { source: "recovery_" + reason });
+    }, delay);
   }
 
   async function setCam(on) {
@@ -1644,7 +1846,7 @@
     updateSelfRoster();
   }
 
-  $("micBtn").addEventListener("click", () => setMic(!state.micOn));
+  $("micBtn").addEventListener("click", () => setMic(!state.micDesired, { source: "button" }));
   $("camBtn").addEventListener("click", () => setCam(!state.camOn));
   $("shareBtn").addEventListener("click", () => state.sharing ? stopShare() : startShare());
   $("endBtn").addEventListener("click", leaveMeeting);
@@ -1667,6 +1869,11 @@
       state.leaving = true;
       try { state.ws && state.ws.send(JSON.stringify({ type: "leave" })); } catch {}
     }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (state.mode !== "volc" || state.phase !== "inmeeting") return;
+    Debug.info("meet_visibility", "Meeting visibility changed", volcMicContext(state.volcEngine, state.volcGeneration));
+    if (document.visibilityState === "visible" && state.micDesired) scheduleVolcMicRecovery("visible");
   });
 
   // ──────── Device pickers ────────
@@ -2009,6 +2216,7 @@
       }
     }
     state.micOn = state.micOn && state.localStream.getAudioTracks().length > 0;
+    state.micDesired = state.micOn;
     state.camOn = state.camOn && state.localStream.getVideoTracks().length > 0;
     if (!state.micOn && !state.camOn) {
       if (audioErr) mediaErrorToast("audio", audioErr);
@@ -2433,12 +2641,34 @@
     if (state.mainPid != null) reattachVolcCamera(state.mainPid, state.fillMode === "fill");
   }
 
-  async function volcStart(info) {
-    await loadScript(VOLC_SDK_SRC);
+  async function shutdownVolcEngine(engine, generation, reason) {
+    if (!engine) return;
+    Debug.info("volc_engine_shutdown", "Stopping replaced Volc engine", { engine_generation: generation, reason });
+    try { await engine.stopScreenCapture(); } catch {}
+    await stopVolcMicCapture(engine, generation, "engine_shutdown_" + reason);
+    try { await engine.stopVideoCapture(); } catch {}
+    try { await engine.leaveRoom(); } catch {}
+    try { if (window.VERTC) VERTC.destroyEngine(engine); } catch {}
+    Debug.info("volc_engine_stopped", "Stopped replaced Volc engine", { engine_generation: generation, reason });
+  }
+
+  async function volcStart(info, generation = ++state.volcGeneration, source = "join") {
+    if (!window.VERTC) await loadScript(VOLC_SDK_SRC);
+    if (generation !== state.volcGeneration || state.leaving) return;
     const engine = VERTC.createEngine(info.app_id);
+    if (generation !== state.volcGeneration || state.leaving) {
+      try { VERTC.destroyEngine(engine); } catch {}
+      return;
+    }
     state.volcEngine = engine;
+    Debug.info("volc_engine_start", "Created Volc engine", { engine_generation: generation, volc_user: info.user_id });
     // Defensive: only register events this SDK build actually exposes.
-    const on = (name, fn) => { const ev = VERTC.events && VERTC.events[name]; if (ev) engine.on(ev, fn); };
+    const on = (name, fn) => {
+      const ev = VERTC.events && VERTC.events[name];
+      if (ev) engine.on(ev, (...args) => {
+        if (isCurrentVolcEngine(engine, generation)) fn(...args);
+      });
+    };
 
     on("onUserPublishStream", (e) => {
       const pid = pidFromVolcUid(e.userId);
@@ -2464,11 +2694,27 @@
       if (t && t.vScreen) t.vScreen.innerHTML = "";
     });
     on("onTrackEnded", (e) => {
-      // Browser-level "Stop sharing" while we publish a screen stream.
-      if (state.sharing && e && (e.streamIndex === VERTC.StreamIndex.STREAM_INDEX_SCREEN
-          || /screen/i.test(String(e.trackKind || "")))) {
+      const kind = String((e && (e.kind || e.trackKind)) || "").toLowerCase();
+      const isScreen = !!(e && e.isScreen) || (e && e.streamIndex === VERTC.StreamIndex.STREAM_INDEX_SCREEN);
+      if (state.sharing && isScreen) {
         stopShare();
+      } else if (!isScreen && kind === "audio") {
+        Debug.warn("volc_mic_track_ended", "Volc microphone track ended", volcMicContext(engine, generation));
+        state.micOn = false;
+        updateSelfRoster();
+        if (state.micDesired) scheduleVolcMicRecovery("track_ended");
       }
+    });
+    on("onTrackMute", (e) => {
+      const kind = String((e && (e.kind || e.trackKind)) || "").toLowerCase();
+      if (kind !== "audio" || (e && e.isScreen)) return;
+      Debug.warn("volc_mic_track_muted", "Volc microphone track was muted by the browser", volcMicContext(engine, generation));
+      if (state.micDesired && document.visibilityState === "visible") scheduleVolcMicRecovery("track_muted");
+    });
+    on("onTrackUnmute", (e) => {
+      const kind = String((e && (e.kind || e.trackKind)) || "").toLowerCase();
+      if (kind !== "audio" || (e && e.isScreen)) return;
+      Debug.info("volc_mic_track_unmuted", "Volc microphone track resumed", volcMicContext(engine, generation));
     });
     on("onAutoplayFailed", () => {
       toast("Click anywhere to enable audio", "warn");
@@ -2477,6 +2723,7 @@
     });
     on("onError", (e) => {
       console.error("[volc] engine error", e);
+      Debug.error("volc_engine_error", "Volc engine error", Object.assign({ engine_generation: generation }, mediaErrorDetails(e)));
     });
     // Speaking indicator: the SDK reports capture/playback volumes
     // (linearVolume 0..255); the shared hold/threshold logic does the rest.
@@ -2496,11 +2743,22 @@
       });
     });
 
-    await engine.joinRoom(info.token, info.room_id, { userId: info.user_id }, {
-      isAutoPublish: true,
-      isAutoSubscribeAudio: true,
-      isAutoSubscribeVideo: true,
-    });
+    try {
+      await engine.joinRoom(info.token, info.room_id, { userId: info.user_id }, {
+        isAutoPublish: true,
+        isAutoSubscribeAudio: true,
+        isAutoSubscribeVideo: true,
+      });
+    } catch (err) {
+      if (state.volcEngine === engine) state.volcEngine = null;
+      if (state.volcGeneration === generation) state.volcGeneration++;
+      await shutdownVolcEngine(engine, generation, "join_failed");
+      throw err;
+    }
+    if (!isCurrentVolcEngine(engine, generation)) {
+      await shutdownVolcEngine(engine, generation, "stale_after_join");
+      return;
+    }
 
     try { engine.enableAudioPropertiesReport({ interval: SPEAK_TICK_MS }); } catch {}
     startSpeakTimer(); // volc has no meters; the timer just decays the stroke
@@ -2512,14 +2770,17 @@
     // Release the pre-join preview only now (it stayed live through the join
     // handshake), just before the SDK opens the same devices.
     stopGatePreview();
+    const wantMic = state.micDesired;
+    state.micOn = false;
+    updateSelfRoster();
     let micErr, camErr;
-    if (state.micOn) {
-      try { await engine.startAudioCapture(state.micDevice || undefined); }
-      catch (err) { micErr = err; console.warn("[volc] mic", err && err.name || err); state.micOn = false; }
+    if (wantMic) {
+      await setMic(true, { source, showError: false });
+      micErr = state.volcMicLastError;
     }
     if (state.camOn) {
       try { await engine.startVideoCapture(state.camDevice || undefined); attachVolcLocalMain(); }
-      catch (err) { camErr = err; console.warn("[volc] cam", err && err.name || err); state.camOn = false; }
+      catch (err) { camErr = err; console.warn("[volc] cam", mediaErrorDetails(err)); state.camOn = false; }
     }
     // Re-assert the saved quality tier now that capture is running: some SDK
     // builds only latch the encoder config once a capture stream exists, so an
@@ -2554,29 +2815,28 @@
   }
 
   // Re-establishes media after a control-plane reconnect. Our pid changed, so
-  // peer relationships must be rebuilt — but local capture is preserved, so
-  // the browser never re-prompts for the mic/camera.
-  function reconnectMedia() {
+  // peer relationships must be rebuilt. Volc needs a new engine/user id; tear
+  // the old one down completely before the replacement can touch the devices.
+  async function reconnectMedia() {
     if (state.mode === "volc") {
-      // The volc user id is "p<pid>"; the new pid means a fresh room join with
-      // the new token. Devices stay permitted, so there's no second prompt.
-      const eng = state.volcEngine;
+      const engine = state.volcEngine;
+      const oldGeneration = state.volcGeneration;
+      const generation = oldGeneration + 1;
+      const transition = state.micTransition;
+      state.volcGeneration = generation;
       state.volcEngine = null;
+      state.micOn = false;
+      state.micRequestSeq++;
       state.sharing = false;
       state.volcShareMedia = null;
-      if (eng) {
-        (async () => {
-          try { await eng.stopScreenCapture(); } catch {}
-          try { await eng.stopAudioCapture(); } catch {}
-          try { await eng.stopVideoCapture(); } catch {}
-          try { await eng.leaveRoom(); } catch {}
-          try { VERTC.destroyEngine(eng); } catch {}
-        })();
-      }
-      volcStart(state.volc).catch(err => {
-        console.error("[meet] volc reconnect failed", err);
-        toast("Couldn't restore audio/video", "err");
-      });
+      if (state.micRecoveryTimer) { clearTimeout(state.micRecoveryTimer); state.micRecoveryTimer = null; }
+      updateSelfRoster();
+
+      await shutdownVolcEngine(engine, oldGeneration, "control_reconnect");
+      if (transition) { try { await transition; } catch {} }
+      if (state.volcGeneration !== generation || state.leaving || state.phase !== "inmeeting") return;
+      state.micRequest = null;
+      await volcStart(state.volc, generation, "reconnect");
     } else {
       // Far-side peers were keyed to our old pid; drop and rebuild the mesh.
       for (const [pid] of state.pcs) meshDropPeer(pid);
@@ -2602,17 +2862,14 @@
     stopShareMix();
     if (state.localStream) { try { state.localStream.getTracks().forEach(t => t.stop()); } catch {} }
     state.localStream = null;
-    if (state.volcEngine) {
-      const eng = state.volcEngine;
-      state.volcEngine = null;
-      (async () => {
-        try { await eng.stopScreenCapture(); } catch {}
-        try { await eng.stopAudioCapture(); } catch {}
-        try { await eng.stopVideoCapture(); } catch {}
-        try { await eng.leaveRoom(); } catch {}
-        try { VERTC.destroyEngine(eng); } catch {}
-      })();
-    }
+    if (state.micRecoveryTimer) { clearTimeout(state.micRecoveryTimer); state.micRecoveryTimer = null; }
+    state.micRequestSeq++;
+    state.micRequest = null;
+    const engine = state.volcEngine;
+    const generation = state.volcGeneration;
+    state.volcGeneration++;
+    state.volcEngine = null;
+    if (engine) shutdownVolcEngine(engine, generation, "teardown").catch(() => {});
     state.sharing = false;
     state.volcShareMedia = null;
   }
@@ -2828,12 +3085,17 @@
     };
     $("gateNote").textContent = gateNoteFor();
     const syncGate = () => {
-      $("gateMic").classList.toggle("off", !state.micOn);
+      $("gateMic").classList.toggle("off", !state.micDesired);
       $("gateCam").classList.toggle("off", !state.camOn);
-      $("gateMic").innerHTML = state.micOn ? ICONS.mic : ICONS.micOff;
+      $("gateMic").innerHTML = state.micDesired ? ICONS.mic : ICONS.micOff;
       $("gateCam").innerHTML = state.camOn ? ICONS.cam : ICONS.camOff;
     };
-    $("gateMic").addEventListener("click", () => { state.micOn = !state.micOn; syncGate(); syncGatePreview(); });
+    $("gateMic").addEventListener("click", () => {
+      state.micDesired = !state.micDesired;
+      state.micOn = state.micDesired;
+      syncGate();
+      syncGatePreview();
+    });
     $("gateCam").addEventListener("click", () => { state.camOn = !state.camOn; syncGate(); syncGatePreview(); });
     syncGate();
     $("gateMicSel").addEventListener("change", () => { state.micDevice = $("gateMicSel").value || null; startGatePreview(); });
