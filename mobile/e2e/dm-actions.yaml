@@ -1,0 +1,61 @@
+appId: com.alexanderjia.messages
+---
+# DM row long-press actions: pin toggle, read/unread toggle, delete option.
+# State-agnostic: flips whichever direction is offered, verifies via the
+# sheet's own labels (header assertions can't scope to one conversation).
+- runFlow: subflows/login.yaml
+- longPressOn: "Conversation with Bob.*"
+- assertVisible: ".*pin conversation.*"
+- assertVisible: "Mark as (un)?read"
+- assertVisible: "Delete for me"
+- assertVisible: "Cancel"
+- runFlow:
+    when:
+      visible: "Pin conversation"
+    commands:
+      - tapOn: "Pin conversation"
+      - longPressOn: "Conversation with Bob.*"
+      - assertVisible: "Unpin conversation"
+      - tapOn: "Unpin conversation"
+      - longPressOn: "Conversation with Bob.*"
+      - assertVisible: "Pin conversation"
+      - tapOn: "Pin conversation"
+      - longPressOn: "Conversation with Bob.*"
+      - assertVisible: "Unpin conversation"
+      - tapOn: "Cancel"
+- runFlow:
+    when:
+      visible: "Unpin conversation"
+    commands:
+      - tapOn: "Unpin conversation"
+      - longPressOn: "Conversation with Bob.*"
+      - assertVisible: "Pin conversation"
+      - tapOn: "Pin conversation"
+      - longPressOn: "Conversation with Bob.*"
+      - assertVisible: "Unpin conversation"
+      - tapOn: "Cancel"
+# Read/unread toggle: the unread dot merges into the row's a11y label, so
+# "Conversation with Bob, unread" verifies Bob specifically.
+- longPressOn: "Conversation with Bob.*"
+- runFlow:
+    when:
+      visible: "Mark as unread"
+    commands:
+      - tapOn: "Mark as unread"
+      - assertVisible: "Conversation with Bob, unread"
+      - longPressOn: "Conversation with Bob, unread"
+      - assertVisible: "Mark as read"
+      - tapOn: "Mark as read"
+      - assertNotVisible: "Conversation with Bob, unread"
+- runFlow:
+    when:
+      visible: "Mark as read"
+    commands:
+      - tapOn: "Mark as read"
+      - longPressOn: "Conversation with Bob.*"
+      - assertVisible: "Mark as unread"
+      - tapOn: "Mark as unread"
+      - assertVisible: "Conversation with Bob, unread"
+      - longPressOn: "Conversation with Bob, unread"
+      - tapOn: "Mark as read"
+      - assertNotVisible: "Conversation with Bob, unread"

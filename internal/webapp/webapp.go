@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -20,6 +21,9 @@ import (
 type Server struct {
 	indexHTML string
 	loginHTML string
+	// spaHTML is the built React client (web/dist/index.html). Empty when the
+	// client hasn't been built — the legacy static frontend is served then.
+	spaHTML string
 }
 
 // NewEngine builds the fully wired Gin engine for the user app.
@@ -27,6 +31,7 @@ func NewEngine() *gin.Engine {
 	s := &Server{
 		indexHTML: loadHTML("index.html"),
 		loginHTML: loadHTML("login.html"),
+		spaHTML:   loadHTMLOptional(filepath.Join("web", "dist", "index.html")),
 	}
 
 	r := gin.New()
@@ -50,6 +55,10 @@ func NewEngine() *gin.Engine {
 	if dir := filepath.Join(db.BaseDir, "static"); isDir(dir) {
 		mountStatic(r, "/static", dir)
 	}
+	// The built React client's hashed bundles (Vite emits web/dist/assets/).
+	if s.spaHTML != "" {
+		mountStatic(r, "/assets", filepath.Join(db.BaseDir, "web", "dist", "assets"))
+	}
 
 	// Route modules, grouped by concern (mirrors the Python routers).
 	s.registerPages(r)
@@ -63,6 +72,7 @@ func NewEngine() *gin.Engine {
 	registerDMStateRoutes(r)
 	registerHistoryRoutes(r)
 	registerLinkPreviewRoutes(r)
+	registerTranscribeRoutes(r)
 	registerWS(r)
 
 	// Clients stream real-time actions to the centralized debug console (which
@@ -72,14 +82,31 @@ func NewEngine() *gin.Engine {
 	return r
 }
 
-// requireUser resolves the user-scope session cookie or aborts with 401.
+// requireUser resolves the user-scope session or aborts with 401. The browser
+// client authenticates with the HttpOnly session cookie; the React Native
+// client (which has no cookie jar) sends the same session token as
+// `Authorization: Bearer <token>` — /api/login returns it as session_token.
 func requireUser(c *gin.Context) (*db.User, bool) {
-	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
+	user := auth.ResolveSession(requestSessionToken(c), "user")
 	if user == nil {
 		httpx.Error(c, http.StatusUnauthorized, "not authenticated")
 		return nil, false
 	}
 	return user, true
+}
+
+// requestSessionToken extracts the session token from the cookie, an
+// Authorization: Bearer header, or a ?token= query param (the last is how the
+// native client authenticates the WebSocket upgrade, which can't set headers
+// on every platform).
+func requestSessionToken(c *gin.Context) string {
+	if tok := httpx.Cookie(c, auth.UserCookie); tok != "" {
+		return tok
+	}
+	if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimSpace(h[len("Bearer "):])
+	}
+	return c.Query("token")
 }
 
 // ---------- static helpers ----------
@@ -114,6 +141,16 @@ func loadHTML(name string) string {
 	b, err := os.ReadFile(filepath.Join(db.BaseDir, name))
 	if err != nil {
 		return "<h1>" + name + " missing</h1>"
+	}
+	return string(b)
+}
+
+// loadHTMLOptional is loadHTML for assets that legitimately may not exist
+// (the built React client): missing files yield "" rather than an error page.
+func loadHTMLOptional(name string) string {
+	b, err := os.ReadFile(filepath.Join(db.BaseDir, name))
+	if err != nil {
+		return ""
 	}
 	return string(b)
 }

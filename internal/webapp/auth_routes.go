@@ -84,7 +84,9 @@ func handleLogin(c *gin.Context) {
 		return
 	}
 	httpx.SetSessionCookie(c, auth.UserCookie, token)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "user": runtime.UserPublic(user)})
+	// session_token lets cookie-less clients (the React Native app) authenticate
+	// REST calls and the /ws upgrade with `Authorization: Bearer` / `?token=`.
+	c.JSON(http.StatusOK, gin.H{"ok": true, "user": runtime.UserPublic(user), "session_token": token})
 }
 
 func handleLogout(c *gin.Context) {

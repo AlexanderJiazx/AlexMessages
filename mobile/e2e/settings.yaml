@@ -1,0 +1,21 @@
+appId: com.alexanderjia.messages
+---
+# Settings overlay: tabs render, profile fields present.
+- runFlow: subflows/login.yaml
+- tapOn: "Settings"
+- assertVisible: "Profile"
+- assertVisible: "Account"
+- assertVisible: "Notifications"
+- assertVisible: "Data"
+- assertVisible: "Display name"
+- assertVisible: "Bio"
+- tapOn: "Account"
+- assertVisible: "Change password"
+- assertVisible: "Log out"
+- assertVisible: "Delete account"
+- tapOn: "Notifications"
+- assertVisible: "Direct message alerts"
+- tapOn: "Data"
+- assertVisible: "Export my data"
+- tapOn: "Close"
+- assertVisible: "Messages"

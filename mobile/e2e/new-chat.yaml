@@ -1,0 +1,13 @@
+appId: com.alexanderjia.messages
+---
+# New-conversation sheet: compose button → username lookup → open.
+- runFlow: subflows/login.yaml
+- tapOn: "New conversation"
+- assertVisible: "Username"
+- tapOn: "Username"
+- inputText: "tester"
+- hideKeyboard
+- tapOn: "Open conversation"
+- assertVisible:
+    id: "composer-input"
+- assertVisible: "Open Test User's profile"

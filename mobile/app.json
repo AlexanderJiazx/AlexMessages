@@ -1,0 +1,72 @@
+{
+  "expo": {
+    "name": "Alex Messages",
+    "slug": "alex-messages",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "scheme": "alexmessages",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.alexanderjia.messages",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
+    },
+    "android": {
+      "package": "com.alexanderjia.messages",
+      "adaptiveIcon": {
+        "backgroundColor": "#F1EFE6",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "extra": {
+      "defaultServerUrl": "https://messages.alexanderjia.com"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "enableSceneSupport": true
+          }
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Alex Messages to access your microphone for voice messages and dictation."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Alex Messages to access your photos to send images and videos."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "sounds": []
+        }
+      ],
+      "expo-image",
+      "expo-video",
+      "expo-secure-store",
+      "expo-web-browser",
+      "expo-sharing",
+      "expo-build-properties"
+    ]
+  }
+}

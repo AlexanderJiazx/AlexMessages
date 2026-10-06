@@ -14,7 +14,6 @@ import (
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
 	"alexmessage/internal/debuglog"
-	"alexmessage/internal/httpx"
 	"alexmessage/internal/push"
 	"alexmessage/internal/runtime"
 )
@@ -81,9 +80,9 @@ type broadcastMessage struct {
 // ---------- handler ----------
 
 func handleWS(c *gin.Context) {
-	// Cookie auth is read before the upgrade; we still complete the handshake
-	// so the client receives close(4401) and redirects to /login.
-	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
+	// Cookie or bearer auth is read before the upgrade; we still complete the
+	// handshake so the client receives close(4401) and redirects to /login.
+	user := auth.ResolveSession(requestSessionToken(c), "user")
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {

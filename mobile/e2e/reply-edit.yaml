@@ -1,0 +1,67 @@
+appId: com.alexanderjia.messages
+---
+# Reply and edit flows on a live DM. Unique per-run texts make every
+# selector match exactly one (the just-sent) message — immune to history
+# accumulated by earlier runs.
+- evalScript: ${output.TARGET = 'e2e target ' + Date.now()}
+- evalScript: ${output.REPLY = 'e2e reply ' + Date.now()}
+- evalScript: ${output.EDITED = 'e2e edited ' + Date.now()}
+- runFlow: subflows/login.yaml
+- tapOn: "Conversation with Bob.*"
+
+# Seed a fresh message to act on (newest = always visible at bottom).
+- tapOn:
+    id: "composer-input"
+- inputText: "${output.TARGET}"
+# iOS keeps the soft keyboard up, covering the newest bubble — dismiss it
+# only when the keyboard is actually open (Android's injected text never
+# opens it, and a stray dismiss would pop the screen instead).
+- runFlow:
+    when:
+      visible: "return"
+    commands:
+      - hideKeyboard
+- tapOn: "Send"
+- runFlow:
+    when:
+      visible: "return"
+    commands:
+      - hideKeyboard
+- assertVisible: "${output.TARGET}"
+
+# --- Reply ---
+- longPressOn: "${output.TARGET}"
+- tapOn: "Reply"
+- assertVisible: ".*Replying to.*"
+- tapOn:
+    id: "composer-input"
+- inputText: "${output.REPLY}"
+- runFlow:
+    when:
+      visible: "return"
+    commands:
+      - hideKeyboard
+- tapOn: "Send"
+- runFlow:
+    when:
+      visible: "return"
+    commands:
+      - hideKeyboard
+- assertVisible: ".*${output.REPLY}.*"
+- assertVisible: ".*replying to.*"
+
+# --- Edit own message ---
+- longPressOn: ".*${output.REPLY}.*"
+- tapOn: "Edit"
+- assertVisible: ".*Edit message.*"
+- tapOn:
+    id: "edit-input"
+- eraseText
+- inputText: "${output.EDITED}"
+- runFlow:
+    when:
+      visible: "return"
+    commands:
+      - hideKeyboard
+- tapOn: "Save"
+- assertVisible: ".*${output.EDITED}.*\\(edited\\).*"

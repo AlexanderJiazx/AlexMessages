@@ -1,0 +1,11 @@
+appId: com.alexanderjia.messages
+---
+# Attach sheet: + button → iOS action sheet with picker options.
+- runFlow: subflows/login.yaml
+- tapOn: "Conversation with Bob.*"
+- tapOn: "Attach"
+- assertVisible: "Photo Library"
+- assertVisible: "Files"
+- tapOn: "Cancel"
+- assertVisible:
+    id: "composer-input"

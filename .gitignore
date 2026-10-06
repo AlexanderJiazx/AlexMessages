@@ -14,3 +14,16 @@ CLAUDE.local.md
 # Go
 /bin/
 *.test
+
+# JS/TS clients
+node_modules/
+web/dist/
+web/e2e/.results/
+web/test-results/
+web/playwright-report/
+mobile/report.xml
+mobile/.expo/
+mobile/dist/
+mobile/ios/
+mobile/android/
+mobile/.kotlin/

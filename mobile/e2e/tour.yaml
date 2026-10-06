@@ -1,0 +1,19 @@
+appId: com.alexanderjia.messages
+---
+# Visual tour — captures each major screen for screenshot verification.
+- runFlow: subflows/login.yaml
+- takeScreenshot: tour-dmlist
+- tapOn: "New conversation"
+- takeScreenshot: tour-newchat
+- tapOn: "Close"
+- tapOn: "Conversation with Bob.*"
+- takeScreenshot: tour-conversation
+- tapOn: "Attach"
+- takeScreenshot: tour-attach
+- tapOn: "Cancel"
+- tapOn: "Dictate"
+- takeScreenshot: tour-dictation
+- tapOn: "Cancel recording"
+- tapOn: "Open Bob's profile"
+- takeScreenshot: tour-profile
+- tapOn: "Close"

@@ -1,0 +1,13 @@
+appId: com.alexanderjia.messages
+---
+# Dictation bar: mic → ChatGPT-style bar with waveform + controls → cancel.
+- runFlow: subflows/login.yaml
+- tapOn: "Conversation with Bob.*"
+- tapOn: "Dictate"
+# The bar shows: cancel (X), live waveform, timer, stop, send-audio, send-text.
+- assertVisible: "Cancel recording"
+- assertVisible: "Stop and transcribe"
+- assertVisible: "Send as voice message"
+- assertVisible: "Transcribe and send"
+- tapOn: "Cancel recording"
+- assertVisible: "Dictate"

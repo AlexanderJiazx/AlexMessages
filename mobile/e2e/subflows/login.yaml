@@ -1,0 +1,30 @@
+appId: com.alexanderjia.messages
+---
+# Sign-in flow. Metro must be started with EXPO_PUBLIC_AM_SERVER pointing at
+# the dev backend (e.g. http://localhost:8765). Dev accounts share the
+# password "password123" (alice/bob/testuser1/tester).
+- clearState
+- launchApp
+# Host chip shows the normalized URL (10.0.2.2 on Android emulators);
+# the first render can be slow while Metro serves the bundle.
+- extendedWaitUntil:
+    visible: "Server (localhost|10\\.0\\.2\\.2):8765"
+    timeout: 30000
+- tapOn:
+    id: "login-username"
+- inputText: "alice"
+- tapOn:
+    id: "login-password"
+- inputText: "password123"
+- hideKeyboard
+# Either the explicit tap submits, or the keyboard's return key already did.
+- tapOn:
+    text: "Sign in"
+    index: 1
+    optional: true
+# iOS may prompt to save the password to iCloud Keychain.
+- tapOn:
+    text: "Not Now"
+    optional: true
+- assertVisible: "Messages"
+- assertVisible: "Conversation with Bob.*"

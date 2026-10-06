@@ -1,0 +1,25 @@
+appId: com.alexanderjia.messages
+---
+# Conversation flow: open the Bob DM, send a text, verify delivery + history.
+- runFlow: subflows/login.yaml
+- tapOn: "Conversation with Bob.*"
+- assertVisible: "Open Bob's profile"
+- assertVisible:
+    id: "composer-input"
+- tapOn:
+    id: "composer-input"
+- inputText: "Maestro e2e hello"
+- tapOn: "Send"
+# iOS keeps the soft keyboard up after send, covering the newest bubble —
+# dismiss it only when the keyboard is actually open (Android's inputText
+# never opens it, and a stray dismiss would pop the screen instead).
+- runFlow:
+    when:
+      visible: "return"
+    commands:
+      - hideKeyboard
+- assertVisible: "Maestro e2e hello"
+# Optimistic send reconciles to Delivered once the server echoes client_id.
+- extendedWaitUntil:
+    visible: "Delivered"
+    timeout: 15000
