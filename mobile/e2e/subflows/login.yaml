@@ -19,8 +19,7 @@ appId: com.alexanderjia.messages
 - hideKeyboard
 # Either the explicit tap submits, or the keyboard's return key already did.
 - tapOn:
-    text: "Sign in"
-    index: 1
+    id: "login-submit"
     optional: true
 # iOS may prompt to save the password to iCloud Keychain.
 - tapOn:

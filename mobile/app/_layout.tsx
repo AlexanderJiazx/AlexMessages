@@ -32,8 +32,10 @@ export default function RootLayout() {
           >
             <Stack.Screen name="index" />
             <Stack.Screen name="login" />
-            <Stack.Screen name="chat" />
-            <Stack.Screen name="conversation" />
+            {/* We draw our own scroll-edge fades; UIKit's automatic effect
+                misplaces itself on the inverted message list. */}
+            <Stack.Screen name="chat" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
+            <Stack.Screen name="conversation" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
             <Stack.Screen
               name="settings"
               options={{ presentation: "modal" }}
@@ -53,6 +55,13 @@ export default function RootLayout() {
     </GestureHandlerRootView>
   );
 }
+
+const NO_EDGE_EFFECTS = {
+  top: "hidden",
+  bottom: "hidden",
+  left: "hidden",
+  right: "hidden",
+} as const;
 
 const styles = StyleSheet.create({
   root: { flex: 1 },

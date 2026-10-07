@@ -18,6 +18,7 @@ import React, {
 } from "react";
 import { AppState, Platform } from "react-native";
 import * as SecureStore from "expo-secure-store";
+import { File as FsFile } from "expo-file-system";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import {
@@ -28,6 +29,10 @@ import {
   type ToastEvent,
 } from "@alexmessages/shared";
 import { presentMessageNotification } from "./notify";
+
+/** Upload part reader for Expo's fetch (see `ApiClientOptions.readFile`). */
+const readLocalFile =
+  Platform.OS === "web" ? undefined : (uri: string) => new FsFile(uri).bytes();
 
 const TOKEN_KEY = "am_token";
 const SERVER_KEY = "am_server_url";
@@ -131,7 +136,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [phase, setPhase] = useState<Phase>("boot");
   const [serverUrl, setServerUrlState] = useState(DEFAULT_SERVER);
 
-  const apiRef = useRef(new ApiClient({ baseUrl: DEFAULT_SERVER }));
+  const apiRef = useRef(new ApiClient({ baseUrl: DEFAULT_SERVER, readFile: readLocalFile }));
   const logoutRef = useRef<() => Promise<void>>(async () => {});
   const storeRef = useRef<ChatStore | null>(null);
   if (!storeRef.current) {

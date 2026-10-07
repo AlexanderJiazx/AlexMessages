@@ -1,43 +1,59 @@
-import React, { useEffect, useRef, useState } from "react";
-import {
-  ActivityIndicator,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-  type ViewStyle,
-} from "react-native";
-import { GlassView } from "expo-glass-effect";
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import * as Haptics from "expo-haptics";
+import { Host, Image as SFImage } from "@expo/ui/swift-ui";
+import type { SFSymbol } from "sf-symbols-typescript";
 import { toast, useSession } from "../session";
 import { useVoiceRecorder } from "../audio";
-import { colors, glassSupported, radius } from "../theme";
-import { Icon } from "./Icon";
+import { colors, glassSupported, type } from "../theme";
+import { Icon, type IconName } from "./Icon";
 
-const WAVE_BARS = 28;
+export type VoicePhase = "recording" | "review";
 
-type Phase = "recording" | "busy";
+export interface VoicePanelHandle {
+  /** Throw the recording away (the composer's X). */
+  discard(): void;
+}
+
+const BAR_W = 3;
+const BAR_GAP = 2;
+const REC = colors.danger;
+
+interface Clip {
+  uri: string;
+  mime: string;
+  ext: string;
+  millis: number;
+}
 
 /**
- * ChatGPT-style dictation bar: cancel · live waveform + timer · stop
- * (transcribe into the composer) · send-audio (voice message) · send
- * (transcribe and send immediately). Liquid glass on iOS 26+, flat on
- * Android — same layout, same sage send button as the web.
+ * The voice-message contents of the composer pill, iOS 26 Messages-style.
+ * The composer owns the geometry (the pill growing over the "+", the X
+ * peeling back out); this panel owns the recorder and crossfades between
+ *   recording — live waveform · timer · stop
+ *   review    — play · recorded waveform · duration · transcribe · send
  */
-export function DictationBar({
-  onExit,
-  onTranscribed,
-}: {
-  onExit: () => void;
-  onTranscribed: (text: string) => void;
-}) {
+export const VoicePanel = forwardRef<
+  VoicePanelHandle,
+  {
+    phase: VoicePhase;
+    onPhase: (p: VoicePhase) => void;
+    onExit: () => void;
+    onTranscribed: (text: string) => void;
+  }
+>(function VoicePanel({ phase, onPhase, onExit, onTranscribed }, ref) {
   const { api, store } = useSession();
   const rec = useVoiceRecorder();
-  const [phase, setPhase] = useState<Phase>("recording");
-  const [busyLabel, setBusyLabel] = useState("");
-  const levelsRef = useRef<number[]>(new Array(WAVE_BARS).fill(0.08));
+  const recRef = useRef(rec);
+  recRef.current = rec;
+  const samples = useRef<number[]>([]);
   const [, bump] = useState(0);
+  const [clip, setClip] = useState<Clip | null>(null);
+  const [busy, setBusy] = useState<"send" | "transcribe" | null>(null);
+  const player = useAudioPlayer(null);
+  const status = useAudioPlayerStatus(player);
 
   useEffect(() => {
     void rec.start().then((ok) => {
@@ -46,243 +62,345 @@ export function DictationBar({
         onExit();
       }
     });
+    // Leaving the conversation mid-recording must release the mic.
+    return () => void recRef.current.cancel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Shift the newest metering sample into the scrolling waveform.
+  // Each metering sample becomes one waveform bar.
   useEffect(() => {
     if (!rec.isRecording) return;
-    levelsRef.current = [...levelsRef.current.slice(1), Math.max(0.06, rec.level)];
+    samples.current.push(Math.max(0.04, rec.level));
     bump((x) => x + 1);
   }, [rec.level, rec.isRecording]);
 
-  const busy = (label: string) => {
-    setPhase("busy");
-    setBusyLabel(label);
-  };
+  useEffect(() => {
+    if (status.didJustFinish) {
+      player.pause();
+      void player.seekTo(0);
+    }
+  }, [status.didJustFinish, player]);
 
-  const finishStop = async (): Promise<{ uri: string; mime: string; ext: string } | null> => {
-    const clip = await rec.stop();
-    if (!clip) {
+  useImperativeHandle(ref, () => ({
+    discard() {
+      player.pause();
+      void rec.cancel();
+      onExit();
+    },
+  }));
+
+  const stop = async () => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    const millis = rec.durationMillis;
+    const c = await rec.stop();
+    if (!c) {
       toast("Recording too short", true);
-      setPhase("recording");
-      return null;
+      onExit();
+      return;
     }
-    return clip;
+    player.replace({ uri: c.uri });
+    setClip({ ...c, millis });
+    onPhase("review");
   };
 
-  const doCancel = async () => {
-    await rec.cancel();
-    onExit();
+  const togglePlay = () => {
+    if (status.playing) player.pause();
+    else player.play();
   };
 
-  const doTranscribe = async () => {
-    busy("Transcribing…");
-    const clip = await finishStop();
+  const send = async () => {
     if (!clip) return;
-    try {
-      const res = await api.transcribe({
-        uri: clip.uri,
-        name: `dictation.${clip.ext}`,
-        type: clip.mime,
-      });
-      const t = (res.text || "").trim();
-      if (t) onTranscribed(t);
-      else toast("Nothing heard — try again", true);
-    } catch {
-      toast("Transcription failed", true);
-    }
-    onExit();
-  };
-
-  const doTranscribeAndSend = async () => {
-    busy("Transcribing…");
-    const clip = await finishStop();
-    if (!clip) return;
-    try {
-      const res = await api.transcribe({
-        uri: clip.uri,
-        name: `dictation.${clip.ext}`,
-        type: clip.mime,
-      });
-      const t = (res.text || "").trim();
-      if (t) store.sendMessage(t);
-      else toast("Nothing heard — try again", true);
-    } catch {
-      toast("Transcription failed", true);
-    }
-    onExit();
-  };
-
-  const doSendAudio = async () => {
-    busy("Sending…");
-    const clip = await finishStop();
-    if (!clip) return;
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    player.pause();
+    setBusy("send");
     const name = `voice-message.${clip.ext}`;
-    const ok = await store.uploadAttachment(
-      { uri: clip.uri, name, type: clip.mime },
-      name
-    );
-    if (ok) store.sendMessage("");
+    const ok = await store.uploadAttachment({ uri: clip.uri, name, type: clip.mime }, name);
+    if (!ok) {
+      setBusy(null);
+      return;
+    }
+    store.sendMessage("");
     onExit();
   };
 
-  const secs = Math.floor(rec.durationMillis / 1000);
-  const timer = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+  const transcribe = async () => {
+    if (!clip) return;
+    player.pause();
+    setBusy("transcribe");
+    try {
+      const res = await api.transcribe({ uri: clip.uri, name: `dictation.${clip.ext}`, type: clip.mime });
+      const t = (res.text || "").trim();
+      if (!t) {
+        toast("Nothing heard — try again", true);
+        setBusy(null);
+        return;
+      }
+      onTranscribed(t);
+      onExit();
+    } catch {
+      toast("Transcription failed", true);
+      setBusy(null);
+    }
+  };
 
-  const controls = (
-    <>
-      <BarButton
-        icon="close"
-        label="Cancel recording"
-        onPress={() => void doCancel()}
-        disabled={phase === "busy"}
-      />
-      <View style={styles.waveWrap}>
-        {phase === "busy" ? (
-          <View style={styles.busyRow}>
-            <ActivityIndicator size="small" color={colors.sageDeep} />
-            <Text style={styles.timer}>{busyLabel}</Text>
-          </View>
-        ) : (
-          <>
-            <View style={styles.wave}>
-              {levelsRef.current.map((lv, i) => (
-                <View
-                  key={i}
-                  style={[
-                    styles.waveBar,
-                    { height: Math.max(3, Math.round(lv * 26)) },
-                  ]}
-                />
-              ))}
-            </View>
-            <Text style={styles.timer}>{timer}</Text>
-          </>
-        )}
-      </View>
-      <BarButton
-        icon="stop"
-        label="Stop and transcribe"
-        onPress={() => void doTranscribe()}
-        disabled={phase === "busy"}
-      />
-      <BarButton
-        icon="musical-notes"
-        label="Send as voice message"
-        onPress={() => {
-          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          void doSendAudio();
-        }}
-        disabled={phase === "busy"}
-      />
-      <BarButton
-        icon="arrow-up"
-        label="Transcribe and send"
-        primary
-        onPress={() => void doTranscribeAndSend()}
-        disabled={phase === "busy"}
-      />
-    </>
-  );
-
-  if (glassSupported) {
+  if (phase === "recording" || !clip) {
     return (
-      <GlassView style={styles.bar} glassEffectStyle="regular" isInteractive>
-        {controls}
-      </GlassView>
+      <Animated.View
+        key="recording"
+        entering={FadeIn.duration(220)}
+        exiting={FadeOut.duration(120)}
+        style={styles.row}
+      >
+        <View style={styles.recWave}>
+          <Waveform samples={samples.current} live color={REC} />
+        </View>
+        <Text style={[styles.time, { color: REC }]}>{fmtClock(rec.durationMillis)}</Text>
+        <Pressable
+          onPress={() => void stop()}
+          accessibilityLabel="Stop recording"
+          accessibilityRole="button"
+          hitSlop={8}
+          style={({ pressed }) => [styles.stopBtn, pressed && styles.stopBtnPressed]}
+        >
+          <View style={styles.stopSquare} />
+        </Pressable>
+      </Animated.View>
     );
   }
-  return <View style={[styles.bar, styles.barFlat]}>{controls}</View>;
+
+  const progress = status.duration > 0 ? status.currentTime / status.duration : 0;
+  const shown = status.playing || status.currentTime > 0 ? status.currentTime * 1000 : clip.millis;
+  return (
+    <Animated.View key="review" entering={FadeIn.duration(200)} style={[styles.row, styles.reviewRow]}>
+      <RoundButton
+        label={status.playing ? "Pause voice message" : "Play voice message"}
+        onPress={togglePlay}
+        disabled={!!busy}
+      >
+        <Glyph sf={status.playing ? "pause.fill" : "play.fill"} ion={status.playing ? "pause" : "play"} size={15} />
+      </RoundButton>
+      <View style={styles.reviewWave}>
+        <Waveform samples={samples.current} progress={progress} color={colors.faint} played={colors.ink2} />
+      </View>
+      <View style={styles.durChip}>
+        <Text style={styles.durText}>{fmtClock(shown)}</Text>
+      </View>
+      <RoundButton label="Transcribe to text" onPress={() => void transcribe()} disabled={!!busy}>
+        {busy === "transcribe" ? (
+          <ActivityIndicator size="small" color={colors.ink2} />
+        ) : (
+          <Glyph sf="text.bubble" ion="chatbubble-ellipses-outline" size={16} />
+        )}
+      </RoundButton>
+      <Pressable
+        onPress={() => void send()}
+        disabled={!!busy}
+        accessibilityLabel="Send voice message"
+        accessibilityRole="button"
+        hitSlop={6}
+        style={({ pressed }) => [styles.sendBtn, pressed && { opacity: 0.8 }]}
+      >
+        {busy === "send" ? (
+          <ActivityIndicator size="small" color={colors.surface} />
+        ) : (
+          <Icon name="arrow-up" size={19} color={colors.surface} />
+        )}
+      </Pressable>
+    </Animated.View>
+  );
+});
+
+/**
+ * Bars sized to the available width. Live: the newest samples enter at the
+ * right and empty slots show as a dotted baseline. Review: the whole clip is
+ * bucketed to fit, tinted up to the playhead.
+ */
+function Waveform({
+  samples,
+  live,
+  progress = 0,
+  color,
+  played,
+}: {
+  samples: number[];
+  live?: boolean;
+  progress?: number;
+  color: string;
+  played?: string;
+}) {
+  const [w, setW] = useState(0);
+  const n = Math.max(0, Math.floor((w + BAR_GAP) / (BAR_W + BAR_GAP)));
+  let bars: (number | null)[];
+  if (live) {
+    const tail = samples.slice(-n);
+    bars = [...new Array<null>(n - tail.length).fill(null), ...tail];
+  } else {
+    const count = Math.min(n, Math.max(12, samples.length));
+    bars = [];
+    for (let i = 0; i < count; i++) {
+      const a = Math.floor((i * samples.length) / count);
+      const b = Math.max(a + 1, Math.floor(((i + 1) * samples.length) / count));
+      bars.push(Math.max(0.04, ...samples.slice(a, b)));
+    }
+  }
+  return (
+    <View style={styles.wave} onLayout={(e) => setW(e.nativeEvent.layout.width)}>
+      {bars.map((lv, i) => (
+        <View
+          key={i}
+          style={[
+            styles.bar,
+            lv == null
+              ? styles.dot
+              : { height: Math.max(3, Math.round(lv * 28)) },
+            { backgroundColor: played && i / bars.length < progress ? played : color },
+            lv == null && { opacity: 0.35 },
+          ]}
+        />
+      ))}
+    </View>
+  );
 }
 
-function BarButton({
-  icon,
+function RoundButton({
   label,
   onPress,
-  primary,
   disabled,
+  children,
 }: {
-  icon: React.ComponentProps<typeof Icon>["name"];
   label: string;
   onPress: () => void;
-  primary?: boolean;
   disabled?: boolean;
+  children: React.ReactNode;
 }) {
-  const style: ViewStyle[] = [styles.btn];
-  if (primary) style.push(styles.btnPrimary);
-  if (disabled) style.push({ opacity: 0.4 });
   return (
     <Pressable
-      style={style}
       onPress={onPress}
       disabled={disabled}
       accessibilityLabel={label}
       accessibilityRole="button"
       hitSlop={4}
+      style={({ pressed }) => [styles.roundBtn, (pressed || disabled) && { opacity: 0.6 }]}
     >
-      <Icon
-        name={icon}
-        size={primary ? 19 : 17}
-        color={primary ? colors.surface : colors.ink2}
-      />
+      {children}
     </Pressable>
   );
 }
 
+/** SF Symbol on iOS 26 (non-interactive, so the Pressable keeps the touch); Ionicons elsewhere. */
+export function Glyph({
+  sf,
+  ion,
+  size,
+  color = colors.ink2,
+}: {
+  sf: SFSymbol;
+  ion: IconName;
+  size: number;
+  color?: string;
+}) {
+  if (glassSupported) {
+    return (
+      <Host matchContents pointerEvents="none">
+        <SFImage systemName={sf} size={size} color={color} />
+      </Host>
+    );
+  }
+  return <Icon name={ion} size={size + 3} color={color} />;
+}
+
+function fmtClock(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
 const styles = StyleSheet.create({
-  bar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    borderRadius: radius.pill,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    minHeight: 50,
-  },
-  barFlat: {
-    backgroundColor: colors.surface,
-  },
-  btn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  btnPrimary: {
-    backgroundColor: colors.sage,
-  },
-  waveWrap: {
+  row: {
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 10,
+    paddingLeft: 20,
+    paddingRight: 13,
+  },
+  // Concentric with the 64pt capsule: each end control sits as far from the
+  // side as from the top/bottom (34pt play → 15, 30pt send → 17).
+  reviewRow: {
+    gap: 12,
+    paddingLeft: 15,
+    paddingRight: 17,
+  },
+  recWave: {
+    flex: 1,
+  },
+  reviewWave: {
+    flex: 1,
     paddingHorizontal: 4,
   },
   wave: {
-    flex: 1,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "flex-end",
-    gap: 2.5,
-    height: 28,
+    gap: BAR_GAP,
+    height: 30,
+    overflow: "hidden",
   },
-  waveBar: {
-    width: 3,
-    borderRadius: 2,
-    backgroundColor: colors.sage,
+  bar: {
+    width: BAR_W,
+    borderRadius: BAR_W / 2,
   },
-  busyRow: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
+  dot: {
+    height: 3,
   },
-  timer: {
-    fontSize: 13,
+  time: {
+    ...type.callout,
     fontVariant: ["tabular-nums"],
+    minWidth: 36,
+    textAlign: "right",
+  },
+  stopBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(196,72,63,0.12)",
+  },
+  stopBtnPressed: {
+    backgroundColor: "rgba(196,72,63,0.24)",
+  },
+  stopSquare: {
+    width: 13,
+    height: 13,
+    borderRadius: 3,
+    backgroundColor: REC,
+  },
+  roundBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(27,36,31,0.06)",
+  },
+  durChip: {
+    height: 28,
+    paddingHorizontal: 11,
+    borderRadius: 14,
+    justifyContent: "center",
+    backgroundColor: "rgba(27,36,31,0.06)",
+  },
+  durText: {
+    ...type.subhead,
     color: colors.ink2,
-    fontWeight: "600",
+    fontVariant: ["tabular-nums"],
+  },
+  sendBtn: {
+    width: 42,
+    height: 30,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.sage,
   },
 });

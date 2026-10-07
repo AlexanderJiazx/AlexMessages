@@ -1,7 +1,6 @@
 import React, { useCallback } from "react";
 import { StyleSheet, View } from "react-native";
 import { Redirect, useLocalSearchParams, useRouter } from "expo-router";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { isDM } from "@alexmessages/shared";
 import { useSession } from "../src/session";
 import { colors } from "../src/theme";
@@ -24,15 +23,16 @@ export default function ConversationScreen() {
   if (!channel || !isDM(channel)) return <Redirect href="/chat" />;
 
   return (
-    <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
+    <View style={styles.root}>
       <ConversationView
         channel={channel}
         showBack
+        fullBleed
         onBack={onBack}
         onOpenProfile={onOpenProfile}
       />
       <Toasts />
-    </SafeAreaView>
+    </View>
   );
 }
 

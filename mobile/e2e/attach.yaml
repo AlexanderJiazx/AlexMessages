@@ -6,6 +6,6 @@ appId: com.alexanderjia.messages
 - tapOn: "Attach"
 - assertVisible: "Photo Library"
 - assertVisible: "Files"
-- tapOn: "Cancel"
+- runFlow: subflows/dismiss-menu.yaml
 - assertVisible:
     id: "composer-input"

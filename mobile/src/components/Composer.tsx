@@ -1,37 +1,90 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
+  Keyboard,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
+import Animated, {
+  FadeIn,
+  FadeOut,
+  useAnimatedStyle,
+  useSharedValue,
+  withDelay,
+  withSpring,
+  withTiming,
+  type SharedValue,
+} from "react-native-reanimated";
+import { GlassContainer } from "expo-glass-effect";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
+import * as Haptics from "expo-haptics";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { Host, Image as SFImage } from "@expo/ui/swift-ui";
 import { fmtSize, nameFor, type Attachment } from "@alexmessages/shared";
 import { toast, useChatState, useSession } from "../session";
-import { colors, radius, shadow } from "../theme";
+import { colors, glassSupported, radius, type } from "../theme";
 import { Icon } from "./Icon";
-import { DictationBar } from "./DictationBar";
-import { showActionSheet } from "./ActionSheet";
+import { Glyph, VoicePanel, type VoicePanelHandle, type VoicePhase } from "./DictationBar";
+import { GlassSurface } from "./Glass";
+import { GlassMenuButton, type MenuAction } from "./NativeMenu";
+
+const PILL_MIN = 44;
+const PILL_VOICE = 64;
+/**
+ * Headroom the voice morph grows into. The composer reserves it as top
+ * padding that the pill swallows, so the dock's layout height never changes
+ * mid-morph; the host lifts the message list by the same amount on the UI
+ * thread (see `voiceTall`) instead of chasing late onLayout events.
+ */
+export const VOICE_LIFT = PILL_VOICE - PILL_MIN;
+const SLOT = 44;
+const GAP = 8;
+/** Glass shapes closer than this melt together (the "+" being absorbed). */
+const MERGE = 6;
+const SPRING_IN = { duration: 520, dampingRatio: 0.78 };
+const SPRING_OUT = { duration: 380, dampingRatio: 0.72 };
+/** Matches the recorder row's exiting FadeOut in DictationBar. */
+const REC_EXIT_MS = 120;
 
 /**
- * The pill composer: reply bar, pending-attachment chips, autosizing input,
- * attach sheet (photo library / file), mic → DictationBar, sage send button.
+ * Floating composer, iOS 26 Messages-style: a round glass "+" (attach menu)
+ * beside a glass pill holding the reply preview, pending-attachment
+ * thumbnails, the autosizing input, and either the waveform (voice message)
+ * or the sage send button.
+ *
+ * Voice messages morph in place like Messages: the pill swells and swallows
+ * the "+" while the placeholder dissolves into a live waveform and the
+ * waveform glyph becomes stop; stopping peels an X back out on the left and
+ * turns the pill into a player with send. Both glass shapes sit in one
+ * GlassContainer so they merge while overlapping.
  */
-export function Composer({ peerName }: { peerName: string }) {
+export function Composer({
+  peerName,
+  voiceTall,
+}: {
+  peerName: string;
+  /** Morph progress (0 idle → 1 recorder height), shared with the host. */
+  voiceTall?: SharedValue<number>;
+}) {
   const s = useChatState();
   const { store, api } = useSession();
   const [text, setText] = useState("");
-  const [dictating, setDictating] = useState(false);
+  const [voice, setVoice] = useState<VoicePhase | null>(null);
+  const voiceRef = useRef<VoicePanelHandle>(null);
   const [uploading, setUploading] = useState<string | null>(null);
 
-  const canSend = !!(text.trim() || s.pendingAtt.length) && !dictating;
+  const hasContent = !!(text.trim() || s.pendingAtt.length);
+  const canSend = hasContent && !voice;
 
   const doSend = useCallback(() => {
     if (!canSend) return;
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     store.sendMessage(text);
     setText("");
   }, [canSend, store, text]);
@@ -58,9 +111,8 @@ export function Composer({ peerName }: { peerName: string }) {
     if (res.canceled) return;
     for (const asset of res.assets) {
       const name = asset.fileName || `photo-${Date.now()}.jpg`;
-      const type =
-        asset.mimeType || (asset.type === "video" ? "video/mp4" : "image/jpeg");
-      await uploadOne({ uri: asset.uri, name, type, size: asset.fileSize ?? undefined });
+      const mime = asset.mimeType || (asset.type === "video" ? "video/mp4" : "image/jpeg");
+      await uploadOne({ uri: asset.uri, name, type: mime, size: asset.fileSize ?? undefined });
     }
   }, [uploadOne]);
 
@@ -77,108 +129,261 @@ export function Composer({ peerName }: { peerName: string }) {
     }
   }, [uploadOne]);
 
-  const openAttachSheet = useCallback(() => {
-    showActionSheet({
-      title: "Attach",
-      options: [
-        { label: "Photo Library", onPress: () => void pickFromLibrary() },
-        { label: "Files", onPress: () => void pickDocument() },
-      ],
-    });
-  }, [pickDocument, pickFromLibrary]);
+  const attachActions: MenuAction[] = [
+    { label: "Photo Library", systemImage: "photo.on.rectangle", onPress: () => void pickFromLibrary() },
+    { label: "Files", systemImage: "folder", onPress: () => void pickDocument() },
+  ];
 
   const replyTo = s.replyTo;
 
+  // ---- voice-message morph ----
+  // slot: the left circle (1 = "+"/X shown, 0 = swallowed by the pill).
+  // tall: the pill's voice height. idleFade: the text row's opacity.
+  const slot = useSharedValue(1);
+  const ownTall = useSharedValue(0);
+  const tall = voiceTall ?? ownTall;
+  const idleFade = useSharedValue(1);
+  // The "+" is a native SwiftUI menu button; during the morph a UIKit glass
+  // twin (which can merge with the pill) stands in for it. The twin is
+  // mounted only when needed: a GlassView first laid out while hidden never
+  // picks its effect back up.
+  const [menuShown, setMenuShown] = useState(true);
+  // Corner radius: half the one-line height while typing, so a multi-line
+  // draft reads as a rounded rect (like Messages) instead of a stadium whose
+  // curve eats the first line. The voice morph needs a capsule at every
+  // height it passes through, so it switches to the tall radius for the
+  // whole recording and only drops back once the collapse has settled.
+  const [capsule, setCapsule] = useState(false);
+  const prev = useRef<VoicePhase | null>(null);
+
+  useEffect(() => {
+    const from = prev.current;
+    prev.current = voice;
+    if (from === voice) return;
+    if (voice === "recording") {
+      setMenuShown(false);
+      setCapsule(true);
+      idleFade.value = withTiming(0, { duration: 140 });
+      tall.value = withSpring(1, SPRING_IN);
+      slot.value = withDelay(160, withSpring(0, SPRING_IN));
+    } else if (voice === "review") {
+      // Peel the "X" out only once the recorder has faded (VoicePanel's
+      // 120ms exit): an exiting view is frozen at its old width, so narrowing
+      // the pill under it slides the stop button out past the right edge.
+      slot.value = withDelay(REC_EXIT_MS, withSpring(1, SPRING_OUT));
+    } else {
+      tall.value = withSpring(0, SPRING_OUT);
+      slot.value = withSpring(1, SPRING_OUT);
+      idleFade.value = withDelay(60, withTiming(1, { duration: 200 }));
+      const t = setTimeout(() => {
+        setMenuShown(true);
+        setCapsule(false);
+      }, 420);
+      return () => clearTimeout(t);
+    }
+  }, [voice, slot, tall, idleFade]);
+
+  const wrapStyle = useAnimatedStyle(() => ({
+    // While recording the pill also reaches a little past the margins.
+    paddingHorizontal: 12 - 4 * tall.value * (1 - slot.value),
+  }));
+  const slotStyle = useAnimatedStyle(() => ({
+    width: SLOT * slot.value,
+    marginRight: GAP * slot.value,
+    marginBottom: ((PILL_VOICE - PILL_MIN) / 2) * tall.value,
+  }));
+  const circleStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: (1 - slot.value) * 20 }, { scale: 0.55 + 0.45 * slot.value }],
+  }));
+  const rowStyle = useAnimatedStyle(() => ({
+    minHeight: PILL_MIN + (PILL_VOICE - PILL_MIN) * tall.value,
+  }));
+  const idleStyle = useAnimatedStyle(() => ({ opacity: idleFade.value }));
+  const reserveStyle = useAnimatedStyle(() => ({
+    paddingTop: VOICE_LIFT * (1 - tall.value),
+  }));
+
+  const startVoice = () => {
+    Keyboard.dismiss();
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    setVoice("recording");
+  };
+
   return (
-    <View style={styles.wrap}>
-      <View style={styles.composer}>
-        {replyTo && (
-          <View style={styles.replyBar}>
-            <Icon name="arrow-undo" size={13} color={colors.muted} />
-            <Text style={styles.replyText} numberOfLines={1}>
-              Replying to{" "}
-              <Text style={styles.replyName}>{nameFor(s.users, replyTo.user_id)}</Text>
-              {"  ·  "}
-              {replyTo.text ||
-                (replyTo.attachments?.[0] ? `Attachment: ${replyTo.attachments[0].name}` : "")}
+    <Animated.View style={reserveStyle} pointerEvents="box-none">
+      {uploading && !voice && (
+        <View style={styles.uploading}>
+          <GlassSurface style={styles.uploadingChip}>
+            <ActivityIndicator size="small" color={colors.sage} />
+            <Text style={styles.uploadingText} numberOfLines={1}>
+              Uploading {uploading}…
             </Text>
-            <Pressable
-              onPress={() => store.setReplyTo(null)}
-              accessibilityLabel="Cancel reply"
-              hitSlop={8}
-            >
-              <Icon name="close" size={14} color={colors.muted} />
-            </Pressable>
-          </View>
-        )}
-
-        {!!s.pendingAtt.length && (
-          <View style={styles.pendingRow}>
-            {s.pendingAtt.map((a, i) => (
-              <PendingAtt key={i} a={a} apiUrl={api.url(a.url)} onRemove={() => store.removePendingAtt(i)} />
-            ))}
-          </View>
-        )}
-
-        {dictating ? (
-          <DictationBar
-            onExit={() => setDictating(false)}
-            onTranscribed={(t) => setText((cur) => (cur ? `${cur} ${t}` : t))}
-          />
-        ) : (
-          <View style={styles.inputRow}>
-            <Pressable
-              style={styles.toolBtn}
-              onPress={openAttachSheet}
-              accessibilityLabel="Attach"
-              hitSlop={6}
-            >
-              <Icon name="add" size={21} color={colors.muted} />
-            </Pressable>
-            <TextInput
-              style={styles.input}
-              placeholder={s.activeChannel ? `Message ${peerName}` : "Message"}
-              placeholderTextColor={colors.faint}
-              value={text}
-              onChangeText={setText}
-              multiline
-              accessibilityLabel="Message input"
-              testID="composer-input"
-            />
-            {text.trim() || s.pendingAtt.length ? (
-              <Pressable
-                style={[styles.sendBtn, !canSend && { opacity: 0.5 }]}
-                onPress={doSend}
-                disabled={!canSend}
-                accessibilityLabel="Send"
-                accessibilityRole="button"
-              >
-                <Icon name="arrow-up" size={18} color={colors.surface} />
-              </Pressable>
-            ) : (
-              <Pressable
-                style={styles.toolBtn}
-                onPress={() => setDictating(true)}
-                accessibilityLabel="Dictate"
-                hitSlop={6}
-              >
-                <Icon name="mic-outline" size={20} color={colors.muted} />
-              </Pressable>
-            )}
-          </View>
-        )}
-      </View>
-      {uploading && (
-        <View style={styles.metaRow}>
-          <ActivityIndicator size="small" color={colors.sage} />
-          <Text style={styles.metaText}>Uploading {uploading}…</Text>
+          </GlassSurface>
         </View>
       )}
-    </View>
+      <GlassContainer spacing={MERGE}>
+        <Animated.View style={[styles.wrap, wrapStyle]}>
+          <Animated.View style={[styles.slot, slotStyle]}>
+            {!menuShown && (
+              <Animated.View
+                style={[styles.slotCircle, circleStyle]}
+                pointerEvents={voice === "review" ? "auto" : "none"}
+              >
+                <Pressable
+                  onPress={() => voiceRef.current?.discard()}
+                  accessibilityLabel={voice === "review" ? "Delete voice message" : undefined}
+                  accessibilityElementsHidden={voice !== "review"}
+                  accessibilityRole="button"
+                  hitSlop={6}
+                >
+                  <GlassSurface interactive style={styles.circle}>
+                    {voice === "review" ? (
+                      <Animated.View key="x" entering={FadeIn.delay(REC_EXIT_MS + 60).duration(160)} exiting={FadeOut.duration(100)}>
+                        <Glyph sf="xmark" ion="close" size={17} color={colors.ink2} />
+                      </Animated.View>
+                    ) : (
+                      <Animated.View key="plus" style={idleStyle}>
+                        <Glyph sf="plus" ion="add" size={18} color={colors.ink2} />
+                      </Animated.View>
+                    )}
+                  </GlassSurface>
+                </Pressable>
+              </Animated.View>
+            )}
+            {/* Never unmounted: a freshly mounted SwiftUI host draws its first
+                frame out of place, which flashes the "+" during the swap. */}
+            <View
+              style={[styles.slotCircle, !menuShown && styles.hidden]}
+              pointerEvents={menuShown ? "auto" : "none"}
+              accessibilityElementsHidden={!menuShown}
+              importantForAccessibility={menuShown ? "auto" : "no-hide-descendants"}
+            >
+              <GlassMenuButton
+                actions={attachActions}
+                systemImage="plus"
+                fallbackIcon="add"
+                label="Attach"
+                title="Attach"
+              />
+            </View>
+          </Animated.View>
+          <GlassSurface interactive style={[styles.pill, capsule && styles.pillCapsule]}>
+            {replyTo && !voice && (
+              <View style={styles.replyBar}>
+                <View style={styles.replyAccent} />
+                <View style={styles.flex}>
+                  <Text style={styles.replyTitle} numberOfLines={1}>
+                    Replying to {nameFor(s.users, replyTo.user_id)}
+                  </Text>
+                  <Text style={styles.replyText} numberOfLines={1}>
+                    {replyTo.text ||
+                      (replyTo.attachments?.[0] ? `Attachment: ${replyTo.attachments[0].name}` : "")}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => store.setReplyTo(null)}
+                  accessibilityLabel="Cancel reply"
+                  hitSlop={10}
+                  style={styles.replyClose}
+                >
+                  <Icon name="close" size={14} color={colors.muted} />
+                </Pressable>
+              </View>
+            )}
+
+            {!!s.pendingAtt.length && !voice && (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.pendingRow}
+              >
+                {s.pendingAtt.map((a, i) => (
+                  <PendingAtt
+                    key={i}
+                    a={a}
+                    apiUrl={api.url(a.url)}
+                    onRemove={() => store.removePendingAtt(i)}
+                  />
+                ))}
+              </ScrollView>
+            )}
+
+            <Animated.View style={[styles.inputRow, rowStyle]}>
+              <Animated.View
+                style={[styles.inputLine, idleStyle]}
+                pointerEvents={voice ? "none" : "auto"}
+              >
+                <TextInput
+                  style={styles.input}
+                  placeholder={s.activeChannel ? `Message ${peerName}` : "Message"}
+                  placeholderTextColor={colors.muted}
+                  value={text}
+                  onChangeText={setText}
+                  multiline
+                  editable={!voice}
+                  selectionColor={colors.sage}
+                  accessibilityLabel="Message input"
+                  testID="composer-input"
+                />
+                {hasContent ? (
+                  <Pressable
+                    style={({ pressed }) => [styles.sendBtn, pressed && { opacity: 0.8 }]}
+                    onPress={doSend}
+                    disabled={!canSend}
+                    accessibilityLabel="Send"
+                    accessibilityRole="button"
+                    hitSlop={6}
+                  >
+                    <Icon name="arrow-up" size={20} color={colors.surface} />
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    style={styles.micBtn}
+                    onPress={startVoice}
+                    accessibilityLabel="Dictate"
+                    accessibilityRole="button"
+                    hitSlop={6}
+                  >
+                    <WaveformIcon />
+                  </Pressable>
+                )}
+              </Animated.View>
+              {voice && (
+                <Animated.View style={StyleSheet.absoluteFill} exiting={FadeOut.duration(140)}>
+                  <VoicePanel
+                    ref={voiceRef}
+                    phase={voice}
+                    onPhase={setVoice}
+                    onExit={() => setVoice(null)}
+                    onTranscribed={(t) => setText((cur) => (cur ? `${cur} ${t}` : t))}
+                  />
+                </Animated.View>
+              )}
+            </Animated.View>
+          </GlassSurface>
+        </Animated.View>
+      </GlassContainer>
+    </Animated.View>
   );
 }
 
-/** Staged attachment chip — image thumbnails get the iMessage-style preview. */
+/**
+ * Voice-message glyph: the SF Symbol `waveform` on iOS 26 (rendered by
+ * SwiftUI, non-interactive so the RN Pressable keeps the touch), Material's
+ * waveform elsewhere.
+ */
+function WaveformIcon() {
+  if (glassSupported) {
+    return (
+      <Host matchContents pointerEvents="none">
+        <SFImage systemName="waveform" size={19} color={colors.muted} />
+      </Host>
+    );
+  }
+  return <MaterialCommunityIcons name="waveform" size={22} color={colors.muted} />;
+}
+
+/** Staged attachment — image thumbnail or a compact file chip, with an ✕. */
 function PendingAtt({
   a,
   apiUrl,
@@ -190,146 +395,193 @@ function PendingAtt({
 }) {
   const isImg = (a.mime || "").startsWith("image/");
   return (
-    <View style={isImg ? styles.pendingThumb : styles.pendingChip}>
+    <View style={styles.pendingItem}>
       {isImg ? (
         <Image source={{ uri: apiUrl }} style={styles.pendingImg} />
       ) : (
-        <View style={styles.pendingChipBody}>
-          <Text style={styles.pendingName} numberOfLines={1}>
-            {a.name}
-          </Text>
-          <Text style={styles.pendingSize}>{fmtSize(a.size)}</Text>
+        <View style={styles.pendingChip}>
+          <Icon name="document-outline" size={18} color={colors.sageDeep} />
+          <View style={styles.flex}>
+            <Text style={styles.pendingName} numberOfLines={1}>
+              {a.name}
+            </Text>
+            <Text style={styles.pendingSize}>{fmtSize(a.size)}</Text>
+          </View>
         </View>
       )}
-      <Pressable style={styles.pendingX} onPress={onRemove} accessibilityLabel="Remove" hitSlop={6}>
-        <Icon name="close" size={10} color={colors.surface} />
+      <Pressable style={styles.pendingX} onPress={onRemove} accessibilityLabel="Remove" hitSlop={8}>
+        <Icon name="close" size={11} color={colors.surface} />
       </Pressable>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  flex: {
+    flex: 1,
+  },
   wrap: {
-    paddingHorizontal: 12,
-    paddingBottom: 6,
-    paddingTop: 4,
-    backgroundColor: "transparent",
-  },
-  composer: {
-    backgroundColor: colors.surface,
-    borderRadius: 26,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    ...shadow.card,
-  },
-  inputRow: {
     flexDirection: "row",
     alignItems: "flex-end",
-    gap: 4,
+    paddingTop: 6,
+    paddingBottom: 6,
   },
-  toolBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+  slot: {
+    height: SLOT,
+  },
+  slotCircle: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+  },
+  hidden: {
+    opacity: 0,
+  },
+  circle: {
+    width: SLOT,
+    height: SLOT,
+    borderRadius: SLOT / 2,
     alignItems: "center",
     justifyContent: "center",
   },
+  pill: {
+    flex: 1,
+    minHeight: PILL_MIN,
+    borderRadius: PILL_MIN / 2,
+    overflow: glassSupported ? undefined : "hidden",
+  },
+  pillCapsule: {
+    // Capsule at every height the morph passes through (clamped to h/2).
+    borderRadius: PILL_VOICE / 2,
+  },
+  inputRow: {
+    minHeight: PILL_MIN,
+  },
+  inputLine: {
+    flexGrow: 1,
+    flexDirection: "row",
+    alignItems: "flex-end",
+  },
   input: {
     flex: 1,
-    fontSize: 16,
+    ...type.body,
     color: colors.ink,
-    paddingHorizontal: 6,
-    paddingTop: 9,
-    paddingBottom: 9,
-    maxHeight: 120,
+    paddingLeft: 16,
+    paddingRight: 6,
+    paddingTop: 11,
+    paddingBottom: 11,
+    maxHeight: 140,
   },
   sendBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    margin: 5,
     backgroundColor: colors.sage,
     alignItems: "center",
     justifyContent: "center",
   },
+  micBtn: {
+    width: 40,
+    height: PILL_MIN,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 2,
+  },
   replyBar: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 7,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.line2,
-    marginBottom: 2,
+    gap: 10,
+    paddingLeft: 14,
+    paddingRight: 10,
+    paddingTop: 10,
+    paddingBottom: 4,
+  },
+  replyAccent: {
+    width: 3,
+    alignSelf: "stretch",
+    borderRadius: 2,
+    backgroundColor: colors.sage,
+  },
+  replyTitle: {
+    ...type.footnote,
+    fontWeight: "600",
+    color: colors.sageDeep,
   },
   replyText: {
-    flex: 1,
-    fontSize: 12.5,
+    ...type.footnote,
     color: colors.muted,
   },
-  replyName: {
-    fontWeight: "700",
-    color: colors.ink2,
+  replyClose: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: "rgba(27,36,31,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
   },
   pendingRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 2,
   },
-  pendingThumb: {
-    width: 56,
-    height: 56,
-    borderRadius: radius.s,
-    overflow: "visible",
+  pendingItem: {
+    paddingTop: 4,
+    paddingRight: 4,
   },
   pendingImg: {
-    width: 56,
-    height: 56,
-    borderRadius: radius.s,
+    width: 64,
+    height: 64,
+    borderRadius: radius.m,
+    backgroundColor: colors.line2,
   },
   pendingChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    height: 64,
+    width: 170,
+    paddingHorizontal: 12,
+    borderRadius: radius.m,
     backgroundColor: colors.sageTint,
-    borderRadius: radius.s,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    maxWidth: 160,
-    overflow: "visible",
-  },
-  pendingChipBody: {
-    gap: 1,
   },
   pendingName: {
-    fontSize: 12,
+    ...type.footnote,
     fontWeight: "600",
     color: colors.ink,
   },
   pendingSize: {
-    fontSize: 10.5,
+    ...type.caption,
     color: colors.muted,
   },
   pendingX: {
     position: "absolute",
-    top: -5,
-    right: -5,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: colors.ink,
+    top: 0,
+    right: 0,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: "rgba(27,36,31,0.75)",
     alignItems: "center",
     justifyContent: "center",
   },
-  metaRow: {
+  uploading: {
+    alignItems: "center",
+    paddingBottom: 4,
+  },
+  uploadingChip: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 8,
     paddingHorizontal: 14,
-    paddingTop: 4,
+    height: 34,
+    borderRadius: 17,
+    maxWidth: 280,
   },
-  metaText: {
-    fontSize: 12,
-    color: colors.muted,
+  uploadingText: {
+    ...type.footnote,
+    color: colors.ink2,
+    flexShrink: 1,
   },
 });

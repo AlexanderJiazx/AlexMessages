@@ -3,7 +3,7 @@ import { StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { Redirect, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { onOpenChannelRequest, useChatState, useSession } from "../src/session";
-import { colors, fontDisplay, WIDE_BREAKPOINT } from "../src/theme";
+import { colors, type, WIDE_BREAKPOINT } from "../src/theme";
 import { DMList } from "../src/components/DMList";
 import { ConversationView } from "../src/components/ConversationView";
 import { Toasts } from "../src/components/Toasts";
@@ -72,11 +72,12 @@ export default function ChatHome() {
               <ConversationView
                 channel={s.activeChannel}
                 showBack={false}
+                fullBleed={false}
                 onOpenProfile={onOpenProfile}
               />
             ) : (
               <View style={styles.empty}>
-                <Text style={styles.emptyTitle}>No conversation selected</Text>
+                <Text style={styles.emptyTitle}>No Conversation Selected</Text>
                 <Text style={styles.emptySub}>
                   Pick a conversation from the list, or start a new one with the compose button.
                 </Text>
@@ -90,7 +91,7 @@ export default function ChatHome() {
   }
 
   return (
-    <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
+    <SafeAreaView style={styles.root} edges={["top"]}>
       <DMList
         activeChannel={s.activeChannel}
         onOpenChannel={openChannel}
@@ -112,9 +113,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
   },
   rail: {
-    width: 300,
+    width: 340,
     borderRightWidth: StyleSheet.hairlineWidth,
-    borderRightColor: colors.line,
+    borderRightColor: colors.separator,
   },
   main: {
     flex: 1,
@@ -127,13 +128,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bg,
   },
   emptyTitle: {
-    fontFamily: fontDisplay,
-    fontSize: 28,
+    ...type.title2,
     color: colors.ink,
     marginBottom: 8,
   },
   emptySub: {
-    fontSize: 14,
+    ...type.subhead,
     color: colors.muted,
     textAlign: "center",
     lineHeight: 20,

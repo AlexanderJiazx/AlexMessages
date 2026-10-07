@@ -4,6 +4,7 @@
   "main": "expo-router/entry",
   "dependencies": {
     "@alexmessages/shared": "file:../shared",
+    "@expo/ui": "~57.0.22",
     "@expo/vector-icons": "^15.1.1",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~57.0.23",

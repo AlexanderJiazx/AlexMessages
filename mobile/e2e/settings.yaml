@@ -1,20 +1,25 @@
 appId: com.alexanderjia.messages
 ---
-# Settings overlay: tabs render, profile fields present.
+# Settings: grouped root list → each section pushes its own page.
 - runFlow: subflows/login.yaml
 - tapOn: "Settings"
 - assertVisible: "Profile"
 - assertVisible: "Account"
 - assertVisible: "Notifications"
 - assertVisible: "Data"
+- assertVisible: "Log Out"
+- tapOn: "Profile"
 - assertVisible: "Display name"
 - assertVisible: "Bio"
+- tapOn: "Back"
 - tapOn: "Account"
-- assertVisible: "Change password"
-- assertVisible: "Log out"
-- assertVisible: "Delete account"
+- assertVisible: "Update Password"
+- assertVisible: "Log Out of All Devices"
+- assertVisible: "Delete Account…"
+- tapOn: "Back"
 - tapOn: "Notifications"
 - assertVisible: "Direct message alerts"
+- tapOn: "Back"
 - tapOn: "Data"
 - assertVisible: "Export my data"
 - tapOn: "Close"

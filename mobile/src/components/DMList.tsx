@@ -1,24 +1,33 @@
-import React from "react";
+import React, { useMemo, useRef, useState } from "react";
 import {
-  FlatList,
+  Animated,
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
-import { lastMessagePreviewFor, nameFor } from "@alexmessages/shared";
+import {
+  fmtListTime,
+  lastMessagePreviewFor,
+  nameFor,
+} from "@alexmessages/shared";
 import { useChatState, useSession } from "../session";
-import { colors, fontDisplay, radius } from "../theme";
+import { colors, glassSupported, radius, type } from "../theme";
 import { Avatar } from "./Avatar";
 import { Icon } from "./Icon";
-import { showActionSheet } from "./ActionSheet";
+import { LongPressMenu, type MenuAction } from "./NativeMenu";
+import { EdgeFade, GlassIconButton, GlassSurface } from "./Glass";
 
-type ListItem = { kind: "header"; label: string } | { kind: "dm"; channel: string; peerId: number };
+const BAR_H = 56;
 
 /**
- * The left rail: "Messages" title + compose button, pinned + recent DM rows,
- * bottom account trigger → Settings. Used full-screen on phones and as the
- * fixed-width sidebar in the wide layout.
+ * The conversation list, iMessage-style: floating glass controls (account →
+ * Settings on the left, compose on the right), a large "Messages" title that
+ * hands off to a centered inline title on scroll, a search field, pinned
+ * threads as a grid of large avatars, then the recent threads. Used
+ * full-screen on phones and as the sidebar in the wide layout.
  */
 export function DMList({
   onOpenChannel,
@@ -33,242 +42,483 @@ export function DMList({
 }) {
   const s = useChatState();
   const { store } = useSession();
-  const items = store.dmListItems();
-  const pinned = items.filter((it) => store.dmStateFor(it.channel).pinned);
-  const normal = items.filter((it) => !store.dmStateFor(it.channel).pinned);
-  const me = s.me;
+  const [query, setQuery] = useState("");
+  // Rows are hosted by the native long-press menu, which measures them
+  // without the list's width limit — so they get an explicit width.
+  const window = useWindowDimensions();
+  const [listW, setListW] = useState(0);
+  const rowW = listW || window.width;
+  const scrollY = useRef(new Animated.Value(0)).current;
 
-  const data: ListItem[] = [];
-  if (pinned.length) {
-    data.push({ kind: "header", label: "Pinned" });
-    for (const it of pinned) data.push({ kind: "dm", channel: it.channel, peerId: it.peerId });
-    if (normal.length) data.push({ kind: "header", label: "Recent" });
-  }
-  for (const it of normal) data.push({ kind: "dm", channel: it.channel, peerId: it.peerId });
+  const q = query.trim().toLowerCase();
+  const items = store.dmListItems().filter((it) => {
+    if (!q) return true;
+    const u = store.userFor(it.peerId);
+    return (
+      nameFor(s.users, it.peerId).toLowerCase().includes(q) ||
+      (u?.username || "").toLowerCase().includes(q)
+    );
+  });
+  const pinned = q ? [] : items.filter((it) => store.dmStateFor(it.channel).pinned);
+  const recent = q ? items : items.filter((it) => !store.dmStateFor(it.channel).pinned);
+
+  const inlineTitleOpacity = scrollY.interpolate({
+    inputRange: [28, 48],
+    outputRange: [0, 1],
+    extrapolate: "clamp",
+  });
+
+  const header = (
+    <View>
+      <Text style={styles.largeTitle} accessibilityRole="header">
+        Messages
+      </Text>
+      <View style={styles.search}>
+        <Icon name="search" size={17} color={colors.muted} />
+        <TextInput
+          style={styles.searchInput}
+          value={query}
+          onChangeText={setQuery}
+          placeholder="Search"
+          placeholderTextColor={colors.muted}
+          autoCapitalize="none"
+          autoCorrect={false}
+          clearButtonMode="while-editing"
+          returnKeyType="search"
+          accessibilityLabel="Search conversations"
+        />
+      </View>
+      {pinned.length > 0 && (
+        <View style={styles.pinnedGrid}>
+          {pinned.map((it) => (
+            <PinnedCell
+              key={it.channel}
+              channel={it.channel}
+              peerId={it.peerId}
+              active={it.channel === activeChannel}
+              width={(rowW - 16) / 3}
+              onPress={() => onOpenChannel(it.channel)}
+            />
+          ))}
+        </View>
+      )}
+    </View>
+  );
 
   return (
-    <View style={styles.root}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Messages</Text>
-        <Pressable
-          style={styles.composeBtn}
-          onPress={onNewDm}
-          accessibilityLabel="New conversation"
-          hitSlop={8}
-        >
-          <Icon name="create-outline" size={20} color={colors.sageDeep} />
-        </Pressable>
-      </View>
-
-      <FlatList
-        data={data}
-        keyExtractor={(it) => (it.kind === "dm" ? it.channel : `h:${it.label}`)}
-        renderItem={({ item }) =>
-          item.kind === "dm" ? (
-            <DmRow
-              channel={item.channel}
-              peerId={item.peerId}
-              active={item.channel === activeChannel}
-              onPress={() => onOpenChannel(item.channel)}
-            />
-          ) : (
-            <Text style={styles.section}>{item.label}</Text>
-          )
-        }
+    <View
+      style={styles.root}
+      onLayout={(e) => {
+        const w = e.nativeEvent.layout.width;
+        setListW((prev) => (prev === w ? prev : w));
+      }}
+    >
+      <Animated.FlatList
+        data={recent}
+        keyExtractor={(it) => it.channel}
+        ListHeaderComponent={header}
+        renderItem={({ item, index }) => (
+          <DmRow
+            channel={item.channel}
+            peerId={item.peerId}
+            active={item.channel === activeChannel}
+            last={index === recent.length - 1}
+            width={rowW}
+            onPress={() => onOpenChannel(item.channel)}
+          />
+        )}
         contentContainerStyle={styles.list}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], {
+          useNativeDriver: true,
+        })}
+        scrollEventThrottle={16}
         ListEmptyComponent={
-          <Text style={styles.empty}>
-            No conversations yet.{"\n"}Start one with the compose button.
-          </Text>
+          q ? (
+            <Text style={styles.noResults}>No results for “{query.trim()}”</Text>
+          ) : pinned.length ? null : (
+            <EmptyState onNewDm={onNewDm} />
+          )
         }
       />
 
-      <Pressable
-        style={styles.account}
-        onPress={onOpenSettings}
-        accessibilityLabel="Settings"
-        accessibilityRole="button"
-      >
-        <Avatar user={me} size={38} />
-        <View style={styles.accountMeta}>
-          <Text style={styles.accountName} numberOfLines={1}>
-            {me ? me.display_name || me.username : "—"}
-          </Text>
-          <Text style={styles.accountHandle} numberOfLines={1}>
-            {me ? `@${me.username}` : ""}
-          </Text>
-        </View>
-        <Icon name="settings-outline" size={18} color={colors.muted} />
-      </Pressable>
+      {/* Floating bar: content dissolves under it, controls are glass. */}
+      <EdgeFade edge="top" height={BAR_H + 18} />
+      <View style={styles.bar} pointerEvents="box-none">
+        <Pressable
+          onPress={onOpenSettings}
+          accessibilityLabel="Settings"
+          accessibilityRole="button"
+          hitSlop={6}
+        >
+          <GlassSurface interactive style={styles.meBtn}>
+            <Avatar user={s.me} size={34} />
+          </GlassSurface>
+        </Pressable>
+        <Animated.Text
+          style={[styles.inlineTitle, { opacity: inlineTitleOpacity }]}
+          numberOfLines={1}
+          importantForAccessibility="no"
+        >
+          Messages
+        </Animated.Text>
+        <GlassIconButton
+          icon="create-outline"
+          label="New conversation"
+          onPress={onNewDm}
+          iconSize={21}
+          color={colors.sageDeep}
+        />
+      </View>
     </View>
   );
+}
+
+/** Long-press menu actions shared by list rows and pinned cells. */
+function useDmActions(channel: string): MenuAction[] {
+  const { store } = useSession();
+  const st = store.dmStateFor(channel);
+  const unread = store.isUnread(channel);
+  return [
+    {
+      label: st.pinned ? "Unpin conversation" : "Pin conversation",
+      systemImage: st.pinned ? "pin.slash" : "pin",
+      onPress: () => void store.togglePin(channel, !st.pinned),
+    },
+    {
+      label: unread ? "Mark as read" : "Mark as unread",
+      systemImage: unread ? "message" : "message.badge",
+      onPress: () => void (unread ? store.markRead(channel) : store.markUnread(channel)),
+    },
+    {
+      label: "Delete for me",
+      systemImage: "trash",
+      destructive: true,
+      onPress: () => void store.deleteDm(channel),
+    },
+  ];
 }
 
 function DmRow({
   channel,
   peerId,
   active,
+  last,
+  width,
   onPress,
 }: {
   channel: string;
   peerId: number;
   active: boolean;
+  last: boolean;
+  width: number;
   onPress: () => void;
 }) {
   const s = useChatState();
   const { store } = useSession();
-  const st = store.dmStateFor(channel);
   const unread = store.isUnread(channel);
   const preview = lastMessagePreviewFor(s.history[channel], s.me?.id ?? null);
-  const peer = store.userFor(peerId);
-
-  const openMenu = () => {
-    const pinLabel = st.pinned ? "Unpin conversation" : "Pin conversation";
-    const readLabel = unread ? "Mark as read" : "Mark as unread";
-    showActionSheet({
-      title: nameFor(s.users, peerId),
-      options: [
-        { label: pinLabel, onPress: () => void store.togglePin(channel, !st.pinned) },
-        {
-          label: readLabel,
-          onPress: () => void (unread ? store.markRead(channel) : store.markUnread(channel)),
-        },
-        { label: "Delete for me", destructive: true, onPress: () => void store.deleteDm(channel) },
-      ],
-    });
-  };
+  const when = fmtListTime(store.lastMessageTS(channel));
+  const name = nameFor(s.users, peerId);
+  const online = s.online.has(peerId);
+  const actions = useDmActions(channel);
 
   return (
-    <Pressable
-      style={[styles.row, active && styles.rowActive]}
-      onPress={onPress}
-      onLongPress={openMenu}
-      accessibilityRole="button"
-      accessibilityLabel={`Conversation with ${nameFor(s.users, peerId)}${unread ? ", unread" : ""}`}
-    >
-      <Avatar user={peer} size={42} />
-      <View style={styles.who}>
-        <Text style={[styles.name, unread && styles.nameUnread]} numberOfLines={1}>
-          {nameFor(s.users, peerId)}
+    <LongPressMenu actions={actions} title={name} cornerRadius={14} fill>
+      <Pressable
+        style={({ pressed }) => [
+          styles.row,
+          { width },
+          active && styles.rowActive,
+          pressed && !active && styles.rowPressed,
+        ]}
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={`Conversation with ${name}${unread ? ", unread" : ""}`}
+      >
+        <View style={styles.dotSlot}>
+          {unread && <View style={styles.unreadDot} accessibilityLabel="Unread messages" />}
+        </View>
+        <View>
+          <Avatar user={store.userFor(peerId)} size={52} />
+          {online && <View style={styles.onlineBadge} />}
+        </View>
+        <View style={[styles.rowBody, !last && styles.rowSeparator]}>
+          <View style={styles.rowTop}>
+            <Text style={styles.rowName} numberOfLines={1}>
+              {name}
+            </Text>
+            <Text style={[styles.rowTime, unread && styles.rowTimeUnread]}>{when}</Text>
+            <Icon name="chevron-forward" size={14} color={colors.faint} />
+          </View>
+          <Text style={[styles.rowPreview, unread && styles.rowPreviewUnread]} numberOfLines={2}>
+            {preview || " "}
+          </Text>
+        </View>
+      </Pressable>
+    </LongPressMenu>
+  );
+}
+
+function PinnedCell({
+  channel,
+  peerId,
+  active,
+  width,
+  onPress,
+}: {
+  channel: string;
+  peerId: number;
+  active: boolean;
+  width: number;
+  onPress: () => void;
+}) {
+  const s = useChatState();
+  const { store } = useSession();
+  const unread = store.isUnread(channel);
+  const name = nameFor(s.users, peerId);
+  const actions = useDmActions(channel);
+  return (
+    <LongPressMenu actions={actions} title={name} cornerRadius={20}>
+      <Pressable
+        style={({ pressed }) => [
+          styles.pinCellInner,
+          { width },
+          (pressed || active) && { opacity: 0.7 },
+        ]}
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={`Conversation with ${name}${unread ? ", unread" : ""}`}
+      >
+        <View>
+          <Avatar user={store.userFor(peerId)} size={72} />
+          {unread && <View style={styles.pinUnread} />}
+        </View>
+        <Text style={[styles.pinName, unread && { fontWeight: "600", color: colors.ink }]} numberOfLines={1}>
+          {name.split(" ")[0]}
         </Text>
-        <Text style={[styles.sub, unread && styles.subUnread]} numberOfLines={1}>
-          {preview}
-        </Text>
+      </Pressable>
+    </LongPressMenu>
+  );
+}
+
+function EmptyState({ onNewDm }: { onNewDm: () => void }) {
+  return (
+    <View style={styles.empty}>
+      <View style={styles.emptyIcon}>
+        <Icon name="chatbubbles-outline" size={34} color={colors.sage} />
       </View>
-      {unread && <View style={styles.dot} accessibilityLabel="Unread messages" />}
-    </Pressable>
+      <Text style={styles.emptyTitle}>No Messages Yet</Text>
+      <Text style={styles.emptySub}>Start a conversation with anyone on this server.</Text>
+      <Pressable style={styles.emptyBtn} onPress={onNewDm} accessibilityRole="button">
+        <Text style={styles.emptyBtnText}>New Message</Text>
+      </Pressable>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: colors.paper,
+    backgroundColor: colors.bg,
   },
-  header: {
+  bar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: BAR_H,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 10,
+    paddingHorizontal: 16,
   },
-  title: {
-    fontFamily: fontDisplay,
-    fontSize: 34,
-    color: colors.ink,
-    letterSpacing: 0.2,
-  },
-  composeBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: colors.sageTint,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
+  meBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
   },
-  section: {
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 1.1,
-    textTransform: "uppercase",
-    color: colors.faint,
-    paddingHorizontal: 20,
-    paddingTop: 14,
-    paddingBottom: 6,
+  inlineTitle: {
+    ...type.headline,
+    color: colors.ink,
+    position: "absolute",
+    left: 80,
+    right: 80,
+    textAlign: "center",
   },
   list: {
-    paddingHorizontal: 10,
-    paddingBottom: 12,
+    paddingTop: BAR_H,
+    paddingBottom: 32,
     flexGrow: 1,
   },
-  empty: {
-    marginTop: 48,
-    textAlign: "center",
-    color: colors.faint,
-    fontSize: 14,
-    lineHeight: 21,
+  largeTitle: {
+    ...type.largeTitle,
+    color: colors.ink,
+    paddingHorizontal: 20,
+    paddingTop: 2,
+    paddingBottom: 10,
+  },
+  search: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginHorizontal: 16,
+    marginBottom: 10,
+    paddingHorizontal: 10,
+    height: 38,
+    borderRadius: glassSupported ? 19 : 11,
+    backgroundColor: "rgba(118,128,112,0.13)",
+  },
+  searchInput: {
+    flex: 1,
+    ...type.body,
+    color: colors.ink,
+    paddingVertical: 0,
+  },
+  pinnedGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    paddingHorizontal: 8,
+    paddingTop: 6,
+    paddingBottom: 8,
+  },
+  pinCellInner: {
+    backgroundColor: colors.bg,
+    alignItems: "center",
+    paddingVertical: 8,
+    gap: 6,
+  },
+  pinName: {
+    ...type.footnote,
+    color: colors.muted,
+    maxWidth: 96,
+  },
+  pinUnread: {
+    position: "absolute",
+    top: 2,
+    left: 2,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: colors.sage,
+    borderWidth: 2.5,
+    borderColor: colors.bg,
   },
   row: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: radius.m,
+    paddingRight: 16,
+    // Opaque so the context-menu preview lifts out as a solid card.
+    backgroundColor: colors.bg,
+  },
+  rowPressed: {
+    backgroundColor: "#EAE8E1",
   },
   rowActive: {
     backgroundColor: colors.sageTint,
   },
-  who: {
-    flex: 1,
-    gap: 1,
+  dotSlot: {
+    width: 22,
+    alignItems: "center",
   },
-  name: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: colors.ink,
-  },
-  nameUnread: {
-    fontWeight: "800",
-  },
-  sub: {
-    fontSize: 13,
-    color: colors.muted,
-  },
-  subUnread: {
-    color: colors.ink2,
-    fontWeight: "500",
-  },
-  dot: {
-    width: 9,
-    height: 9,
+  unreadDot: {
+    width: 10,
+    height: 10,
     borderRadius: 5,
     backgroundColor: colors.sage,
-    marginRight: 4,
   },
-  account: {
+  onlineBadge: {
+    position: "absolute",
+    right: 0,
+    bottom: 1,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: "#4CB86E",
+    borderWidth: 2.5,
+    borderColor: colors.bg,
+  },
+  rowBody: {
+    flex: 1,
+    marginLeft: 12,
+    paddingVertical: 11,
+    minHeight: 76,
+    justifyContent: "center",
+  },
+  rowSeparator: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.separator,
+  },
+  rowTop: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.line,
-    backgroundColor: colors.surface,
+    gap: 6,
+    marginBottom: 2,
   },
-  accountMeta: {
+  rowName: {
+    ...type.headline,
+    color: colors.ink,
     flex: 1,
   },
-  accountName: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: colors.ink,
-  },
-  accountHandle: {
-    fontSize: 12,
+  rowTime: {
+    ...type.subhead,
     color: colors.muted,
+  },
+  rowTimeUnread: {
+    color: colors.sage,
+  },
+  rowPreview: {
+    ...type.subhead,
+    color: colors.muted,
+    lineHeight: 20,
+  },
+  rowPreviewUnread: {
+    color: colors.ink2,
+  },
+  noResults: {
+    ...type.callout,
+    color: colors.muted,
+    textAlign: "center",
+    marginTop: 40,
+  },
+  empty: {
+    alignItems: "center",
+    paddingHorizontal: 40,
+    paddingTop: 72,
+  },
+  emptyIcon: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: colors.sageTint,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+  },
+  emptyTitle: {
+    ...type.title2,
+    color: colors.ink,
+    marginBottom: 6,
+  },
+  emptySub: {
+    ...type.subhead,
+    color: colors.muted,
+    textAlign: "center",
+    lineHeight: 20,
+    marginBottom: 20,
+  },
+  emptyBtn: {
+    backgroundColor: colors.sage,
+    borderRadius: radius.pill,
+    paddingHorizontal: 22,
+    paddingVertical: 12,
+  },
+  emptyBtnText: {
+    ...type.headline,
+    color: colors.surface,
   },
 });

@@ -48,7 +48,7 @@ appId: com.alexanderjia.messages
     commands:
       - hideKeyboard
 - assertVisible: ".*${output.REPLY}.*"
-- assertVisible: ".*replying to.*"
+- assertVisible: ".*replied to.*"
 
 # --- Edit own message ---
 - longPressOn: ".*${output.REPLY}.*"
@@ -64,4 +64,5 @@ appId: com.alexanderjia.messages
     commands:
       - hideKeyboard
 - tapOn: "Save"
-- assertVisible: ".*${output.EDITED}.*\\(edited\\).*"
+- assertVisible: ".*${output.EDITED}.*"
+- assertVisible: "Edited"

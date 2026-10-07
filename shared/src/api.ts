@@ -34,6 +34,12 @@ export interface ApiClientOptions {
   baseUrl?: string;
   /** Bearer session token (native clients); null for cookie auth. */
   token?: string | null;
+  /**
+   * Native only: reads a `{ uri }` file's bytes. Expo's fetch (the default
+   * on Expo SDK 57) can't stream React Native `{ uri }` FormData parts, but
+   * accepts any part exposing `bytes()` — so uploads attach this reader.
+   */
+  readFile?: (uri: string) => Promise<Uint8Array>;
 }
 
 /**
@@ -49,10 +55,12 @@ function isNativeFile(f: UploadFile): f is { uri: string; name: string; type: st
 export class ApiClient {
   baseUrl: string;
   token: string | null;
+  private readFile?: (uri: string) => Promise<Uint8Array>;
 
   constructor(opts: ApiClientOptions = {}) {
     this.baseUrl = opts.baseUrl ?? "";
     this.token = opts.token ?? null;
+    this.readFile = opts.readFile;
   }
 
   setToken(token: string | null): void {
@@ -137,7 +145,7 @@ export class ApiClient {
 
   setAvatar(file: UploadFile): Promise<{ user: PublicUser }> {
     const fd = new FormData();
-    appendFile(fd, file);
+    appendFile(fd, file, this.readFile);
     return this.json("/api/me/avatar", { method: "POST", body: fd });
   }
 
@@ -187,7 +195,7 @@ export class ApiClient {
 
   upload(file: UploadFile): Promise<Attachment> {
     const fd = new FormData();
-    appendFile(fd, file);
+    appendFile(fd, file, this.readFile);
     return this.json("/api/upload", { method: "POST", body: fd });
   }
 
@@ -202,7 +210,7 @@ export class ApiClient {
   /** Voice dictation: uploads an audio clip, returns its transcript. */
   transcribe(file: UploadFile): Promise<{ text: string }> {
     const fd = new FormData();
-    appendFile(fd, file);
+    appendFile(fd, file, this.readFile);
     return this.json("/api/transcribe", { method: "POST", body: fd });
   }
 
@@ -287,10 +295,16 @@ export function dmStateFromPayload(s: Partial<DmStatePayload> | undefined, fallb
 }
 
 /** Appends an UploadFile to FormData in the platform-appropriate way. */
-function appendFile(fd: FormData, file: UploadFile): void {
+function appendFile(
+  fd: FormData,
+  file: UploadFile,
+  readFile?: (uri: string) => Promise<Uint8Array>,
+): void {
   if (isNativeFile(file)) {
-    // React Native's FormData accepts {uri,name,type} file descriptors.
-    fd.append("file", file as unknown as Blob);
+    // React Native's FormData accepts {uri,name,type} descriptors; Expo's
+    // fetch instead pulls the part's bytes() — provide both.
+    const part = readFile ? { ...file, bytes: () => readFile(file.uri) } : file;
+    fd.append("file", part as unknown as Blob);
   } else {
     const name = file instanceof File ? file.name : "file";
     fd.append("file", file, name);

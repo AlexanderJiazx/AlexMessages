@@ -8,7 +8,6 @@ appId: com.alexanderjia.messages
 - assertVisible: ".*pin conversation.*"
 - assertVisible: "Mark as (un)?read"
 - assertVisible: "Delete for me"
-- assertVisible: "Cancel"
 - runFlow:
     when:
       visible: "Pin conversation"
@@ -22,7 +21,7 @@ appId: com.alexanderjia.messages
       - tapOn: "Pin conversation"
       - longPressOn: "Conversation with Bob.*"
       - assertVisible: "Unpin conversation"
-      - tapOn: "Cancel"
+      - runFlow: subflows/dismiss-menu.yaml
 - runFlow:
     when:
       visible: "Unpin conversation"
@@ -33,7 +32,7 @@ appId: com.alexanderjia.messages
       - tapOn: "Pin conversation"
       - longPressOn: "Conversation with Bob.*"
       - assertVisible: "Unpin conversation"
-      - tapOn: "Cancel"
+      - runFlow: subflows/dismiss-menu.yaml
 # Read/unread toggle: the unread dot merges into the row's a11y label, so
 # "Conversation with Bob, unread" verifies Bob specifically.
 - longPressOn: "Conversation with Bob.*"

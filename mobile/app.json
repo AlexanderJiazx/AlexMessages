@@ -19,7 +19,7 @@
     "android": {
       "package": "com.alexanderjia.messages",
       "adaptiveIcon": {
-        "backgroundColor": "#F1EFE6",
+        "backgroundColor": "#ECF3E8",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"

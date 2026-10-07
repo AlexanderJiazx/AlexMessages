@@ -4,27 +4,29 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { nameFor } from "@alexmessages/shared";
 import { useChatState, useSession } from "../src/session";
-import { colors, fontDisplay, radius, WIDE_BREAKPOINT } from "../src/theme";
+import { colors, type, WIDE_BREAKPOINT } from "../src/theme";
 import { Avatar } from "../src/components/Avatar";
-import { Icon } from "../src/components/Icon";
+import { Icon, type IconName } from "../src/components/Icon";
+import { GlassIconButton } from "../src/components/Glass";
 
-/** Read-only peer profile sheet: avatar, name, bio, contact toggle, message. */
+/** Read-only peer profile — an iOS contact card: hero, actions, details. */
 export default function ProfileScreen() {
   const { store } = useSession();
   const s = useChatState();
   const router = useRouter();
   const { uid: uidParam } = useLocalSearchParams<{ uid: string }>();
   const uid = Number(uidParam);
-  const u = Number.isFinite(uid) ? s.users[uid] : null;
-  const online = Number.isFinite(uid) && s.online.has(uid);
-  const isContact = Number.isFinite(uid) && s.contacts.has(uid);
+  const valid = Number.isFinite(uid);
+  const u = valid ? s.users[uid] : null;
+  const online = valid && s.online.has(uid);
+  const isContact = valid && s.contacts.has(uid);
   const isSelf = s.me?.id === uid;
 
   const { width } = useWindowDimensions();
   const wide = width >= WIDE_BREAKPOINT;
 
   const message = () => {
-    if (!Number.isFinite(uid)) return;
+    if (!valid) return;
     store.openDM(uid);
     const channel = store.state.activeChannel;
     router.back();
@@ -36,71 +38,76 @@ export default function ProfileScreen() {
 
   return (
     <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Profile</Text>
-        <Pressable onPress={() => router.back()} accessibilityLabel="Close" hitSlop={10}>
-          <Icon name="close" size={22} color={colors.muted} />
-        </Pressable>
+      <View style={styles.nav}>
+        <GlassIconButton icon="close" label="Close" onPress={() => router.back()} size={40} />
       </View>
       <ScrollView contentContainerStyle={styles.body}>
-        <View style={styles.banner} />
-        <View style={styles.profileRow}>
-          <Avatar user={u} size={72} />
-          <View style={styles.nameBlock}>
-            <Text style={styles.name}>{u?.display_name || nameFor(s.users, uid)}</Text>
-            <Text style={styles.handle}>@{u?.username || "?"}</Text>
-            <View style={styles.statusRow}>
-              <View style={[styles.dot, online && styles.dotOn]} />
-              <Text style={styles.statusText}>{online ? "online" : "offline"}</Text>
-            </View>
+        <View style={styles.hero}>
+          <Avatar user={u} size={112} />
+          <Text style={styles.name}>{u?.display_name || nameFor(s.users, uid)}</Text>
+          <View style={styles.statusRow}>
+            <View style={[styles.dot, online && styles.dotOn]} />
+            <Text style={styles.statusText}>
+              @{u?.username || "?"} · {online ? "Online" : "Offline"}
+            </Text>
           </View>
         </View>
 
-        <Text style={styles.label}>Bio</Text>
-        <Text style={[styles.bio, !u?.bio && styles.bioEmpty]}>
-          {u?.bio || "No bio yet."}
-        </Text>
-
-        {!isSelf && (
-          <View style={styles.btnRow}>
-            <Pressable style={[styles.btn, styles.btnPrimary]} onPress={message} accessibilityRole="button">
-              <Icon name="mail-outline" size={15} color={colors.surface} />
-              <Text style={styles.btnPrimaryText}>Message</Text>
-            </Pressable>
-            {Number.isFinite(uid) && (
-              <Pressable
-                style={styles.btn}
-                onPress={() => void store.toggleContact(uid)}
-                accessibilityRole="button"
-              >
-                <Text style={styles.btnText}>
-                  {isContact ? "Remove from contacts" : "Add to contacts"}
-                </Text>
-              </Pressable>
-            )}
+        {!isSelf && valid && (
+          <View style={styles.actions}>
+            <Action icon="chatbubble" label="Message" onPress={message} />
+            <Action
+              icon={isContact ? "person-remove" : "person-add"}
+              label={isContact ? "Remove" : "Add Contact"}
+              a11y={isContact ? "Remove from contacts" : "Add to contacts"}
+              onPress={() => void store.toggleContact(uid)}
+            />
           </View>
         )}
 
-        <Text style={[styles.label, { marginTop: 22 }]}>Account</Text>
         <View style={styles.card}>
-          <Row k="Username" v={`@${u?.username || "?"}`} />
-          <Row k="User ID" v={`#${Number.isFinite(uid) ? uid : "?"}`} />
-          <Row
-            k="Status"
-            v={online ? "Online" : "Offline"}
-            vColor={online ? colors.sageDeep : colors.muted}
-          />
+          <Text style={styles.cardLabel}>Bio</Text>
+          <Text style={[styles.bio, !u?.bio && styles.bioEmpty]}>{u?.bio || "No bio yet."}</Text>
+        </View>
+
+        <View style={styles.card}>
+          <Detail k="Username" v={`@${u?.username || "?"}`} />
+          <Detail k="User ID" v={`#${valid ? uid : "?"}`} last />
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function Row({ k, v, vColor }: { k: string; v: string; vColor?: string }) {
+function Action({
+  icon,
+  label,
+  a11y,
+  onPress,
+}: {
+  icon: IconName;
+  label: string;
+  a11y?: string;
+  onPress: () => void;
+}) {
   return (
-    <View style={styles.row}>
-      <Text style={styles.rowK}>{k}</Text>
-      <Text style={[styles.rowV, vColor ? { color: vColor } : null]}>{v}</Text>
+    <Pressable
+      style={({ pressed }) => [styles.action, pressed && { opacity: 0.7 }]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={a11y || label}
+    >
+      <Icon name={icon} size={22} color={colors.sage} />
+      <Text style={styles.actionLabel}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function Detail({ k, v, last }: { k: string; v: string; last?: boolean }) {
+  return (
+    <View style={[styles.detail, !last && styles.detailSep]}>
+      <Text style={styles.cardLabel}>{k}</Text>
+      <Text style={styles.detailValue}>{v}</Text>
     </View>
   );
 }
@@ -108,142 +115,98 @@ function Row({ k, v, vColor }: { k: string; v: string; vColor?: string }) {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: colors.paper,
+    backgroundColor: colors.grouped,
   },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 4,
-  },
-  title: {
-    fontFamily: fontDisplay,
-    fontSize: 26,
-    color: colors.ink,
+  nav: {
+    alignItems: "flex-end",
+    paddingHorizontal: 14,
+    paddingTop: 12,
   },
   body: {
-    padding: 20,
+    paddingHorizontal: 16,
+    paddingBottom: 40,
   },
-  banner: {
-    height: 54,
-    borderRadius: radius.m,
-    backgroundColor: colors.sageSoft,
-    marginBottom: -24,
-  },
-  profileRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 14,
-    paddingHorizontal: 12,
-  },
-  nameBlock: {
-    paddingBottom: 2,
+  hero: {
+    alignItems: "center",
+    marginTop: 4,
+    marginBottom: 20,
   },
   name: {
-    fontSize: 22,
-    fontWeight: "800",
+    ...type.largeTitle,
+    fontSize: 28,
     color: colors.ink,
-  },
-  handle: {
-    fontSize: 13.5,
-    color: colors.muted,
-    marginTop: 1,
+    marginTop: 14,
+    textAlign: "center",
   },
   statusRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 5,
-    marginTop: 5,
+    gap: 6,
+    marginTop: 4,
   },
   dot: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: colors.line,
+    backgroundColor: colors.faint,
   },
   dotOn: {
-    backgroundColor: colors.sage,
+    backgroundColor: "#4CB86E",
   },
   statusText: {
-    fontSize: 12,
+    ...type.subhead,
     color: colors.muted,
   },
-  label: {
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 1,
-    textTransform: "uppercase",
-    color: colors.faint,
-    marginTop: 24,
-    marginBottom: 8,
-  },
-  bio: {
-    fontSize: 15,
-    lineHeight: 22,
-    color: colors.ink2,
-    backgroundColor: colors.surface,
-    borderRadius: radius.m,
-    padding: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-  },
-  bioEmpty: {
-    color: colors.faint,
-    fontStyle: "italic",
-  },
-  btnRow: {
+  actions: {
     flexDirection: "row",
     gap: 10,
-    marginTop: 18,
+    marginBottom: 16,
   },
-  btn: {
-    flexDirection: "row",
+  action: {
+    flex: 1,
     alignItems: "center",
-    gap: 6,
+    gap: 4,
+    paddingVertical: 12,
+    borderRadius: 14,
     backgroundColor: colors.surface,
-    borderRadius: radius.pill,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
   },
-  btnPrimary: {
-    backgroundColor: colors.sage,
-    borderColor: colors.sage,
-  },
-  btnText: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: colors.ink2,
-  },
-  btnPrimaryText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: colors.surface,
+  actionLabel: {
+    ...type.caption,
+    fontWeight: "500",
+    color: colors.sageDeep,
   },
   card: {
     backgroundColor: colors.surface,
-    borderRadius: radius.m,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    paddingHorizontal: 14,
-  },
-  row: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+    borderRadius: 14,
+    paddingHorizontal: 16,
     paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.line2,
+    marginBottom: 14,
   },
-  rowK: {
-    fontSize: 13.5,
+  cardLabel: {
+    ...type.footnote,
     color: colors.muted,
   },
-  rowV: {
-    fontSize: 13.5,
-    fontWeight: "600",
+  bio: {
+    ...type.body,
     color: colors.ink,
+    marginTop: 3,
+    lineHeight: 23,
+  },
+  bioEmpty: {
+    color: colors.faint,
+  },
+  detail: {
+    paddingVertical: 6,
+  },
+  detailSep: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.separator,
+    paddingBottom: 10,
+    marginBottom: 4,
+  },
+  detailValue: {
+    ...type.body,
+    color: colors.ink,
+    marginTop: 2,
   },
 });

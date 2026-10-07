@@ -1,6 +1,5 @@
 import React, { useCallback, useState } from "react";
 import {
-  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   Platform,
@@ -21,69 +20,137 @@ import * as WebBrowser from "expo-web-browser";
 import * as Notifications from "expo-notifications";
 import { fmtAccountDate } from "@alexmessages/shared";
 import { toast, useChatState, useSession } from "../src/session";
-import { colors, fontDisplay, radius } from "../src/theme";
+import { colors, type } from "../src/theme";
 import { Avatar } from "../src/components/Avatar";
 import { Icon, type IconName } from "../src/components/Icon";
+import { GlassIconButton } from "../src/components/Glass";
+import { TapMenu, type MenuAction } from "../src/components/NativeMenu";
 
-type TabId = "profile" | "account" | "notifications" | "data" | "admin";
+type Page = "root" | "profile" | "account" | "notifications" | "data" | "admin";
+
+const TITLES: Record<Page, string> = {
+  root: "Settings",
+  profile: "Profile",
+  account: "Account",
+  notifications: "Notifications",
+  data: "Data",
+  admin: "Admin",
+};
 
 /**
- * Settings — the Apple-System-Settings overlay: vertical tab rail (wide) or
- * a horizontal tab strip (narrow), one panel per tab. Same five sections as
- * the web client.
+ * Settings — an iOS Settings-style inset-grouped list. The root lists the
+ * profile card and the sections; each section pushes its own page inside the
+ * sheet (glass back button), so nothing ever overflows on a phone.
  */
 export default function SettingsScreen() {
   const s = useChatState();
+  const { serverUrl, logout } = useSession();
   const router = useRouter();
-  const [tab, setTab] = useState<TabId>("profile");
+  const [page, setPage] = useState<Page>("root");
+  const me = s.me;
 
-  const tabs: { id: TabId; label: string; icon: IconName }[] = [
-    { id: "profile", label: "Profile", icon: "person-outline" },
-    { id: "account", label: "Account", icon: "shield-checkmark-outline" },
-    { id: "notifications", label: "Notifications", icon: "notifications-outline" },
-    { id: "data", label: "Data", icon: "server-outline" },
-    ...(s.isAdmin
-      ? [{ id: "admin" as TabId, label: "Admin", icon: "lock-closed-outline" as IconName }]
-      : []),
-  ];
+  const confirmLogout = () => {
+    Alert.alert(
+      "Log Out",
+      "Log out from all of your devices? This ends every active session, including this one.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Log Out", style: "destructive", onPress: () => void logout() },
+      ]
+    );
+  };
 
   return (
     <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Settings</Text>
-        <Pressable onPress={() => router.back()} accessibilityLabel="Close" hitSlop={10}>
-          <Icon name="close" size={22} color={colors.muted} />
-        </Pressable>
+      <View style={styles.nav}>
+        <View style={styles.navSide}>
+          {page !== "root" && (
+            <GlassIconButton
+              icon="chevron-back"
+              label="Back"
+              onPress={() => setPage("root")}
+              iconSize={22}
+              size={40}
+            />
+          )}
+        </View>
+        <Text style={styles.navTitle} accessibilityRole="header">
+          {TITLES[page]}
+        </Text>
+        <View style={[styles.navSide, { alignItems: "flex-end" }]}>
+          <GlassIconButton icon="close" label="Close" onPress={() => router.back()} iconSize={20} size={40} />
+        </View>
       </View>
-      <View style={styles.tabs}>
-        {tabs.map((t) => (
-          <Pressable
-            key={t.id}
-            style={[styles.tabBtn, tab === t.id && styles.tabBtnActive]}
-            onPress={() => setTab(t.id)}
-            accessibilityRole="tab"
-            accessibilityLabel={t.label}
-            accessibilityState={{ selected: tab === t.id }}
-          >
-            <Icon name={t.icon} size={16} color={tab === t.id ? colors.sageDeep : colors.muted} />
-            <Text style={[styles.tabText, tab === t.id && styles.tabTextActive]}>{t.label}</Text>
-          </Pressable>
-        ))}
-      </View>
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        {tab === "profile" && <ProfileTab />}
-        {tab === "account" && <AccountTab />}
-        {tab === "notifications" && <NotificationsTab />}
-        {tab === "data" && <DataTab />}
-        {tab === "admin" && <AdminTab />}
+
+      <ScrollView
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
+      >
+        {page === "root" && me && (
+          <>
+            <Group>
+              <Pressable
+                style={({ pressed }) => [styles.meCard, pressed && styles.pressed]}
+                onPress={() => setPage("profile")}
+                accessibilityRole="button"
+                accessibilityLabel="Profile"
+              >
+                <Avatar user={me} size={60} />
+                <View style={styles.flex}>
+                  <Text style={styles.meName} numberOfLines={1}>
+                    {me.display_name || me.username}
+                  </Text>
+                  <Text style={styles.meSub} numberOfLines={1}>
+                    @{me.username} · Photo, name & bio
+                  </Text>
+                </View>
+                <Icon name="chevron-forward" size={16} color={colors.faint} />
+              </Pressable>
+            </Group>
+
+            <Group>
+              <Row icon="shield-checkmark" iconBg={colors.sage} title="Account" onPress={() => setPage("account")} />
+              <Row
+                icon="notifications"
+                iconBg="#D6694A"
+                title="Notifications"
+                onPress={() => setPage("notifications")}
+              />
+              <Row
+                icon="server"
+                iconBg="#5B7FA6"
+                title="Data"
+                onPress={() => setPage("data")}
+                last={!s.isAdmin}
+              />
+              {s.isAdmin && (
+                <Row icon="key" iconBg={colors.ink2} title="Admin" onPress={() => setPage("admin")} last />
+              )}
+            </Group>
+
+            <Group>
+              <Row title="Log Out" destructive center onPress={confirmLogout} last />
+            </Group>
+
+            <Text style={styles.colophon}>
+              Alex Messages · {serverUrl.replace(/^https?:\/\//, "").replace(/\/+$/, "")}
+            </Text>
+          </>
+        )}
+        {page === "profile" && <ProfilePage />}
+        {page === "account" && <AccountPage />}
+        {page === "notifications" && <NotificationsPage />}
+        {page === "data" && <DataPage />}
+        {page === "admin" && <AdminPage />}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-// ---------- Profile tab ----------
+// ---------- Profile ----------
 
-function ProfileTab() {
+function ProfilePage() {
   const { api, store } = useSession();
   const s = useChatState();
   const me = s.me!;
@@ -134,27 +201,15 @@ function ProfileTab() {
     }
   }, [api, store]);
 
-  const onCamPress = useCallback(() => {
-    if (!me.avatar) {
-      void pickAvatar();
-      return;
-    }
-    if (Platform.OS === "ios") {
-      ActionSheetIOS.showActionSheetWithOptions(
-        { options: ["Upload photo", "Remove photo", "Cancel"], cancelButtonIndex: 2, destructiveButtonIndex: 1 },
-        (i) => {
-          if (i === 0) void pickAvatar();
-          else if (i === 1) void removeAvatar();
-        }
-      );
-    } else {
-      Alert.alert("Profile photo", undefined, [
-        { text: "Upload photo", onPress: () => void pickAvatar() },
-        { text: "Remove photo", style: "destructive", onPress: () => void removeAvatar() },
-        { text: "Cancel", style: "cancel" },
-      ]);
-    }
-  }, [me.avatar, pickAvatar, removeAvatar]);
+  const photoActions: MenuAction[] = [
+    { label: "Choose Photo", systemImage: "photo", onPress: () => void pickAvatar() },
+    {
+      label: "Remove Photo",
+      systemImage: "trash",
+      destructive: true,
+      onPress: () => void removeAvatar(),
+    },
+  ];
 
   const save = async () => {
     const ok = await store.saveProfile(name.trim(), bio.trim());
@@ -166,61 +221,84 @@ function ProfileTab() {
 
   return (
     <View>
-      <Text style={styles.h}>Profile</Text>
-      <View style={styles.avatarRow}>
-        <Avatar user={me} size={84} />
-        <Pressable style={styles.camBtn} onPress={onCamPress} accessibilityLabel="Change photo">
-          {busy ? (
-            <ActivityIndicator size="small" color={colors.surface} />
-          ) : (
-            <Icon name="camera" size={15} color={colors.surface} />
-          )}
-        </Pressable>
+      <View style={styles.photoBlock}>
+        {me.avatar ? (
+          // With a photo set, tapping offers Choose / Remove as a native menu.
+          <TapMenu actions={photoActions} title="Profile photo">
+            <PhotoControl busy={busy} label="Edit Photo" />
+          </TapMenu>
+        ) : (
+          <Pressable onPress={() => void pickAvatar()} accessibilityRole="button">
+            <PhotoControl busy={busy} label="Add Photo" />
+          </Pressable>
+        )}
       </View>
-      <TextInput
-        style={styles.nameInput}
-        value={name}
-        onChangeText={setName}
-        placeholder="Your name"
-        placeholderTextColor={colors.faint}
-        maxLength={40}
-        accessibilityLabel="Display name"
-      />
-      <Text style={styles.groupLabel}>Bio</Text>
-      <TextInput
-        style={styles.bioInput}
-        value={bio}
-        onChangeText={setBio}
-        placeholder="A line or two about you…"
-        placeholderTextColor={colors.faint}
-        multiline
-        maxLength={280}
-        accessibilityLabel="Bio"
-      />
+
+      <Group header="Name">
+        <TextInput
+          style={styles.fieldInput}
+          value={name}
+          onChangeText={setName}
+          placeholder="Your name"
+          placeholderTextColor={colors.faint}
+          maxLength={40}
+          accessibilityLabel="Display name"
+        />
+      </Group>
+      <Group header="Bio" footer="Shown on your profile to people you message.">
+        <TextInput
+          style={[styles.fieldInput, styles.bioInput]}
+          value={bio}
+          onChangeText={setBio}
+          placeholder="A line or two about you…"
+          placeholderTextColor={colors.faint}
+          multiline
+          maxLength={280}
+          accessibilityLabel="Bio"
+        />
+      </Group>
+
       {dirty && (
-        <View style={styles.saveBar}>
-          <Pressable
-            style={styles.btnGhost}
+        <Group>
+          <Row title="Save Changes" tint={colors.sageDeep} center bold onPress={() => void save()} />
+          <Row
+            title="Discard"
+            center
+            tint={colors.muted}
             onPress={() => {
               setName(me.display_name || "");
               setBio(me.bio || "");
             }}
-          >
-            <Text style={styles.btnGhostText}>Cancel</Text>
-          </Pressable>
-          <Pressable style={styles.btnPrimary} onPress={() => void save()}>
-            <Text style={styles.btnPrimaryText}>Save changes</Text>
-          </Pressable>
-        </View>
+            last
+          />
+        </Group>
       )}
     </View>
   );
 }
 
-// ---------- Account tab ----------
+/** Avatar + "Edit Photo" link, the trigger for the photo menu. */
+function PhotoControl({ busy, label }: { busy: boolean; label: string }) {
+  const s = useChatState();
+  return (
+    <View style={styles.photoControl} accessibilityLabel="Change photo">
+      <View>
+        <Avatar user={s.me} size={104} />
+        {busy && (
+          <View style={styles.photoBusy}>
+            <ActivityIndicator color={colors.surface} />
+          </View>
+        )}
+      </View>
+      <Text style={styles.photoLink}>{label}</Text>
+    </View>
+  );
+}
 
-function AccountTab() {
-  const { api, store, logout } = useSession();
+// ---------- Account ----------
+
+function AccountPage() {
+  const { api, logout } = useSession();
   const s = useChatState();
   const me = s.me!;
   const [pw, setPw] = useState({ cur: "", next: "", confirm: "" });
@@ -249,177 +327,164 @@ function AccountTab() {
 
   const confirmLogout = () => {
     Alert.alert(
-      "Log out",
+      "Log Out",
       "Log out from all of your devices? This ends every active session, including this one.",
       [
         { text: "Cancel", style: "cancel" },
-        { text: "Log out", style: "destructive", onPress: () => void logout() },
+        { text: "Log Out", style: "destructive", onPress: () => void logout() },
       ]
     );
   };
 
-  const confirmDelete = () => {
-    Alert.prompt(
-      "Delete account",
-      "Enter your password to permanently delete your account, profile, and message history. This can't be undone.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: (password?: string) => {
-            if (!password) return;
-            void (async () => {
-              try {
-                await api.deleteAccount(password);
-                toast("Account deleted");
-                await logout();
-              } catch (e) {
-                Alert.alert("Couldn't delete", (e as { detail?: string }).detail || "Try again.");
-              }
-            })();
-          },
-        },
-      ],
-      "secure-text"
-    );
-  };
-
-  const deleteFlow =
-    Platform.OS === "ios"
-      ? confirmDelete
-      : () => {
-          // Android has no Alert.prompt — show a confirmation that defers to
-          // a secure input sheet.
-          Alert.alert(
-            "Delete account",
-            "Permanently delete your account, profile, and message history? This can't be undone.",
-            [
-              { text: "Cancel", style: "cancel" },
-              { text: "Continue", style: "destructive", onPress: () => setDeleteSheet(true) },
-            ]
-          );
-        };
-
-  const runDelete = async () => {
+  const deleteWith = async (password: string) => {
     try {
-      await api.deleteAccount(deletePw);
+      await api.deleteAccount(password);
       toast("Account deleted");
       await logout();
     } catch (e) {
       Alert.alert("Couldn't delete", (e as { detail?: string }).detail || "Try again.");
-    } finally {
-      setDeleteSheet(false);
-      setDeletePw("");
     }
+  };
+
+  const startDelete = () => {
+    if (Platform.OS === "ios") {
+      Alert.prompt(
+        "Delete Account",
+        "Enter your password to permanently delete your account, profile, and message history. This can't be undone.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: (password?: string) => {
+              if (password) void deleteWith(password);
+            },
+          },
+        ],
+        "secure-text"
+      );
+      return;
+    }
+    // Android has no Alert.prompt — confirm, then ask for the password inline.
+    Alert.alert(
+      "Delete account",
+      "Permanently delete your account, profile, and message history? This can't be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Continue", style: "destructive", onPress: () => setDeleteSheet(true) },
+      ]
+    );
   };
 
   return (
     <View>
-      <Text style={styles.h}>Account</Text>
-      <Text style={styles.groupLabel}>Account info</Text>
-      <View style={styles.card}>
-        <Row k="Username" v={`@${me.username}`} />
-        <Row k="User ID" v={`#${me.id}`} />
-        <Row k="Member since" v={fmtAccountDate(s.meCreatedAt)} />
-        <Row k="Status" v="approved" vColor={colors.sageDeep} last />
-      </View>
+      <Group header="Account Info">
+        <Row title="Username" value={`@${me.username}`} />
+        <Row title="User ID" value={`#${me.id}`} />
+        <Row title="Member Since" value={fmtAccountDate(s.meCreatedAt)} />
+        <Row title="Status" value="Approved" valueColor={colors.sageDeep} last />
+      </Group>
 
-      <Text style={styles.groupLabel}>Change password</Text>
-      <View style={styles.card}>
-        <TextInput
-          style={styles.pwInput}
-          placeholder="Current password"
-          placeholderTextColor={colors.faint}
-          secureTextEntry
-          value={pw.cur}
-          onChangeText={(v) => setPw({ ...pw, cur: v })}
-          autoComplete="current-password"
-        />
-        <TextInput
-          style={styles.pwInput}
-          placeholder="New password (8–128 chars)"
-          placeholderTextColor={colors.faint}
-          secureTextEntry
-          value={pw.next}
-          onChangeText={(v) => setPw({ ...pw, next: v })}
-          autoComplete="new-password"
-        />
-        <TextInput
-          style={styles.pwInput}
-          placeholder="Confirm new password"
-          placeholderTextColor={colors.faint}
-          secureTextEntry
-          value={pw.confirm}
-          onChangeText={(v) => setPw({ ...pw, confirm: v })}
-          autoComplete="new-password"
-        />
-        {pwMsg && (
-          <Text style={[styles.pwMsg, { color: pwMsg.ok ? colors.sageDeep : colors.danger }]}>
-            {pwMsg.text}
-          </Text>
-        )}
-        <Pressable style={[styles.btnPrimary, { alignSelf: "flex-start" }]} onPress={() => void submitPassword()}>
-          <Text style={styles.btnPrimaryText}>Update password</Text>
-        </Pressable>
-      </View>
-
-      <Text style={styles.groupLabel}>Session</Text>
-      <SettingsRow
-        title="Log out from all of your devices"
-        desc="Ends every active session, including this one."
+      <Group
+        header="Change Password"
+        footer={pwMsg?.text}
+        footerColor={pwMsg ? (pwMsg.ok ? colors.sageDeep : colors.danger) : undefined}
       >
-        <Pressable style={styles.btn} onPress={confirmLogout}>
-          <Text style={styles.btnText}>Log out</Text>
-        </Pressable>
-      </SettingsRow>
+        <PwField
+          placeholder="Current password"
+          value={pw.cur}
+          onChange={(v) => setPw({ ...pw, cur: v })}
+          auto="current-password"
+        />
+        <PwField
+          placeholder="New password (8–128 characters)"
+          value={pw.next}
+          onChange={(v) => setPw({ ...pw, next: v })}
+          auto="new-password"
+        />
+        <PwField
+          placeholder="Confirm new password"
+          value={pw.confirm}
+          onChange={(v) => setPw({ ...pw, confirm: v })}
+          auto="new-password"
+        />
+        <Row
+          title="Update Password"
+          tint={colors.sageDeep}
+          bold
+          onPress={() => void submitPassword()}
+          disabled={!pw.cur || !pw.next || !pw.confirm}
+          last
+        />
+      </Group>
 
-      <Text style={styles.groupLabel}>Danger zone</Text>
-      <View style={styles.dangerZone}>
-        <Text style={styles.dzTitle}>Delete account</Text>
-        <Text style={styles.dzDesc}>
-          Permanently deletes your account, profile, and message history. This can't be undone.
-        </Text>
-        <Pressable style={styles.btnDanger} onPress={deleteFlow}>
-          <Text style={styles.btnDangerText}>Delete my account…</Text>
-        </Pressable>
-      </View>
+      <Group footer="Ends every active session, including this one.">
+        <Row title="Log Out of All Devices" destructive onPress={confirmLogout} last />
+      </Group>
+
+      <Group footer="Permanently deletes your account, profile, and message history. This can't be undone.">
+        <Row title="Delete Account…" destructive onPress={startDelete} last />
+      </Group>
 
       {deleteSheet && (
-        <View style={styles.deleteSheet}>
-          <Text style={styles.dzTitle}>Confirm with your password</Text>
-          <TextInput
-            style={styles.pwInput}
-            placeholder="Password"
-            placeholderTextColor={colors.faint}
-            secureTextEntry
-            value={deletePw}
-            onChangeText={setDeletePw}
-            autoFocus
-          />
-          <View style={styles.saveBar}>
-            <Pressable
-              style={styles.btnGhost}
-              onPress={() => {
+        <Group header="Confirm With Your Password">
+          <PwField placeholder="Password" value={deletePw} onChange={setDeletePw} auto="current-password" />
+          <Row
+            title="Delete Account"
+            destructive
+            bold
+            onPress={() => {
+              void deleteWith(deletePw).finally(() => {
                 setDeleteSheet(false);
                 setDeletePw("");
-              }}
-            >
-              <Text style={styles.btnGhostText}>Cancel</Text>
-            </Pressable>
-            <Pressable style={styles.btnDanger} onPress={() => void runDelete()}>
-              <Text style={styles.btnDangerText}>Delete</Text>
-            </Pressable>
-          </View>
-        </View>
+              });
+            }}
+          />
+          <Row
+            title="Cancel"
+            tint={colors.muted}
+            onPress={() => {
+              setDeleteSheet(false);
+              setDeletePw("");
+            }}
+            last
+          />
+        </Group>
       )}
     </View>
   );
 }
 
-// ---------- Notifications tab ----------
+function PwField({
+  placeholder,
+  value,
+  onChange,
+  auto,
+}: {
+  placeholder: string;
+  value: string;
+  onChange: (v: string) => void;
+  auto: "current-password" | "new-password";
+}) {
+  return (
+    <View style={styles.rowSep}>
+      <TextInput
+        style={styles.fieldInput}
+        placeholder={placeholder}
+        placeholderTextColor={colors.faint}
+        secureTextEntry
+        value={value}
+        onChangeText={onChange}
+        autoComplete={auto}
+        textContentType={auto === "new-password" ? "newPassword" : "password"}
+      />
+    </View>
+  );
+}
 
-function NotificationsTab() {
+// ---------- Notifications ----------
+
+function NotificationsPage() {
   const [perm, setPerm] = useState<Notifications.PermissionStatus | null>(null);
 
   React.useEffect(() => {
@@ -431,7 +496,7 @@ function NotificationsTab() {
     if (enabled) {
       Alert.alert(
         "Notifications",
-        "Notification permission is managed by the system. Open the OS Settings app to turn it off.",
+        "Notification permission is managed by the system. Open the Settings app to turn it off.",
         [{ text: "OK" }]
       );
       return;
@@ -442,32 +507,36 @@ function NotificationsTab() {
   };
 
   let desc =
-    "Get a system notification for new direct messages while Alex Messages is in the background.";
+    "Get a notification for new direct messages while Alex Messages is in the background.";
   if (perm === "denied") {
-    desc = "Blocked by the system. Enable notifications for this app in the OS Settings app.";
+    desc = "Blocked by the system. Enable notifications for Alex Messages in the Settings app.";
   } else if (enabled) {
-    desc = "You'll get a notification for new direct messages when they arrive in the background.";
+    desc = "You'll get a notification when a direct message arrives in the background.";
   }
 
   return (
-    <View>
-      <Text style={styles.h}>Notifications</Text>
-      <SettingsRow title="Direct message alerts" desc={desc}>
-        <Switch
-          value={enabled}
-          onValueChange={() => void toggle()}
-          trackColor={{ true: colors.sage, false: colors.line }}
-          thumbColor={colors.surface}
-          accessibilityLabel="Toggle notifications"
-        />
-      </SettingsRow>
-    </View>
+    <Group footer={desc}>
+      <Row
+        icon="chatbubble"
+        iconBg={colors.sage}
+        title="Direct message alerts"
+        accessory={
+          <Switch
+            value={enabled}
+            onValueChange={() => void toggle()}
+            trackColor={{ true: colors.sage, false: colors.line }}
+            accessibilityLabel="Toggle notifications"
+          />
+        }
+        last
+      />
+    </Group>
   );
 }
 
-// ---------- Data tab ----------
+// ---------- Data ----------
 
-function DataTab() {
+function DataPage() {
   const { api } = useSession();
   const [busy, setBusy] = useState(false);
 
@@ -491,331 +560,281 @@ function DataTab() {
   };
 
   return (
-    <View>
-      <Text style={styles.h}>Data</Text>
-      <SettingsRow
+    <Group footer="A copy of your account, contacts, and full message history as a JSON file.">
+      <Row
+        icon="download"
+        iconBg="#5B7FA6"
         title="Export my data"
-        desc="A copy of your account, contacts, and full message history as a JSON file."
-      >
-        <Pressable style={styles.btn} onPress={() => void doExport()} disabled={busy}>
-          {busy ? (
-            <ActivityIndicator size="small" color={colors.ink2} />
-          ) : (
-            <>
-              <Icon name="download-outline" size={14} color={colors.ink2} />
-              <Text style={styles.btnText}>Export</Text>
-            </>
-          )}
-        </Pressable>
-      </SettingsRow>
-    </View>
+        onPress={busy ? undefined : () => void doExport()}
+        accessory={busy ? <ActivityIndicator size="small" color={colors.muted} /> : undefined}
+        chevron={!busy}
+        last
+      />
+    </Group>
   );
 }
 
-// ---------- Admin tab ----------
+// ---------- Admin ----------
 
-function AdminTab() {
+function AdminPage() {
   const { serverUrl } = useSession();
   const url = serverUrl.replace(/:(\d+)$/, ":8001");
   return (
-    <View>
-      <Text style={styles.h}>Admin</Text>
-      <Text style={styles.sub}>
-        You have administrator access. The control panel opens in the browser.
-      </Text>
-      <Pressable
-        style={[styles.btnPrimary, { alignSelf: "flex-start", marginTop: 14 }]}
+    <Group footer="You have administrator access. The control panel opens in the browser.">
+      <Row
+        icon="key"
+        iconBg={colors.ink2}
+        title="Open Admin Panel"
         onPress={() => void WebBrowser.openBrowserAsync(url)}
-      >
-        <Text style={styles.btnPrimaryText}>Open admin panel</Text>
-      </Pressable>
-    </View>
+        accessory={<Icon name="open-outline" size={17} color={colors.faint} />}
+        chevron={false}
+        last
+      />
+    </Group>
   );
 }
 
-// ---------- shared bits ----------
+// ---------- grouped-list primitives ----------
 
-function Row({ k, v, vColor, last }: { k: string; v: string; vColor?: string; last?: boolean }) {
-  return (
-    <View style={[styles.row, last && { borderBottomWidth: 0 }]}>
-      <Text style={styles.rowK}>{k}</Text>
-      <Text style={[styles.rowV, vColor ? { color: vColor } : null]}>{v}</Text>
-    </View>
-  );
-}
-
-function SettingsRow({
-  title,
-  desc,
+function Group({
+  header,
+  footer,
+  footerColor,
   children,
 }: {
-  title: string;
-  desc?: string;
+  header?: string;
+  footer?: string;
+  footerColor?: string;
   children: React.ReactNode;
 }) {
   return (
-    <View style={styles.settingsRow}>
-      <View style={styles.settingsRowLabel}>
-        <Text style={styles.settingsRowTitle}>{title}</Text>
-        {desc ? <Text style={styles.settingsRowDesc}>{desc}</Text> : null}
-      </View>
-      {children}
+    <View style={styles.group}>
+      {header ? <Text style={styles.groupHeader}>{header}</Text> : null}
+      <View style={styles.groupCard}>{children}</View>
+      {footer ? (
+        <Text style={[styles.groupFooter, footerColor ? { color: footerColor } : null]}>{footer}</Text>
+      ) : null}
     </View>
+  );
+}
+
+function Row({
+  title,
+  value,
+  valueColor,
+  icon,
+  iconBg,
+  onPress,
+  accessory,
+  chevron,
+  destructive,
+  tint,
+  bold,
+  center,
+  disabled,
+  last,
+}: {
+  title: string;
+  value?: string;
+  valueColor?: string;
+  icon?: IconName;
+  iconBg?: string;
+  onPress?: () => void;
+  accessory?: React.ReactNode;
+  chevron?: boolean;
+  destructive?: boolean;
+  tint?: string;
+  bold?: boolean;
+  center?: boolean;
+  disabled?: boolean;
+  last?: boolean;
+}) {
+  const showChevron = chevron ?? (!!onPress && !destructive && !tint && !center);
+  const color = destructive ? colors.danger : tint || colors.ink;
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!onPress || disabled}
+      style={({ pressed }) => [styles.row, pressed && onPress && styles.pressed]}
+      // Static rows (values, switches) keep their children individually accessible.
+      accessible={!!onPress}
+      accessibilityRole={onPress ? "button" : undefined}
+      accessibilityLabel={onPress ? title : undefined}
+    >
+      {icon && (
+        <View style={[styles.rowIcon, { backgroundColor: iconBg || colors.sage }]}>
+          <Icon name={icon} size={17} color={colors.surface} />
+        </View>
+      )}
+      <View style={[styles.rowMain, !last && styles.rowSep, center && { justifyContent: "center" }]}>
+        <Text
+          style={[
+            styles.rowTitle,
+            { color },
+            bold && { fontWeight: "600" },
+            disabled && { opacity: 0.4 },
+            center ? { textAlign: "center", flex: 1 } : { flex: 1 },
+          ]}
+          numberOfLines={1}
+        >
+          {title}
+        </Text>
+        {value != null && (
+          <Text style={[styles.rowValue, valueColor ? { color: valueColor } : null]} numberOfLines={1}>
+            {value}
+          </Text>
+        )}
+        {accessory}
+        {showChevron && <Icon name="chevron-forward" size={16} color={colors.faint} />}
+      </View>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: colors.paper,
+    backgroundColor: colors.grouped,
   },
-  header: {
+  flex: {
+    flex: 1,
+  },
+  nav: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingTop: 20,
+    paddingHorizontal: 14,
+    paddingTop: 12,
     paddingBottom: 8,
   },
-  title: {
-    fontFamily: fontDisplay,
-    fontSize: 28,
+  navSide: {
+    width: 64,
+  },
+  navTitle: {
+    flex: 1,
+    textAlign: "center",
+    ...type.headline,
     color: colors.ink,
-  },
-  tabs: {
-    flexDirection: "row",
-    paddingHorizontal: 14,
-    gap: 6,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.line,
-    paddingBottom: 10,
-  },
-  tabBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    paddingHorizontal: 11,
-    paddingVertical: 7,
-    borderRadius: radius.pill,
-  },
-  tabBtnActive: {
-    backgroundColor: colors.sageTint,
-  },
-  tabText: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: colors.muted,
-  },
-  tabTextActive: {
-    color: colors.sageDeep,
   },
   content: {
-    padding: 20,
+    paddingHorizontal: 16,
     paddingBottom: 48,
   },
-  h: {
-    fontFamily: fontDisplay,
-    fontSize: 24,
-    color: colors.ink,
-    marginBottom: 14,
+  pressed: {
+    backgroundColor: "rgba(27,36,31,0.06)",
   },
-  sub: {
-    fontSize: 13.5,
+  group: {
+    marginTop: 22,
+  },
+  groupHeader: {
+    ...type.footnote,
     color: colors.muted,
-    lineHeight: 19,
-  },
-  avatarRow: {
-    alignSelf: "center",
-    marginBottom: 14,
-  },
-  camBtn: {
-    position: "absolute",
-    right: -2,
-    bottom: -2,
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: colors.sage,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 2,
-    borderColor: colors.paper,
-  },
-  nameInput: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.s,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 16,
-    color: colors.ink,
-    textAlign: "center",
-    fontWeight: "600",
-  },
-  bioInput: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.s,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 15,
-    color: colors.ink,
-    minHeight: 90,
-    textAlignVertical: "top",
-  },
-  groupLabel: {
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 1,
     textTransform: "uppercase",
-    color: colors.faint,
-    marginTop: 20,
-    marginBottom: 8,
+    marginLeft: 16,
+    marginBottom: 7,
   },
-  saveBar: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    gap: 10,
-    marginTop: 14,
+  groupCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    overflow: "hidden",
   },
-  btnGhost: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: radius.pill,
-  },
-  btnGhostText: {
-    fontSize: 14,
-    fontWeight: "600",
+  groupFooter: {
+    ...type.footnote,
     color: colors.muted,
+    marginHorizontal: 16,
+    marginTop: 7,
+    lineHeight: 18,
   },
-  btnPrimary: {
+  meCard: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    backgroundColor: colors.sage,
-    borderRadius: radius.pill,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-  },
-  btnPrimaryText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: colors.surface,
-  },
-  btn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: colors.surface,
-    borderRadius: radius.pill,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
+    gap: 14,
     paddingHorizontal: 14,
-    paddingVertical: 9,
+    paddingVertical: 12,
   },
-  btnText: {
-    fontSize: 13.5,
-    fontWeight: "600",
-    color: colors.ink2,
+  meName: {
+    ...type.title2,
+    fontSize: 20,
+    color: colors.ink,
   },
-  btnDanger: {
-    backgroundColor: colors.danger,
-    borderRadius: radius.pill,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    alignSelf: "flex-start",
-  },
-  btnDangerText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: colors.surface,
-  },
-  card: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.m,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    paddingHorizontal: 14,
-    paddingVertical: 6,
+  meSub: {
+    ...type.subhead,
+    color: colors.muted,
+    marginTop: 1,
   },
   row: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    paddingVertical: 11,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.line2,
+    alignItems: "center",
+    paddingLeft: 16,
+    minHeight: 48,
   },
-  rowK: {
-    fontSize: 13.5,
-    color: colors.muted,
+  rowIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 14,
   },
-  rowV: {
-    fontSize: 13.5,
-    fontWeight: "600",
-    color: colors.ink,
-  },
-  pwInput: {
-    backgroundColor: colors.paper,
-    borderRadius: radius.s,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 15,
-    color: colors.ink,
-    marginTop: 8,
-  },
-  pwMsg: {
-    fontSize: 12.5,
-    marginTop: 8,
-  },
-  settingsRow: {
+  rowMain: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    paddingVertical: 10,
+    gap: 8,
+    minHeight: 48,
+    paddingRight: 14,
+    paddingVertical: 8,
   },
-  settingsRowLabel: {
-    flex: 1,
+  rowSep: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.separator,
   },
-  settingsRowTitle: {
-    fontSize: 14.5,
-    fontWeight: "600",
+  rowTitle: {
+    ...type.body,
+  },
+  rowValue: {
+    ...type.body,
+    color: colors.muted,
+    flexShrink: 1,
+  },
+  fieldInput: {
+    ...type.body,
     color: colors.ink,
+    paddingHorizontal: 16,
+    paddingVertical: 13,
   },
-  settingsRowDesc: {
-    fontSize: 12.5,
-    color: colors.muted,
-    lineHeight: 17,
-    marginTop: 2,
+  bioInput: {
+    minHeight: 96,
+    textAlignVertical: "top",
+    paddingTop: 13,
   },
-  dangerZone: {
-    backgroundColor: "#FBEFEA",
-    borderRadius: radius.m,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#EBD2C8",
-    padding: 14,
+  photoBlock: {
+    alignItems: "center",
+    marginTop: 18,
   },
-  dzTitle: {
-    fontSize: 14.5,
-    fontWeight: "700",
-    color: colors.danger,
+  photoControl: {
+    alignItems: "center",
+    gap: 10,
   },
-  dzDesc: {
-    fontSize: 12.5,
-    color: colors.muted,
-    lineHeight: 18,
-    marginTop: 4,
-    marginBottom: 12,
+  photoBusy: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 52,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    alignItems: "center",
+    justifyContent: "center",
   },
-  deleteSheet: {
-    marginTop: 16,
-    backgroundColor: colors.surface,
-    borderRadius: radius.m,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    padding: 14,
+  photoLink: {
+    ...type.callout,
+    fontWeight: "600",
+    color: colors.sageDeep,
+  },
+  colophon: {
+    ...type.footnote,
+    color: colors.faint,
+    textAlign: "center",
+    marginTop: 26,
   },
 });

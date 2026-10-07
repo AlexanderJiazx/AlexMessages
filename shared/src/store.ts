@@ -281,7 +281,8 @@ export class ChatStore {
     return items;
   }
 
-  private lastMessageTS(channel: string): number {
+  /** Timestamp of the newest message in a thread (0 when empty). */
+  lastMessageTS(channel: string): number {
     const arr = this.state.history[channel] || [];
     for (let i = arr.length - 1; i >= 0; i--) {
       if (arr[i].type !== "system") return arr[i].created_at || 0;

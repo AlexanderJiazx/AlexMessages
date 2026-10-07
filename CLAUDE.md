@@ -58,7 +58,9 @@ the app has **diverged** from the Python original:
   (`GET /api/me/export`). Peer profiles use a separate read-only sheet.
 - **Voice dictation** — a ChatGPT-style dictation bar (cancel · live waveform +
   timer · stop → transcribe into the composer · send-audio voice message ·
-  send → transcribe-and-send). `POST /api/transcribe` accepts an audio clip and
+  send → transcribe-and-send) on the web; the mobile app instead morphs the
+  composer into an iOS 26 Messages-style recorder (see the mobile section).
+  `POST /api/transcribe` accepts an audio clip and
   proxies it to an OpenRouter chat-completion model that accepts
   `input_audio`; the OpenRouter key lives only on the server
   (`OPENROUTER_API_KEY`). wav/mp3 clips route to `mistralai/voxtral-small-24b-2507`;
@@ -208,17 +210,37 @@ Android from one codebase, plus `expo start --web`.
   and taps route back to that conversation.
 - `src/audio.ts` — `useVoiceRecorder` (expo-audio) for dictation + voice notes.
 - `src/theme.ts` — the shared "paper + sage" design tokens (background
-  `#F1EFE6`, paper `#FAF8F1`, sage `#4F7A5E`, deep sage `#355040`…), the `720`
-  wide-layout breakpoint, and `glassSupported` (iOS ≥ 26).
-- `src/components/` — `DMList`, `ConversationView`, `MessageList`, `Bubble`,
-  `Composer` (+ `DictationBar`), `Avatar`, `Icon`, `Sheet`, `ActionSheet`,
-  `attachments`, `ImageViewer`, `Toasts`.
+  `#F6F4EE`, paper `#FAF8F1`, sage `#4F7A5E`, deep sage `#355040`, incoming
+  bubble `#E9E8E0`…), the `type` scale, the `720` wide-layout breakpoint, and
+  `glassSupported` (iOS ≥ 26 with the Liquid Glass API present).
+- `src/components/` — `Glass` (glass primitives + `EdgeFade`), `NativeMenu`
+  (context / popover menus), `DMList`,
+  `ConversationView`, `MessageList`, `Bubble`, `Composer` (+ `DictationBar`),
+  `Avatar`, `Icon`, `Sheet`, `ActionSheet`, `attachments`, `ImageViewer`,
+  `Toasts`.
 
-Platform styling is deliberate: **liquid glass on iOS 26+**
-(`expo-glass-effect` `GlassView` where supported, graceful blur/tint fallback
-below) and **flat Material styling on Android** — same layout and the same
-sage palette, native-feeling surfaces on each. Wide layouts (iPad, tablets,
-desktop web) switch `chat` to a two-pane rail + conversation view.
+Platform styling is deliberate: **liquid glass on iOS 26+** and **flat
+Material styling on Android** — same layout and the same sage palette. All
+floating chrome goes through `src/components/Glass.tsx`: `GlassSurface` /
+`GlassIconButton` render `expo-glass-effect` `GlassView` on iOS 26+, a
+translucent paper chip on older iOS, and an elevated surface on Android;
+`EdgeFade` is the scroll-edge fade (a native `experimental_backgroundImage`
+gradient) that lets content dissolve under floating bars. The design is
+iOS-native: the DM list has glass account/compose buttons, a large title,
+search, and pinned threads as a large-avatar grid; the conversation runs edge
+to edge under a glass header capsule (avatar · name · presence) and a floating
+glass composer (round "+" beside the input pill). Voice messages morph the
+composer in place like Messages: tapping the waveform swells the pill over
+the "+" (both glass shapes share a `GlassContainer`, so they melt together)
+into a recorder (live waveform · timer · stop); stop peels an X back out and
+turns the pill into a review player (play · waveform · duration · transcribe
+→ composer · send). Geometry is Reanimated in `Composer`; contents and the
+recorder live in `DictationBar` (`VoicePanel`). Bubbles are iMessage-style
+runs (own = sage, right; peer = warm grey, left; no avatars in a DM) with
+centered timestamps at hour-long pauses; Settings is an inset-grouped list
+that pushes Profile/Account/Notifications/Data/Admin pages inside the sheet.
+Type sizes come from `theme.type` (iOS Dynamic Type defaults). Wide layouts
+(iPad, tablets, desktop web) switch `chat` to a two-pane rail + conversation.
 
 - `e2e/` — Maestro YAML flows: `chat`, `dictation`, `attach`, `new-chat`,
   `settings`, `dm-actions`, `reply-edit`, `tour` (8 flows; `subflows/login.yaml`
@@ -522,10 +544,16 @@ Real-world gotchas hit while bringing the RN app up on simulators/emulators:
 - **Safe areas on Android are real** — modal screens must use
   `SafeAreaView edges={["top","bottom"]}`; without it the header renders under
   the status bar (edge-to-edge) and the close control is unreachable.
-- **Android `Alert.alert` caps at 3 buttons** — action menus use the shared
-  `ActionSheet` component (`src/components/ActionSheet.tsx`), which uses
-  `ActionSheetIOS` on iOS and a bottom-sheet `Modal` on Android so Cancel and
-  extra actions always render.
+- **Uploads and Expo's fetch** — Expo SDK 57 replaces the global `fetch` with
+  `expo/fetch`, which can't send React Native `{uri, name, type}` FormData
+  parts (every upload failed instantly). `ApiClient` takes a `readFile` hook
+  (mobile passes `expo-file-system`'s `File#bytes`) and attaches `bytes()` to
+  native parts, which `expo/fetch` accepts. Keep it when adding upload calls.
+- **Menus are native on iOS 26** — `src/components/NativeMenu.tsx` wraps
+  `@expo/ui/swift-ui` `ContextMenu`/`Menu` (iMessage-style long-press context
+  menus, the morphing "+" menu); Android and older iOS fall back to the shared
+  bottom-sheet `ActionSheet` (Android `Alert.alert` caps at 3 buttons).
+  SwiftUI-hosted views need explicit widths — see `mobile/AGENTS.md`.
 
 ## Architecture notes specific to the Go port
 

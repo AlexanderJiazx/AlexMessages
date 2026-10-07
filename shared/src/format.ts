@@ -73,6 +73,44 @@ export function fmtTime(ts: number | null | undefined): string {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function startOfDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+/** Whole local calendar days between `ts` and `now` (0 = same day). */
+function daysAgo(ts: number, now: Date): number {
+  return Math.round((startOfDay(now) - startOfDay(new Date(ts * 1000))) / 86_400_000);
+}
+
+/**
+ * Conversation-list timestamp, iMessage style: "10:19 PM" today,
+ * "Yesterday", a weekday within the last week, otherwise a short date.
+ */
+export function fmtListTime(ts: number | null | undefined, now: Date = new Date()): string {
+  if (!ts) return "";
+  const days = daysAgo(ts, now);
+  const d = new Date(ts * 1000);
+  if (days <= 0) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (days === 1) return "Yesterday";
+  if (days < 7) return d.toLocaleDateString([], { weekday: "long" });
+  return d.toLocaleDateString([], { month: "numeric", day: "numeric", year: "2-digit" });
+}
+
+/**
+ * Centered in-stream timestamp header: "Today 10:19 PM", "Yesterday 9:03 AM",
+ * "Monday 9:03 AM", or "Sep 17, 9:03 AM".
+ */
+export function fmtStampLabel(ts: number | null | undefined, now: Date = new Date()): string {
+  if (!ts) return "";
+  const days = daysAgo(ts, now);
+  const d = new Date(ts * 1000);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (days <= 0) return `Today ${time}`;
+  if (days === 1) return `Yesterday ${time}`;
+  if (days < 7) return `${d.toLocaleDateString([], { weekday: "long" })} ${time}`;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+}
+
 /** "2026-09-17" — used for day separators. */
 export function isoDate(ts: number | null | undefined): string {
   if (!ts) return "";

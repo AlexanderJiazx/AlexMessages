@@ -1,0 +1,14 @@
+appId: com.alexanderjia.messages
+---
+# Close an open menu on either platform: Android's bottom sheet has a Cancel
+# row; iOS context menus / popovers have none and close on an outside tap.
+- tapOn:
+    text: "Cancel"
+    optional: true
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          point: "8%,14%"
+          optional: true

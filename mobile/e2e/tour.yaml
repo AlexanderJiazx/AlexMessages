@@ -10,10 +10,12 @@ appId: com.alexanderjia.messages
 - takeScreenshot: tour-conversation
 - tapOn: "Attach"
 - takeScreenshot: tour-attach
-- tapOn: "Cancel"
+- runFlow: subflows/dismiss-menu.yaml
 - tapOn: "Dictate"
 - takeScreenshot: tour-dictation
-- tapOn: "Cancel recording"
+- tapOn: "Stop recording"
+- takeScreenshot: tour-voice-review
+- tapOn: "Delete voice message"
 - tapOn: "Open Bob's profile"
 - takeScreenshot: tour-profile
 - tapOn: "Close"

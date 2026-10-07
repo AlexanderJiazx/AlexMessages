@@ -15,7 +15,10 @@ export function Avatar({ user, size = 40 }: { user: UserLike | null | undefined;
   const uri = user?.avatar ? api.url(user.avatar) : null;
   const bg = colorFor(user?.id);
   const users = user ? { [user.id]: user as PublicUser } : {};
-  const initials = user ? initialsFor(users, user.id) : "?";
+  const full = user ? initialsFor(users, user.id) : "?";
+  // One-word names get one letter ("B", not "BO") — the iOS Contacts look.
+  const oneWord = !/[\s._-]/.test((user?.display_name || user?.username || "").trim());
+  const initials = oneWord ? full.slice(0, 1) : full;
   return (
     <View
       style={[
@@ -30,7 +33,9 @@ export function Avatar({ user, size = 40 }: { user: UserLike | null | undefined;
           accessibilityLabel={`${user?.display_name} avatar`}
         />
       ) : (
-        <Text style={[styles.initials, { fontSize: size * 0.38 }]}>{initials}</Text>
+        <Text style={[styles.initials, { fontSize: size * (initials.length > 1 ? 0.38 : 0.44) }]}>
+          {initials}
+        </Text>
       )}
     </View>
   );

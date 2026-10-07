@@ -1,13 +1,16 @@
 appId: com.alexanderjia.messages
 ---
-# Dictation bar: mic → ChatGPT-style bar with waveform + controls → cancel.
+# Voice message, iOS 26 Messages-style: waveform → recording (live waveform,
+# timer, stop) → review (X, play, duration, transcribe, send) → discard.
 - runFlow: subflows/login.yaml
 - tapOn: "Conversation with Bob.*"
 - tapOn: "Dictate"
-# The bar shows: cancel (X), live waveform, timer, stop, send-audio, send-text.
-- assertVisible: "Cancel recording"
-- assertVisible: "Stop and transcribe"
-- assertVisible: "Send as voice message"
-- assertVisible: "Transcribe and send"
-- tapOn: "Cancel recording"
+- assertVisible: "Stop recording"
+- assertNotVisible: "Attach"
+- tapOn: "Stop recording"
+- assertVisible: "Play voice message"
+- assertVisible: "Transcribe to text"
+- assertVisible: "Send voice message"
+- tapOn: "Delete voice message"
 - assertVisible: "Dictate"
+- assertVisible: "Attach"

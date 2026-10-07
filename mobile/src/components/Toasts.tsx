@@ -52,7 +52,7 @@ function ToastPill({ toast }: { toast: Toast }) {
 const styles = StyleSheet.create({
   wrap: {
     position: "absolute",
-    bottom: 96,
+    bottom: 120,
     left: 0,
     right: 0,
     alignItems: "center",

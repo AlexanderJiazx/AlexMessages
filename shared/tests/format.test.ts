@@ -5,7 +5,9 @@ import {
   bodySegments,
   colorFor,
   firstUrl,
+  fmtListTime,
   fmtSize,
+  fmtStampLabel,
   hash,
   initialsFor,
   lastMessagePreviewFor,
@@ -159,5 +161,24 @@ describe("sidebar previews", () => {
     expect(fmtSize(500)).toBe("500 B");
     expect(fmtSize(2048)).toBe("2.0 KB");
     expect(fmtSize(3 * 1024 * 1024)).toBe("3.00 MB");
+  });
+});
+
+describe("list + stream timestamps", () => {
+  const now = new Date(2026, 9, 6, 15, 0); // Tue Oct 6 2026, 3pm local
+  const at = (d: number, h: number) => new Date(2026, 9, d, h, 5).getTime() / 1000;
+
+  it("fmtListTime buckets by calendar day", () => {
+    expect(fmtListTime(at(6, 9), now)).toMatch(/9:05/);
+    expect(fmtListTime(at(5, 23), now)).toBe("Yesterday");
+    expect(fmtListTime(at(2, 9), now)).toMatch(/Friday/);
+    expect(fmtListTime(at(1, 9) - 86400 * 10, now)).toMatch(/\d+\/\d+\/\d+/);
+    expect(fmtListTime(null, now)).toBe("");
+  });
+
+  it("fmtStampLabel prefixes the day", () => {
+    expect(fmtStampLabel(at(6, 9), now)).toMatch(/^Today 9:05/);
+    expect(fmtStampLabel(at(5, 9), now)).toMatch(/^Yesterday 9:05/);
+    expect(fmtStampLabel(at(2, 9), now)).toMatch(/^Friday 9:05/);
   });
 });
