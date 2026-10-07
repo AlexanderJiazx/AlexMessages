@@ -15,6 +15,7 @@ import (
 	"alexmessage/internal/db"
 	"alexmessage/internal/debuglog"
 	"alexmessage/internal/httpx"
+	"alexmessage/internal/matrix"
 )
 
 // Server holds the loaded HTML shells and serves the engine.
@@ -74,6 +75,11 @@ func NewEngine() *gin.Engine {
 	registerLinkPreviewRoutes(r)
 	registerTranscribeRoutes(r)
 	registerWS(r)
+
+	// Matrix appservice endpoints (no-op unless the bridge is enabled).
+	if b := matrix.Active(); b != nil {
+		b.RegisterRoutes(r)
+	}
 
 	// Clients stream real-time actions to the centralized debug console (which
 	// lives in the admin panel and reads the shared debug_events table).

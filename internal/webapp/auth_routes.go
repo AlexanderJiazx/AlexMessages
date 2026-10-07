@@ -66,7 +66,10 @@ func handleLogin(c *gin.Context) {
 	password := strField(m, "password")
 
 	user, _ := db.GetUserByUsername(username)
-	if user == nil || !auth.VerifyPassword(password, user.PasswordHash) {
+	// Bridged Matrix users (matrix_id set) have no usable password and must
+	// never authenticate — the invalid-hash check below also rejects them,
+	// this guard just makes the denial explicit.
+	if user == nil || user.MatrixID != nil || !auth.VerifyPassword(password, user.PasswordHash) {
 		httpx.Error(c, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}

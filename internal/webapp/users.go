@@ -9,7 +9,9 @@ import (
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
 	"alexmessage/internal/httpx"
+	"alexmessage/internal/matrix"
 	"alexmessage/internal/runtime"
+	"strings"
 )
 
 // registerUserRoutes wires the user directory + contacts (mirrors routes/users.py).
@@ -46,19 +48,41 @@ func handleUsersIndex(c *gin.Context) {
 }
 
 // handleUsersLookup resolves a username so a viewer can start a new chat — the
-// only way a normal user discovers another account.
+// only way a normal user discovers another account. When the query is a full
+// Matrix user id (@name:server) and the bridge is up, it provisions the remote
+// user + DM room and returns the new contact.
 func handleUsersLookup(c *gin.Context) {
 	user, ok := requireUser(c)
 	if !ok {
 		return
 	}
-	target, _ := db.GetUserByUsername(auth.NormalizeUsername(c.Query("username")))
+	query := strings.TrimSpace(c.Query("username"))
+	if strings.HasPrefix(query, "@") {
+		handleMatrixLookup(c, user, query)
+		return
+	}
+	target, _ := db.GetUserByUsername(auth.NormalizeUsername(query))
 	if target == nil || target.Status != "approved" {
 		httpx.Error(c, http.StatusNotFound, "No user with that username")
 		return
 	}
 	if target.ID == user.ID {
 		httpx.Error(c, http.StatusBadRequest, "That's you")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"user": runtime.UserPublic(target)})
+}
+
+// handleMatrixLookup opens a DM with a remote Matrix user via the bridge.
+func handleMatrixLookup(c *gin.Context, user *db.User, mxid string) {
+	b := matrix.Active()
+	if b == nil {
+		httpx.Error(c, http.StatusBadRequest, "Matrix bridging is not enabled on this server")
+		return
+	}
+	target, err := b.OpenDMByMXID(user.ID, mxid)
+	if err != nil {
+		httpx.Error(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"user": runtime.UserPublic(target)})
