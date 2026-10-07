@@ -17,24 +17,31 @@ HTTPS (terminate TLS at the reverse proxy).
 
 ## TL;DR for agents
 
+Production is a Raspberry Pi (`picloud`, linux/**arm64**) reached through an
+frp relay — see **Production** below. Pushing to `FreshRefactor` or `react`
+deploys automatically (GitHub Actions); to deploy by hand:
+
 ```bash
 # 0. From the repo root. Verify before shipping.
 go build ./... && go vet ./... && go test ./...
 
-# 1. Cross-compile static linux/amd64 binaries.
+# 1. Cross-compile static linux/arm64 binaries.
 mkdir -p bin
 for c in server admin meet; do
-  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/$c ./cmd/$c
+  GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/$c ./cmd/$c
 done
 
 # 2. Bundle binaries + assets (NOT data/ — it lives on the server).
-tar czf release.tgz bin/ static/ fonts/ sound/ \
+tar czf release.tgz --exclude static/test-speech.wav bin/ static/ fonts/ sound/ \
     index.html login.html admin.html meet.html meet_login.html
 
-# 3. Ship + restart (production host details: see the GCP section below).
-scp release.tgz me@HOST:/home/me/alexmessage/
-ssh me@HOST 'cd /home/me/alexmessage && tar xzf release.tgz && \
-    sudo systemctl restart alexmessage alexmessage-admin alexmessage-voice'
+# 3. Ship + restart through the relay (ssh -p 2222 alexander@35.226.215.209;
+#    `picloud` in ~/.ssh/config). The script backs up bin/ and the database,
+#    restarts the units, health-checks them, and rolls back on failure.
+scp -P 2222 release.tgz alexander@35.226.215.209:/home/alexander/alexmessage/
+ssh -p 2222 alexander@35.226.215.209 \
+    "APP_DIR=/home/alexander/alexmessage HEALTH_PORTS='6001 6002 6003' bash -s" \
+    < deploy/remote_deploy.sh
 ```
 
 > **Stale-cache gotcha:** asset URLs are stable (`/static/app.js`) and the
@@ -74,129 +81,103 @@ First run prints the seed admin account to stderr (a random password if
 The seed admin is created only if no admin exists yet; the bootstrap is
 idempotent and race-safe across the three processes.
 
-## Production (GCP reference deployment)
+## Production (Raspberry Pi behind an frp relay)
 
-Host: `me@35.226.215.209` (Debian/amd64). App dir `/home/me/alexmessage`.
+The app runs on a Raspberry Pi, **`picloud`** (Debian 13, **arm64**), app dir
+`/home/alexander/alexmessage` (with `data/` and `backups/`). The Pi has no
+public address; the GCP VM at **`35.226.215.209`** is only an **frp relay**:
 
-- **systemd units** (in `/etc/systemd/system/`), env vars set inside each unit:
-  - `alexmessage` → `bin/server`, `127.0.0.1:8765`, `messages.alexanderjia.com`
-  - `alexmessage-admin` → `bin/admin`, `:9090`, `admin.alexanderjia.com`
-  - `alexmessage-voice` → `bin/meet`, `:9091`, `meet.alexanderjia.com`
-- **nginx**: one vhost per domain in `sites-available/` (symlinked into
-  `sites-enabled/`), certbot/Let's Encrypt TLS. Each vhost reverse-proxies to
-  its binary and must pass WebSocket upgrade headers (`Upgrade`/`Connection`)
-  through for `/ws` and **not buffer** `text/event-stream` for the admin debug
-  stream (the handler already sends `X-Accel-Buffering: no`).
-- **Service account**: the three units run as the **unprivileged `deploy` user**
-  (`User=deploy`/`Group=deploy`), which also owns `/home/me/alexmessage`.
-  `deploy` has scoped `NOPASSWD` sudo for *only* the three `systemctl restart`s
-  and no other privileges, so the CI deploy key can't reach root even though it
-  can replace binaries (see Continuous deployment below).
-- **Deploy**: the agent TL;DR above. After extracting, `systemctl restart` the
-  three units.
+```
+internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/frp/frpc.toml)
+               :80  / :443  ──tcp──► Pi nginx 127.0.0.1:8080 / :8443 (PROXY protocol v2)
+               :2222        ──tcp──► Pi sshd :22
+```
 
-> **Binary rename note:** `cmd/voicecall` → `cmd/meet`, so the built binary is
-> `bin/meet`. The `alexmessage-voice` unit's `ExecStart` already points at
-> `bin/meet`.
+- **nginx on the Pi** terminates TLS (one vhost per domain in
+  `/etc/nginx/sites-enabled/`) and reverse-proxies to the binaries. Vhosts must
+  pass WebSocket upgrade headers for `/ws` and must **not buffer**
+  `text/event-stream` for the admin debug stream.
+- **systemd units** (`/etc/systemd/system/`), all `User=alexander`,
+  `WorkingDirectory=/home/alexander/alexmessage`, secrets in
+  `EnvironmentFile=/etc/alexmessage/alexmessage.env` (`ADMIN_PASSWORD`,
+  `VOLC_RTC_APP_ID`/`VOLC_RTC_APP_KEY`; add `OPENROUTER_API_KEY` there for
+  voice transcription):
+
+  | Unit | Binary | Port | Domain |
+  |------|--------|------|--------|
+  | `alexmessage-admin` | `bin/admin` | `6001` | `admin.alexanderjia.com` |
+  | `alexmessage` | `bin/server` | `6002` | `messages.alexanderjia.com` |
+  | `alexmessage-voice` | `bin/meet` | `6003` | `meet.alexanderjia.com` |
+
+  (Coolify on the same Pi was moved off these ports — its UI is on `6000`, its
+  realtime on `16001`/`16002`; see `PiCloudMigration.md` in the app dir.)
+- **SSH**: `ssh -p 2222 alexander@35.226.215.209` (the relay forwards raw TCP;
+  the host key is the Pi's own). `alexander` has passwordless sudo.
+- **Web client**: the release carries no `web/dist`, so the server serves the
+  legacy `static/` frontend. Shipping the React web app means building
+  `web/dist` and adding it to the bundle.
 
 ## Continuous deployment (GitHub Actions)
 
-`.github/workflows/deploy.yml` automates the agent TL;DR above. On every push
-to **`FreshRefactor`** (and on manual *Run workflow*), it:
+`.github/workflows/deploy.yml`:
 
-1. **Tests** — `go build ./... && go vet ./... && go test ./...`.
-2. **Builds** — cross-compiles the three static `linux/amd64` binaries
-   (`CGO_ENABLED=0`, `-trimpath -ldflags='-s -w'`).
-3. **Ships** — `scp`s `release.tgz` (binaries + `static/ fonts/ sound/` + the
-   five HTML files; **never `data/`**) to the host.
-4. **Restarts & verifies** — runs `deploy/remote_deploy.sh` on the host, which
-   backs up the old binaries, extracts the release, `systemctl restart`s the
-   three units, health-checks each port, and **rolls the binaries back** if any
-   unit fails to answer.
+- **Pull requests** into `FreshRefactor`/`react` run the tests only:
+  `go build`/`vet`/`test` plus the `shared/` typecheck + Vitest suite.
+- **Pushes** to `FreshRefactor` or `react` — including merging a PR — and
+  manual *Run workflow* runs then **deploy**: cross-compile the three
+  `linux/arm64` binaries, bundle them with `static/ fonts/ sound/` + the five
+  HTML shells (**never `data/`**), `scp` the bundle to the Pi through the relay
+  (port `2222`), and run `deploy/remote_deploy.sh` there. That script backs up
+  `bin/` and copies the database to `backups/` (keeping the newest 5) while the
+  units are stopped, extracts the release, starts the units, health-checks
+  ports `6001 6002 6003`, and **rolls the binaries back** if any fails. A final
+  step checks `https://messages.alexanderjia.com/api/me` end to end (relay →
+  nginx → app).
 
-The deploy job only runs when the repo variable **`DEPLOY_ENABLED` is `true`**,
-so until you finish the one-time setup the workflow just runs tests.
+The deploy job only runs when the repo variable **`DEPLOY_ENABLED` is `true`**.
 
 ### One-time setup
 
-**1. Dedicated `deploy` user + key.** Both the services and the CI deploy run as
-an unprivileged `deploy` user (no general sudo), so a leaked deploy key can't
-reach root. Generate a passphrase-less key (CI can't type one) and reproduce the
-account on a fresh host:
+**1. A dedicated deploy key** (passphrase-less — CI can't type one), authorized
+on the Pi:
 
 ```bash
-ssh-keygen -t ed25519 -N '' -C 'alexmessages-deploy' -f ~/.ssh/alexmessages_deploy
-
-sudo useradd -m -s /bin/bash deploy && sudo passwd -l deploy        # key-only login
-sudo install -d -m700 -o deploy -g deploy /home/deploy/.ssh
-sudo tee /home/deploy/.ssh/authorized_keys < ~/.ssh/alexmessages_deploy.pub >/dev/null
-sudo chown deploy:deploy /home/deploy/.ssh/authorized_keys && sudo chmod 600 /home/deploy/.ssh/authorized_keys
-
-# hand the app + data to deploy and run the three services as it:
-sudo chown -R deploy:deploy /home/me/alexmessage
-sudo sed -i 's/^User=me$/User=deploy/; s/^Group=me$/Group=deploy/' /etc/systemd/system/alexmessage*.service
-sudo systemctl daemon-reload
-sudo systemctl restart alexmessage alexmessage-admin alexmessage-voice
+ssh-keygen -t ed25519 -N '' -C 'alexmessages-ci-deploy' -f ~/.ssh/alexmessages_deploy
+ssh picloud 'cat >> ~/.ssh/authorized_keys' < ~/.ssh/alexmessages_deploy.pub
 ```
 
-> The app dir stays under `/home/me`, so **`/home/me` must remain traversable**
-> (`chmod 755 /home/me`) for `deploy` to reach it. If you ever lock `/home/me`
-> down to `700`, relocate the app (e.g. to `/opt/alexmessage`) and update
-> `WorkingDirectory`/`ExecStart` + `DEPLOY_PATH` to match.
+> `alexander` has full passwordless sudo on the Pi, so this key is effectively
+> root there. To narrow it, prefix the authorized_keys line with
+> `from="<GitHub runner ranges>"`, or move the units to an unprivileged `deploy`
+> user whose sudoers entry allows only
+> `systemctl stop|start|restart alexmessage alexmessage-admin alexmessage-voice`.
 
-**2. Scoped passwordless restart** — `deploy` can't type a sudo password over
-non-interactive SSH, so grant *only* the restarts. As root,
-`visudo -f /etc/sudoers.d/alexmessage-deploy` (mode `0440`):
-
-```
-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage alexmessage-admin alexmessage-voice
-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage
-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage-admin
-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart alexmessage-voice
-```
-
-(`which systemctl` → adjust the path if it isn't `/usr/bin/systemctl`.)
-
-**3. Add the GitHub repo secrets** (Settings → Secrets and variables → Actions
-→ *Secrets*):
+**2. Repo secrets** (Settings → Secrets and variables → Actions → *Secrets*):
 
 | Secret | Value |
 |--------|-------|
-| `DEPLOY_SSH_KEY` | contents of the **private** key `~/.ssh/alexmessages_deploy` |
-| `DEPLOY_KNOWN_HOSTS` | output of `ssh-keyscan 35.226.215.209` (pins the host key) |
-| `DEPLOY_HOST` | `35.226.215.209` |
-| `DEPLOY_USER` | `deploy` |
-| `DEPLOY_PATH` | `/home/me/alexmessage` |
+| `DEPLOY_SSH_KEY` | the **private** key (`pbcopy < ~/.ssh/alexmessages_deploy`, paste) |
+| `DEPLOY_KNOWN_HOSTS` | *optional* — the workflow pins the Pi's current ed25519 key; set this (`ssh-keyscan -p 2222 35.226.215.209`) only if the Pi is reinstalled |
 
-**4. Add the repo variables** (same screen → *Variables*):
+**3. Repo variables** (same screen → *Variables*):
 
 | Variable | Value | Notes |
 |----------|-------|-------|
-| `DEPLOY_ENABLED` | `true` | Master switch; leave unset to keep deploys off |
-| `HEALTH_PORTS` | `8765 9090 9091` | Must match the units' `PORT` / `ADMIN_PORT` / `CALL_PORT` |
+| `DEPLOY_ENABLED` | `true` | Master switch; unset = tests only |
+| `DEPLOY_HOST` / `DEPLOY_PORT` / `DEPLOY_USER` / `DEPLOY_PATH` | *optional* | Default `35.226.215.209` / `2222` / `alexander` / `/home/alexander/alexmessage` |
+| `HEALTH_PORTS` | *optional* | Default `6001 6002 6003` — must match the units |
+| `PUBLIC_URL` | *optional* | Default `https://messages.alexanderjia.com` |
 
-> Production ports differ from the dev defaults: per the units above, `server`
-> is `8765`, `admin` is `9090`, `meet` is `9091`. Set `HEALTH_PORTS` to whatever
-> your units actually bind, or the post-deploy check will roll back a healthy
-> release.
-
-**5. Confirm the host is ready** — the app dir exists and is owned by `deploy`,
-and the `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY` (and `ADMIN_PASSWORD`) live in the
-systemd units.
-
-Then flip `DEPLOY_ENABLED=true` and push (or *Run workflow*). Watch it under the
-repo's **Actions** tab.
+Then push (or *Run workflow*) and watch the repo's **Actions** tab.
 
 > **Secret hygiene:** the private key only ever lives in the `DEPLOY_SSH_KEY`
-> secret and the runner's ephemeral disk — never commit it. Copy it into the
-> secret without it landing in your shell history, e.g. `pbcopy < ~/.ssh/alexmessages_deploy`
-> then paste into the GitHub UI.
+> secret and the runner's ephemeral disk — never commit it.
 
 ## Health check after a deploy
 
 ```bash
 # Each /api/me returns 401 when unauthenticated — that 401 means "up".
-for p in 8765 8001 8002; do
+for p in 6001 6002 6003; do   # on the Pi (dev defaults: 8765 8001 8002)
   curl -s -o /dev/null -w "port $p -> %{http_code}\n" http://127.0.0.1:$p/api/me
 done
 ```
