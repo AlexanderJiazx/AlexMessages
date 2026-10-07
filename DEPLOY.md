@@ -70,9 +70,47 @@ First run prints the seed admin account to stderr (a random password if
 | `CALL_HOST` / `CALL_PORT`             | `127.0.0.1` / `8002`         | meet      |
 | `VAPID_SUBJECT`                       | `mailto:admin@…`             | server    |
 | `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY`| *(required; no default)*     | meet      |
+| `MATRIX_HOMESERVER_URL`               | *(unset = bridge off)*       | server    |
+| `MATRIX_SERVER_NAME`                  |                              | server    |
+| `MATRIX_AS_TOKEN` / `MATRIX_HS_TOKEN` |                              | server    |
+| `MATRIX_USER_PREFIX`                  | `am_`                        | server    |
+| `MATRIX_BOT_LOCALPART`                | `alexmessages`               | server    |
+
+The four `MATRIX_*` vars are all-or-none: leave them all unset and the bridge
+is off; set any subset and startup fails fast. `MATRIX_USER_PREFIX` and
+`MATRIX_BOT_LOCALPART` are optional on their own.
 
 The seed admin is created only if no admin exists yet; the bootstrap is
 idempotent and race-safe across the three processes.
+
+## Matrix bridge (optional)
+
+`bin/server` can run as a **Matrix Application Service** so Alex Messages DMs
+bridge with users on an external homeserver (Synapse, Conduit/conduwuit).
+Alex Messages does *not* become a homeserver and does not federate itself.
+
+1. **Generate the registration.** `--url` is how the homeserver reaches this
+   server, `--server-name` the homeserver's `server_name`:
+   ```bash
+   go run ./cmd/matrix-registration \
+     --url http://alex-messages.internal:8765 --server-name matrix.example.org \
+     > registration.yaml        # fresh as/hs tokens print to stderr
+   ```
+2. **Attach it to the homeserver** (Synapse: add the file to
+   `app_service_config_files` in `homeserver.yaml`, restart).
+3. **Run the app bridged** with the tokens from step 1:
+   ```bash
+   MATRIX_HOMESERVER_URL=http://matrix.internal:8008 \
+   MATRIX_SERVER_NAME=matrix.example.org \
+   MATRIX_AS_TOKEN=<as_token> MATRIX_HS_TOKEN=<hs_token> \
+     go run ./cmd/server
+   ```
+4. Users then open DMs by typing a full Matrix ID (`@alice:matrix.org`) in the
+   New Message box; remote users carry a "Matrix" badge. Local users appear on
+   Matrix as `@am_<username>:<server>`.
+
+`docker-compose.matrix.yml` runs a throwaway Synapse for a local round-trip
+check — the header comment has the exact five-step flow.
 
 ## Production (GCP reference deployment)
 

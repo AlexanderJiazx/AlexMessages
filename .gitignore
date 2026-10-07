@@ -1,5 +1,7 @@
 .DS_Store
 data/
+docker-data/
+registration.yaml
 .claude/
 CLAUDE.local.md
 .idea/
