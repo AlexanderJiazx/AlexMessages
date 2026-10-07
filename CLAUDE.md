@@ -2,6 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Communicating with the user (mandatory)
+
+**THE MOST IMPORTANT RULE: NO AMBIGUITY AT ALL.** Every word and every
+sentence must have exactly one possible meaning. If a sentence could be read
+two ways, rewrite it before sending.
+
+- **Lead with the direct answer to "does it work right now?"** Say "X works now"
+  or "X does NOT work yet" before any explanation.
+- **Never call something done, ready, or working when it still needs a step.**
+  Example of what NOT to write: "the workflow can deploy" when deploys are
+  switched off. Write: "Pushing does NOT deploy yet. It only runs tests."
+- **Separate what is done from what is not done**, under explicit labels.
+- **List every remaining step as a numbered action** that says who does it (you
+  or the user), where exactly, and the exact names and values to use.
+- **No vague words** ("set up", "wired", "should work", "ready", "in place")
+  without saying exactly what happens and what does not.
+- **Never contradict an earlier sentence.** Reread the reply before sending it.
+
 ## What this is
 
 **Alex Messages** — an internet-hosted messaging app. The backend is a Go/Gin
