@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import {
   fmtListTime,
+  isRemoteUser,
   lastMessagePreviewFor,
   nameFor,
 } from "@alexmessages/shared";
@@ -299,7 +300,10 @@ function DmRow({
           </View>
           <View>
             <Avatar user={store.userFor(peerId)} size={52} />
-            {online && <View style={styles.onlineBadge} />}
+            {/* Presence is meaningless for bridged users — no dot. */}
+            {online && !isRemoteUser(store.userFor(peerId)) && (
+              <View style={styles.onlineBadge} />
+            )}
           </View>
           <View style={[styles.rowBody, !last && styles.rowSeparator]}>
             <View style={styles.rowTop}>

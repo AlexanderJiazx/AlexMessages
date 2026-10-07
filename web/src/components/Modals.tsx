@@ -84,7 +84,10 @@ export function NewDmModal({ on, onClose }: { on: boolean; onClose: () => void }
           autoComplete="off"
           spellCheck={false}
           value={val}
-          onChange={(e) => setVal(e.target.value)}
+          onChange={(e) => {
+            setVal(e.target.value);
+            setErr(null);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -281,9 +284,11 @@ export function ProfileSheet({
                 <span className="k">Status</span>
                 <span
                   className="v"
-                  style={{ color: online ? "var(--sage-deep)" : "var(--muted)" }}
+                  style={{
+                    color: online || u?.matrix_id ? "var(--sage-deep)" : "var(--muted)",
+                  }}
                 >
-                  {online ? "online" : "offline"}
+                  {u?.matrix_id ? "on Matrix" : online ? "online" : "offline"}
                 </span>
               </div>
             </div>

@@ -236,10 +236,15 @@ func (b *Bridge) downloadAttachment(userID int, msgtype string, content map[stri
 		return db.Attachment{}, err
 	}
 	info, _ := content["info"].(map[string]any)
-	if mimeType == "" {
-		mimeType, _ = info["mimetype"].(string)
+	// The event's declared mimetype beats an absent or generic download
+	// content-type (media repos often serve octet-stream; for encrypted
+	// attachments it's the ciphertext's, not the file's).
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		if m, _ := info["mimetype"].(string); m != "" {
+			mimeType = m
+		}
 	}
-	if mimeType == "" {
+	if mimeType == "" || mimeType == "application/octet-stream" {
 		mimeType = http.DetectContentType(raw)
 	}
 	name := attachmentName(msgtype, content, mimeType)
