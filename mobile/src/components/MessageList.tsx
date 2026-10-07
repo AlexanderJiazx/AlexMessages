@@ -41,17 +41,25 @@ type Row =
  * the list pins itself to the bottom instead — it opens at the newest
  * message, follows new ones while you're at the bottom, keeps your place
  * when older pages are prepended, and re-pins when the keyboard resizes it.
+ * (On iOS the keyboard doesn't resize it: ConversationView lifts the whole
+ * list with the composer, and `topSlack` keeps its top reachable meanwhile.)
  */
 export function MessageList({
   channel,
   onImagePress,
   topInset,
   bottomInset,
+  topSlack = 0,
 }: {
   channel: string;
   onImagePress: (url: string) => void;
   topInset: number;
   bottomInset: number;
+  /**
+   * Extra scroll room above the content: how far the list is lifted off the
+   * top of the screen (iOS keyboard), so the oldest messages stay reachable.
+   */
+  topSlack?: number;
 }) {
   const s = useChatState();
   const { store } = useSession();
@@ -85,19 +93,17 @@ export function MessageList({
     return out;
   }, [msgs, channel, s.historyHasMore, version]);
 
-  const onStartReached = useCallback(() => {
-    if (s.historyHasMore[channel] && !s.historyLoading[channel]) {
-      void store.loadOlder(channel);
-    }
-  }, [channel, s.historyHasMore, s.historyLoading, store]);
-
   // ---- bottom pinning ----
   // Offsets are computed from our own content/viewport measurements rather
   // than scrollToEnd(), whose cached metrics lag behind keyboard resizes.
   const atBottom = useRef(true);
-  // After a send, stay pinned through the follow-up layouts (optimistic
-  // bubble, delivery footnote) even while the scroll animation is mid-flight.
+  // Stay pinned through follow-up layouts while one of our own animated pins
+  // is mid-flight (after a send: the optimistic bubble, delivery footnote;
+  // on open: cells replacing their estimated heights). Otherwise a scroll
+  // event from that animation reads "not at the bottom" as content grows and
+  // the list stops following. A drag hands control back to the user.
   const forcePinUntil = useRef(0);
+  const scrollY = useRef(0);
   const contentH = useRef(0);
   const viewH = useRef(0);
   // Mirrors atBottom for rendering: position-holding is only wanted while
@@ -110,6 +116,7 @@ export function MessageList({
   const [ready, setReady] = useState(false);
   const pin = useCallback((animated: boolean) => {
     const offset = Math.max(0, contentH.current - viewH.current);
+    if (animated) forcePinUntil.current = Math.max(forcePinUntil.current, Date.now() + 400);
     listRef.current?.scrollToOffset({ offset, animated });
   }, []);
   // Switching threads starts pinned again.
@@ -136,6 +143,7 @@ export function MessageList({
 
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    scrollY.current = contentOffset.y;
     const bottom =
       Date.now() < forcePinUntil.current ||
       contentOffset.y + layoutMeasurement.height >= contentSize.height - 80;
@@ -158,12 +166,42 @@ export function MessageList({
           pin(false);
           setReady(true);
         });
-      } else if (atBottom.current) {
+      } else if (atBottom.current || Date.now() < forcePinUntil.current) {
         pin(!insetMoved);
       }
     },
     [ready, pin, bottomInset]
   );
+  const onScrollBeginDrag = useCallback(() => {
+    forcePinUntil.current = 0;
+  }, []);
+
+  // Older history pages in at the top edge — but only once the list has
+  // pinned itself to the newest message. It first lays out at offset 0, so
+  // the top edge is "reached" before the pin lands; paging in history then
+  // grows the content under the pin, which has to chase it (and could lose).
+  const loadOlder = useCallback(() => {
+    if (s.historyHasMore[channel] && !s.historyLoading[channel]) {
+      void store.loadOlder(channel);
+    }
+  }, [channel, s.historyHasMore, s.historyLoading, store]);
+  const onStartReached = useCallback(() => {
+    if (ready) loadOlder();
+  }, [ready, loadOlder]);
+  // A thread shorter than the screen sits at its top edge from the start.
+  useEffect(() => {
+    if (ready && contentH.current <= viewH.current) loadOlder();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+  // The keyboard went down while the list sat in the slack above its first
+  // row: settle back onto the content instead of leaving a blank gap.
+  const prevSlack = useRef(topSlack);
+  useEffect(() => {
+    if (topSlack < prevSlack.current && scrollY.current < -topSlack) {
+      listRef.current?.scrollToOffset({ offset: -topSlack, animated: true });
+    }
+    prevSlack.current = topSlack;
+  }, [topSlack]);
   const onLayout = useCallback(
     (e: LayoutChangeEvent) => {
       const { height: h, width: w } = e.nativeEvent.layout;
@@ -220,11 +258,13 @@ export function MessageList({
       onStartReachedThreshold={0.4}
       maintainVisibleContentPosition={pinned ? undefined : { minIndexForVisible: 1 }}
       onScroll={onScroll}
+      onScrollBeginDrag={onScrollBeginDrag}
       scrollEventThrottle={32}
       onContentSizeChange={onContentSizeChange}
       onLayout={onLayout}
       contentContainerStyle={{ paddingTop: topInset + 6, paddingBottom: bottomInset + 6 }}
-      scrollIndicatorInsets={{ top: topInset, bottom: bottomInset }}
+      contentInset={{ top: topSlack }}
+      scrollIndicatorInsets={{ top: topInset + topSlack, bottom: bottomInset }}
       keyboardDismissMode="interactive"
       keyboardShouldPersistTaps="handled"
       onScrollToIndexFailed={({ index }) => {

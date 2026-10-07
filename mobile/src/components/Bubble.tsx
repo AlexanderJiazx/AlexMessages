@@ -46,10 +46,7 @@ export function Bubble({
   first: boolean;
   last: boolean;
   allMsgs: ChatMessage[];
-  /**
-   * Widest a bubble may be. Explicit because the long-press menu hosts the
-   * bubble in SwiftUI, which measures it without the row's width limit.
-   */
+  /** Widest a bubble may be (the row width less the far-side gutter). */
   maxWidth: number;
   onImagePress: (url: string) => void;
   onJumpTo: (id: string) => void;

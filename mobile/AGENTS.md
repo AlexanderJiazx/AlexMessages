@@ -23,16 +23,25 @@ Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before 
   iMessage-style system context menu — the view lifts out beside its menu),
   `GlassMenuButton` (a native glass button whose menu morphs out of it, e.g.
   the composer "+") and `TapMenu` (any RN view as a pull-down trigger). On
-  iOS 26 these are `@expo/ui/swift-ui` `ContextMenu`/`Menu`; Android and older
-  iOS fall back to `src/components/ActionSheet.tsx` (bottom-sheet `Modal`). Do
+  iOS the first two are UIKit views from the local Expo module
+  `modules/native-menu` (`UIContextMenuInteraction` attached straight to the
+  RN child; a `UIButton` with `.glass()` and `showsMenuAsPrimaryAction`);
+  `TapMenu` is an `@expo/ui/swift-ui` `Menu` on iOS 26. Android and older iOS
+  fall back to `src/components/ActionSheet.tsx` (bottom-sheet `Modal`). Do
   **not** use `Alert.alert` for menus — Android caps it at 3 buttons and drops
   Cancel (alerts are fine for confirmations).
-- Views wrapped by `LongPressMenu`/`TapMenu` are hosted in SwiftUI
-  (`RNHostView matchContents`), which measures them **without** the parent's
-  width limit — give them an explicit `width`/`maxWidth` (bubbles get
-  `maxWidth` from the list width; DM rows get the list width) or text stops
-  wrapping and rows shrink to their content. Give the hosted view an opaque
-  background so the lifted preview reads as a solid card.
+- **Never wrap list rows or bubbles in SwiftUI hosts** (`Host`/`RNHostView`).
+  Every SwiftUI hosting view re-renders on each scroll frame (it observes
+  ancestor geometry) and sizes itself asynchronously — one per bubble made
+  fast scrolling lag and mounted rows at the wrong height. That is why
+  `LongPressMenu` is UIKit.
+- `LongPressMenu` lifts its child as-is: give transparent children a
+  `previewBackground` (or the preview's shadow shows through as a grey card),
+  and don't dim pressed states of wrapped views (the native interaction
+  cancels the RN touch once the menu takes over). A lifted cell's shadow
+  paints over later siblings only if they sit below it — the DM list header
+  carries `zIndex: 1` so the pinned grid's previews aren't cut off by the
+  first row.
 - Native menus have no Cancel row: Maestro flows close them through
   `e2e/subflows/dismiss-menu.yaml` (Cancel on Android, outside tap on iOS).
 - `MessageList` keys its `useMemo` on `store.version` (not the history array)
@@ -51,11 +60,26 @@ Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before 
   Native `{ uri }` FormData parts. Always go through `ApiClient` (built with
   `readFile` in `session.tsx`), never a hand-rolled `fetch` + FormData.
 - The voice-message morph (`Composer` + `DictationBar`'s `VoicePanel`) swaps
-  the native SwiftUI "+" for a UIKit `GlassView` twin while animating, so it
-  can merge with the pill inside a `GlassContainer`. Keep the SwiftUI button
-  mounted (hide it with opacity) — a freshly mounted SwiftUI host draws its
-  first frame out of place — and mount the twin only while needed: a
-  `GlassView` first laid out under opacity 0 never shows its glass.
+  the native "+" for an `expo-glass-effect` `GlassView` twin while animating,
+  so it can merge with the pill inside a `GlassContainer`. Keep the native
+  button mounted (hide it with opacity), and mount the twin only while
+  needed: a `GlassView` first laid out under opacity 0 never shows its glass.
+- The composer input has a fixed `lineHeight` of 21 (a whole number of
+  points): with the font's natural ~20.3pt line UIKit rounds the content
+  height up while layout rounds the view to a third of a point, so a single
+  line became scrollable. It grows to six lines (`maxHeight`), then scrolls.
+- iOS keyboard handling is `react-native-keyboard-controller` (the
+  `KeyboardProvider` in `app/_layout.tsx` is iOS-only — on Android it takes
+  over window insets even when disabled). `ConversationView` moves the
+  composer (`KeyboardStickyView`) and the message list (a transform from
+  `useReanimatedKeyboardAnimation`) with the keyboard frame by frame, and
+  `KeyboardGestureArea` + an interactive-dismiss scroll view under the
+  composer let a drag pull the keyboard down. The list is translated, never
+  resized; the part lifted off the top stays reachable via `topSlack`
+  (`contentInset.top`). Android keeps `KeyboardAvoidingView`.
+- `MessageList` loads older history only after the first pin to the bottom
+  (`ready`): `onStartReached` fires at mount while the offset is still 0, and
+  prepending a page then left the conversation opened at the top.
 - iOS screenshots omit secure-text contents and the secure keyboard — an
   "empty" password field in a Maestro capture is not a bug.
 

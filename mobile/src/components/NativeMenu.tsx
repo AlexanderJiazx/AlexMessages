@@ -1,22 +1,8 @@
 import React from "react";
-import { Platform, Pressable, View, type StyleProp, type ViewStyle } from "react-native";
-import {
-  Button,
-  ContextMenu,
-  Group,
-  Host,
-  Image,
-  Menu,
-  RNHostView,
-  accessibilityLabel,
-  buttonStyle,
-  contentShape,
-  frame,
-  glassEffect,
-  menuIndicator,
-  shapes,
-} from "./SwiftUI";
+import { Platform, Pressable, View, type ColorValue, type StyleProp, type ViewStyle } from "react-native";
+import { Button, Host, Menu, RNHostView, buttonStyle, menuIndicator } from "./SwiftUI";
 import type { SFSymbol } from "sf-symbols-typescript";
+import { NativeContextMenu, NativeMenuButton, type NativeMenuItem } from "../../modules/native-menu";
 import { colors, glassSupported } from "../theme";
 import { showActionSheet } from "./ActionSheet";
 import { GlassIconButton } from "./Glass";
@@ -31,8 +17,24 @@ export interface MenuAction {
   onPress: () => void;
 }
 
-/** Native menus need iOS 26's SwiftUI stack; elsewhere we use ActionSheet. */
+/** UIKit context menus work on every supported iOS; Android uses ActionSheet. */
+const nativeContextMenus = Platform.OS === "ios";
+/** The glass menu button (and SwiftUI pull-downs) need iOS 26. */
 const nativeMenus = Platform.OS === "ios" && glassSupported;
+
+/** Menu entries for the UIKit views; the index is the action id. */
+function toItems(actions: MenuAction[]): NativeMenuItem[] {
+  return actions.map((a, i) => ({
+    id: String(i),
+    title: a.label,
+    systemImage: a.systemImage,
+    destructive: a.destructive,
+  }));
+}
+
+function pressById(actions: MenuAction[], id: string) {
+  actions[Number(id)]?.onPress();
+}
 
 function MenuItems({ actions }: { actions: MenuAction[] }) {
   return (
@@ -52,8 +54,10 @@ function MenuItems({ actions }: { actions: MenuAction[] }) {
 
 /**
  * Long-press → the system context menu, iMessage-style: the touched view
- * lifts out (clipped to `cornerRadius`) with the menu beside it. Android and
- * pre-26 iOS fall back to the ActionSheet.
+ * lifts out (clipped to `cornerRadius`) with the menu beside it. On iOS this
+ * is a UIKit `UIContextMenuInteraction` attached directly to the React Native
+ * view — never a SwiftUI host per row/bubble (see modules/native-menu).
+ * Android falls back to the ActionSheet.
  */
 export function LongPressMenu({
   actions,
@@ -61,6 +65,7 @@ export function LongPressMenu({
   fill,
   title,
   disabled,
+  previewBackground,
   style,
   children,
 }: {
@@ -71,11 +76,16 @@ export function LongPressMenu({
   /** Fallback sheet title (the native menu shows the lifted view instead). */
   title?: string;
   disabled?: boolean;
+  /**
+   * Fill behind the lifted preview. Needed when the child has no opaque
+   * background of its own, or the preview's shadow shows through it.
+   */
+  previewBackground?: ColorValue;
   style?: StyleProp<ViewStyle>;
   children: React.ReactElement;
 }) {
   if (disabled) return <View style={style}>{children}</View>;
-  if (!nativeMenus) {
+  if (!nativeContextMenus) {
     return (
       <Pressable
         style={style}
@@ -96,51 +106,23 @@ export function LongPressMenu({
     );
   }
   return (
-    <Host
-      matchContents={fill ? { vertical: true, horizontal: false } : true}
+    <NativeContextMenu
+      actions={toItems(actions)}
+      cornerRadius={cornerRadius}
+      previewBackgroundColor={previewBackground}
+      onPressAction={(e) => pressById(actions, e.nativeEvent.id)}
       style={[fill && { alignSelf: "stretch" }, style]}
     >
-      <ContextMenu>
-        <ContextMenu.Items>
-          <MenuItems actions={actions} />
-        </ContextMenu.Items>
-        <ContextMenu.Trigger>
-          <Group
-            modifiers={[
-              contentShape(shapes.roundedRectangle({ cornerRadius }), "contextMenuPreview"),
-            ]}
-          >
-            <RNHostView matchContents>{withoutPressAfterHold(children)}</RNHostView>
-          </Group>
-        </ContextMenu.Trigger>
-      </ContextMenu>
-    </Host>
+      {children}
+    </NativeContextMenu>
   );
-}
-
-/** Hold time after which a release is a long press, not a tap. */
-const HOLD_MS = 350;
-const noop = () => {};
-
-/**
- * The system context menu doesn't always cancel the RN touch underneath it,
- * so releasing after the menu appeared could also fire the trigger's onPress
- * (e.g. opening the conversation). Give a pressable trigger an onLongPress
- * so RN treats any hold as a long press and never reports it as a tap.
- */
-function withoutPressAfterHold(child: React.ReactElement) {
-  const props = child.props as { onPress?: unknown; onLongPress?: unknown };
-  if (!props.onPress || props.onLongPress) return child;
-  return React.cloneElement(child as React.ReactElement<Record<string, unknown>>, {
-    onLongPress: noop,
-    delayLongPress: HOLD_MS,
-  });
 }
 
 /**
  * Round glass button that opens an anchored popover menu on tap (the iOS 26
- * "+" in Messages). Native SwiftUI glass button + Menu on iOS 26, so the menu
- * morphs out of the button; GlassIconButton + ActionSheet elsewhere.
+ * "+" in Messages). A UIKit glass UIButton with its menu as the primary
+ * action on iOS 26, so the menu morphs out of the button; GlassIconButton +
+ * ActionSheet elsewhere.
  */
 export function GlassMenuButton({
   actions,
@@ -177,27 +159,19 @@ export function GlassMenuButton({
       />
     );
   }
+  // Sized by React Native like the UIKit glass pill beside it — same
+  // material, same layout, so the two can't drift apart the way a
+  // self-sizing SwiftUI host could.
   return (
-    <Host matchContents>
-      <Menu
-        label={
-          // Sized and glassed explicitly (not a .glass button style, which pads
-          // the label and comes out larger) so it matches the 44pt composer pill.
-          <Image
-            systemName={systemImage}
-            size={18}
-            color={colors.ink2}
-            modifiers={[
-              frame({ width: size, height: size }),
-              glassEffect({ glass: { variant: "regular", interactive: true }, shape: "circle" }),
-            ]}
-          />
-        }
-        modifiers={[buttonStyle("plain"), menuIndicator("hidden"), accessibilityLabel(label)]}
-      >
-        <MenuItems actions={actions} />
-      </Menu>
-    </Host>
+    <NativeMenuButton
+      actions={toItems(actions)}
+      systemImage={systemImage}
+      iconSize={18}
+      iconColor={colors.ink2}
+      label={label}
+      onPressAction={(e) => pressById(actions, e.nativeEvent.id)}
+      style={{ width: size, height: size }}
+    />
   );
 }
 

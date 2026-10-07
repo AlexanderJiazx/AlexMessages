@@ -224,6 +224,8 @@ Android from one codebase, plus `expo start --web`.
   `ConversationView`, `MessageList`, `Bubble`, `Composer` (+ `DictationBar`),
   `Avatar`, `Icon`, `Sheet`, `ActionSheet`, `attachments`, `ImageViewer`,
   `Toasts`.
+- `modules/native-menu/` — local Expo module (Swift): the UIKit context-menu
+  view and glass menu button behind `NativeMenu` on iOS.
 
 Platform styling is deliberate: **liquid glass on iOS 26+** and **flat
 Material styling on Android** — same layout and the same sage palette. All
@@ -561,11 +563,19 @@ Real-world gotchas hit while bringing the RN app up on simulators/emulators:
   parts (every upload failed instantly). `ApiClient` takes a `readFile` hook
   (mobile passes `expo-file-system`'s `File#bytes`) and attaches `bytes()` to
   native parts, which `expo/fetch` accepts. Keep it when adding upload calls.
-- **Menus are native on iOS 26** — `src/components/NativeMenu.tsx` wraps
-  `@expo/ui/swift-ui` `ContextMenu`/`Menu` (iMessage-style long-press context
-  menus, the morphing "+" menu); Android and older iOS fall back to the shared
-  bottom-sheet `ActionSheet` (Android `Alert.alert` caps at 3 buttons).
-  SwiftUI-hosted views need explicit widths — see `mobile/AGENTS.md`.
+- **Menus are native on iOS** — `src/components/NativeMenu.tsx` renders the
+  UIKit views of the local Expo module `mobile/modules/native-menu`: a
+  `UIContextMenuInteraction` on the React Native view for iMessage-style
+  long-press menus (every iOS), and a `.glass()` `UIButton` whose menu morphs
+  out of it for the composer "+" (iOS 26). `TapMenu` stays an `@expo/ui`
+  SwiftUI `Menu`. Android (and the "+" on older iOS) fall back to the shared
+  bottom-sheet `ActionSheet` (Android `Alert.alert` caps at 3 buttons). Don't
+  host list rows or bubbles in SwiftUI — per-row hosting views re-render on
+  every scroll frame (see `mobile/AGENTS.md`).
+- **Keyboard on iOS** — `react-native-keyboard-controller` (provider mounted
+  on iOS only) moves the composer and message list with the keyboard frame
+  by frame and lets a downward drag on the list or the composer dismiss it
+  interactively, as in Messages. Android keeps `KeyboardAvoidingView`.
 
 ## Architecture notes specific to the Go port
 

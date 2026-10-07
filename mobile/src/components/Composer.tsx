@@ -38,6 +38,19 @@ import { GlassMenuButton, type MenuAction } from "./NativeMenu";
 const PILL_MIN = 44;
 const PILL_VOICE = 64;
 /**
+ * The input's line height. Fixed, and a whole number of points: with SF's
+ * natural 20.29pt line, UIKit rounds the text view's content height up to
+ * whole points (43pt for one line) while layout sizes the view to the
+ * nearest third (42.33pt) — content a fraction taller than the view, so even
+ * a single line could be dragged, scroll bar and all. With 21pt lines both
+ * come out at exactly 21·n + 22.
+ */
+const INPUT_LINE = 21;
+/** The input grows to six full lines, then scrolls. */
+const INPUT_MAX = 6 * INPUT_LINE + 22;
+/** Links the input to ConversationView's KeyboardGestureArea. */
+export const COMPOSER_INPUT_ID = "composer-input";
+/**
  * Headroom the voice morph grows into. The composer reserves it as top
  * padding that the pill swallows, so the dock's layout height never changes
  * mid-morph; the host lifts the message list by the same amount on the UI
@@ -144,10 +157,10 @@ export function Composer({
   const ownTall = useSharedValue(0);
   const tall = voiceTall ?? ownTall;
   const idleFade = useSharedValue(1);
-  // The "+" is a native SwiftUI menu button; during the morph a UIKit glass
-  // twin (which can merge with the pill) stands in for it. The twin is
-  // mounted only when needed: a GlassView first laid out while hidden never
-  // picks its effect back up.
+  // The "+" is a native glass menu button; during the morph a GlassView twin
+  // (which can merge with the pill) stands in for it. The twin is mounted
+  // only when needed: a GlassView first laid out while hidden never picks
+  // its effect back up.
   const [menuShown, setMenuShown] = useState(true);
   // Corner radius: half the one-line height while typing, so a multi-line
   // draft reads as a rounded rect (like Messages) instead of a stadium whose
@@ -251,8 +264,8 @@ export function Composer({
                 </Pressable>
               </Animated.View>
             )}
-            {/* Never unmounted: a freshly mounted SwiftUI host draws its first
-                frame out of place, which flashes the "+" during the swap. */}
+            {/* Never unmounted — hidden with opacity during the morph, so the
+                swap back doesn't flash a freshly mounted button. */}
             <View
               style={[styles.slotCircle, !menuShown && styles.hidden]}
               pointerEvents={menuShown ? "auto" : "none"}
@@ -321,6 +334,7 @@ export function Composer({
                   value={text}
                   onChangeText={setText}
                   multiline
+                  nativeID={COMPOSER_INPUT_ID}
                   editable={!voice}
                   selectionColor={colors.sage}
                   accessibilityLabel="Message input"
@@ -468,12 +482,13 @@ const styles = StyleSheet.create({
   input: {
     flex: 1,
     ...type.body,
+    lineHeight: INPUT_LINE,
     color: colors.ink,
     paddingLeft: 16,
     paddingRight: 6,
     paddingTop: 11,
     paddingBottom: 11,
-    maxHeight: 140,
+    maxHeight: INPUT_MAX,
   },
   sendBtn: {
     width: 34,

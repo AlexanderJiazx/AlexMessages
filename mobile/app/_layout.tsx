@@ -1,6 +1,7 @@
 import React, { useEffect } from "react";
-import { StyleSheet } from "react-native";
+import { Platform, StyleSheet } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
@@ -21,39 +22,51 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={styles.root}>
-      <SafeAreaProvider>
-        <SessionProvider>
-          <StatusBar style="dark" />
-          <Stack
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: colors.bg },
-            }}
-          >
-            <Stack.Screen name="index" />
-            <Stack.Screen name="login" />
-            {/* We draw our own scroll-edge fades; UIKit's automatic effect
-                misplaces itself on the inverted message list. */}
-            <Stack.Screen name="chat" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
-            <Stack.Screen name="conversation" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
-            <Stack.Screen
-              name="settings"
-              options={{ presentation: "modal" }}
-            />
-            <Stack.Screen
-              name="new-chat"
-              options={{ presentation: "modal" }}
-            />
-            <Stack.Screen
-              name="profile"
-              options={{ presentation: "modal" }}
-            />
-          </Stack>
-          <ActionSheetHost />
-        </SessionProvider>
-      </SafeAreaProvider>
+      <KeyboardTracking>
+        <SafeAreaProvider>
+          <SessionProvider>
+            <StatusBar style="dark" />
+            <Stack
+              screenOptions={{
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.bg },
+              }}
+            >
+              <Stack.Screen name="index" />
+              <Stack.Screen name="login" />
+              {/* We draw our own scroll-edge fades; UIKit's automatic effect
+                  misplaces itself on the inverted message list. */}
+              <Stack.Screen name="chat" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
+              <Stack.Screen name="conversation" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
+              <Stack.Screen
+                name="settings"
+                options={{ presentation: "modal" }}
+              />
+              <Stack.Screen
+                name="new-chat"
+                options={{ presentation: "modal" }}
+              />
+              <Stack.Screen
+                name="profile"
+                options={{ presentation: "modal" }}
+              />
+            </Stack>
+            <ActionSheetHost />
+          </SessionProvider>
+        </SafeAreaProvider>
+      </KeyboardTracking>
     </GestureHandlerRootView>
   );
+}
+
+/**
+ * Frame-by-frame keyboard tracking for the conversation's composer and list
+ * (iOS only). On Android the provider takes over the window's insets even
+ * when disabled, so Android keeps the stock keyboard handling.
+ */
+function KeyboardTracking({ children }: { children: React.ReactNode }) {
+  if (Platform.OS !== "ios") return <>{children}</>;
+  return <KeyboardProvider>{children}</KeyboardProvider>;
 }
 
 const NO_EDGE_EFFECTS = {
