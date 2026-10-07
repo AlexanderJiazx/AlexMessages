@@ -138,6 +138,20 @@ CREATE TABLE IF NOT EXISTS dm_state (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- Matrix bridge (internal/matrix): dm channel <-> Matrix DM room. Only written
+-- while the bridge is enabled; harmless otherwise.
+CREATE TABLE IF NOT EXISTS matrix_rooms (
+    channel    TEXT    PRIMARY KEY,
+    room_id    TEXT    NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+);
+
+-- Homeserver transaction ids the bridge already applied (idempotency).
+CREATE TABLE IF NOT EXISTS matrix_txns (
+    txn_id     TEXT    PRIMARY KEY,
+    created_at INTEGER NOT NULL
+);
+
 -- Live debug-console ring buffer. Written by both client-facing servers (Alex
 -- Messages and Alex Meet) and read by the admin panel, which is a separate
 -- process; the shared SQLite file is how those processes meet. Capped to the
@@ -191,15 +205,25 @@ func InitDB() error {
 		{"attachments", "width", "ALTER TABLE attachments ADD COLUMN width INTEGER NOT NULL DEFAULT 0"},
 		{"attachments", "height", "ALTER TABLE attachments ADD COLUMN height INTEGER NOT NULL DEFAULT 0"},
 		{"messages", "edited_at", "ALTER TABLE messages ADD COLUMN edited_at INTEGER"},
+		{"users", "matrix_id", "ALTER TABLE users ADD COLUMN matrix_id TEXT"},
+		{"messages", "matrix_event_id", "ALTER TABLE messages ADD COLUMN matrix_event_id TEXT"},
 	}
 	for _, m := range migrations {
 		if err := ensureColumn(m.table, m.column, m.ddl); err != nil {
 			return err
 		}
 	}
+	// Indexes on the nullable bridge columns (no-op on repeat startups).
+	for _, ddl := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_users_matrix_id ON users(matrix_id)",
+		"CREATE INDEX IF NOT EXISTS idx_msg_matrix_event ON messages(matrix_event_id)",
+	} {
+		if _, err := pool.Exec(ddl); err != nil {
+			return err
+		}
+	}
 	return nil
 }
-
 func ensureColumn(table, column, ddl string) error {
 	rows, err := pool.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
@@ -247,6 +271,10 @@ type User struct {
 	IsAdmin      bool
 	CreatedAt    int64
 	ApprovedAt   *int64
+	// MatrixID is the remote Matrix user id ("@alice:matrix.org") for bridged
+	// accounts; nil for normal local accounts. Remote rows carry no usable
+	// password so they can never log in.
+	MatrixID *string
 }
 
 func scanUser(s interface{ Scan(...any) error }) (*User, error) {
@@ -254,9 +282,10 @@ func scanUser(s interface{ Scan(...any) error }) (*User, error) {
 		u          User
 		isAdmin    int
 		approvedAt sql.NullInt64
+		matrixID   sql.NullString
 	)
 	err := s.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.DisplayName,
-		&u.Bio, &u.Avatar, &u.Status, &isAdmin, &u.CreatedAt, &approvedAt)
+		&u.Bio, &u.Avatar, &u.Status, &isAdmin, &u.CreatedAt, &approvedAt, &matrixID)
 	if err != nil {
 		return nil, err
 	}
@@ -265,10 +294,13 @@ func scanUser(s interface{ Scan(...any) error }) (*User, error) {
 		v := approvedAt.Int64
 		u.ApprovedAt = &v
 	}
+	if matrixID.Valid {
+		u.MatrixID = &matrixID.String
+	}
 	return &u, nil
 }
 
-const userCols = "id, username, password_hash, display_name, bio, avatar, status, is_admin, created_at, approved_at"
+const userCols = "id, username, password_hash, display_name, bio, avatar, status, is_admin, created_at, approved_at, matrix_id"
 
 // CreateUser inserts a new account and returns its id.
 func CreateUser(username, passwordHash, displayName, status string, isAdmin bool) (int, error) {
@@ -305,6 +337,34 @@ func GetUserByUsername(username string) (*User, error) {
 		return nil, nil
 	}
 	return u, err
+}
+
+// GetUserByMatrixID returns the remote (bridged) user row for a Matrix id.
+func GetUserByMatrixID(matrixID string) (*User, error) {
+	row := pool.QueryRow("SELECT "+userCols+" FROM users WHERE matrix_id = ?", matrixID)
+	u, err := scanUser(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return u, err
+}
+
+// CreateRemoteUser inserts a bridged Matrix user. The password hash is an
+// invalid scrypt string so the account can never authenticate; status is
+// 'approved' so it flows through the DM paths like a normal user but never
+// appears in the admin approval queue (which lists only 'pending').
+func CreateRemoteUser(username, displayName, matrixID string) (int, error) {
+	ts := NowTS()
+	res, err := pool.Exec(
+		"INSERT INTO users (username, password_hash, display_name, status, is_admin, created_at, approved_at, matrix_id) "+
+			"VALUES (?, '!matrix-remote', ?, 'approved', 0, ?, ?, ?)",
+		username, displayName, ts, ts, matrixID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	return int(id), err
 }
 
 // ListUsers returns every user (newest first), optionally filtered by status.
@@ -496,6 +556,73 @@ func GetMessageMeta(msgID string) (*MessageMeta, error) {
 	}
 	m.UserID = nullInt64ToPtr(userID)
 	return &m, nil
+}
+
+// SetMessageMatrixEventID links a message row to the Matrix event it came
+// from (inbound) or was sent as (outbound), enabling edits and receipts.
+func SetMessageMatrixEventID(msgID, eventID string) error {
+	_, err := pool.Exec("UPDATE messages SET matrix_event_id = ? WHERE id = ?", eventID, msgID)
+	return err
+}
+
+// MatrixEventIDForMessage returns the linked Matrix event id, or "".
+func MatrixEventIDForMessage(msgID string) (string, error) {
+	var ev sql.NullString
+	err := pool.QueryRow("SELECT matrix_event_id FROM messages WHERE id = ?", msgID).Scan(&ev)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return ev.String, nil
+}
+
+// MatrixMessage is a message row located by its linked Matrix event id.
+type MatrixMessage struct {
+	ID        string
+	Channel   string
+	UserID    *int
+	Type      string
+	CreatedAt int64
+}
+
+// GetMessageByMatrixEventID returns the message linked to a Matrix event.
+func GetMessageByMatrixEventID(eventID string) (*MatrixMessage, error) {
+	row := pool.QueryRow(
+		"SELECT id, channel, user_id, type, created_at FROM messages WHERE matrix_event_id = ?", eventID)
+	var (
+		m      MatrixMessage
+		userID sql.NullInt64
+	)
+	err := row.Scan(&m.ID, &m.Channel, &userID, &m.Type, &m.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.UserID = nullInt64ToPtr(userID)
+	return &m, nil
+}
+
+// LatestMatrixEventID returns the newest message in a channel that carries a
+// Matrix event id — the watermark outbound read receipts are sent for.
+func LatestMatrixEventID(channel string) (eventID string, createdAt int64, err error) {
+	var ev sql.NullString
+	var ts sql.NullInt64
+	err = pool.QueryRow(
+		"SELECT matrix_event_id, created_at FROM messages "+
+			"WHERE channel = ? AND matrix_event_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+		channel,
+	).Scan(&ev, &ts)
+	if err == sql.ErrNoRows {
+		return "", 0, nil
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	return ev.String, ts.Int64, nil
 }
 
 // UpdateMessageText rewrites a message body and stamps edited_at.
@@ -712,6 +839,61 @@ func ListPushSubscriptions(userID int) ([]PushSubscription, error) {
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// ---------- Matrix bridge bookkeeping ----------
+
+// MatrixRoomFor returns the Matrix room id mapped to a DM channel, or "".
+func MatrixRoomFor(channel string) (string, error) {
+	var rid sql.NullString
+	err := pool.QueryRow("SELECT room_id FROM matrix_rooms WHERE channel = ?", channel).Scan(&rid)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return rid.String, nil
+}
+
+// MatrixChannelFor returns the DM channel mapped to a Matrix room id, or "".
+func MatrixChannelFor(roomID string) (string, error) {
+	var ch sql.NullString
+	err := pool.QueryRow("SELECT channel FROM matrix_rooms WHERE room_id = ?", roomID).Scan(&ch)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return ch.String, nil
+}
+
+// SetMatrixRoom records the channel <-> room mapping.
+func SetMatrixRoom(channel, roomID string) error {
+	_, err := pool.Exec(
+		"INSERT OR IGNORE INTO matrix_rooms (channel, room_id, created_at) VALUES (?, ?, ?)",
+		channel, roomID, NowTS(),
+	)
+	return err
+}
+
+// TryRecordMatrixTxn marks a homeserver transaction id as processed.
+// It returns false when the id was already claimed (a redelivery), making
+// transaction handling idempotent.
+func TryRecordMatrixTxn(txnID string) (bool, error) {
+	res, err := pool.Exec(
+		"INSERT OR IGNORE INTO matrix_txns (txn_id, created_at) VALUES (?, ?)",
+		txnID, NowTS(),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // ---------- per-user DM state (pin / unread / delete-for-me) ----------

@@ -14,9 +14,13 @@ import (
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
 	"alexmessage/internal/debuglog"
-	"alexmessage/internal/push"
+	"alexmessage/internal/dmpost"
+	"alexmessage/internal/matrix"
 	"alexmessage/internal/runtime"
 )
+
+// broadcastMessage was moved to internal/dmpost.Message so the Matrix bridge
+// can produce the identical wire shape.
 
 var upgrader = websocket.Upgrader{
 	// Starlette/FastAPI did not enforce WS origin; match that here.
@@ -56,25 +60,6 @@ type initPayload struct {
 	HistoryHasMore map[string]bool                `json:"history_has_more"`
 	PageSize       int                            `json:"page_size"`
 	MaxUpload      int                            `json:"max_upload"`
-}
-
-// broadcastMessage is the live "message" shape — note it carries author, which
-// the history/init message shape (db.HistoryMessage) deliberately omits.
-type broadcastMessage struct {
-	ID          string              `json:"id"`
-	Type        string              `json:"type"`
-	Channel     string              `json:"channel"`
-	UserID      *int                `json:"user_id"`
-	Author      *runtime.PublicUser `json:"author"`
-	Text        string              `json:"text"`
-	ReplyTo     *string             `json:"reply_to"`
-	Attachments []db.Attachment     `json:"attachments"`
-	CreatedAt   int64               `json:"created_at"`
-	EditedAt    *int64              `json:"edited_at"`
-	// ClientID echoes the sender's optimistic-message nonce so their client can
-	// reconcile the locally rendered bubble with the persisted message. Other
-	// recipients have no matching pending bubble and simply ignore it.
-	ClientID string `json:"client_id,omitempty"`
 }
 
 // ---------- handler ----------
@@ -232,44 +217,6 @@ func afterPtr(clearedAt int64) *int64 {
 	return &clearedAt
 }
 
-// ---------- message persistence ----------
-
-// makeMessagePayload persists a message (+ attachments) and returns the live
-// broadcast shape, including the resolved author.
-func makeMessagePayload(userID *int, channel, text string, replyTo *string, attachments []db.Attachment, msgType string) broadcastMessage {
-	msgID, _ := tokenHex(6) // 12 hex chars, like uuid4().hex[:12]
-	ts, _ := db.InsertMessage(msgID, channel, userID, text, replyTo, msgType, nil)
-	for _, a := range attachments {
-		rel := a.URL
-		if strings.HasPrefix(a.URL, "/uploads/") {
-			rel = a.URL[len("/uploads/"):]
-		}
-		owner := 0
-		if userID != nil {
-			owner = *userID
-		}
-		_ = db.InsertAttachment(msgID, owner, a.Name, rel, a.Size, a.Mime, a.Width, a.Height)
-	}
-	var author *runtime.PublicUser
-	if userID != nil {
-		if row, _ := db.GetUserByID(*userID); row != nil {
-			a := runtime.UserPublic(row)
-			author = &a
-		}
-	}
-	return broadcastMessage{
-		ID:          msgID,
-		Type:        msgType,
-		Channel:     channel,
-		UserID:      userID,
-		Author:      author,
-		Text:        text,
-		ReplyTo:     replyTo,
-		Attachments: attachments,
-		CreatedAt:   ts,
-	}
-}
-
 // ---------- client → server handlers ----------
 
 func handleWSMessage(userID int, data map[string]any) {
@@ -324,22 +271,23 @@ func handleWSMessage(userID int, data map[string]any) {
 	}
 
 	uid := userID
-	msg := makeMessagePayload(&uid, channel, text, replyTo, cleanAtts, "message")
+	msg := dmpost.Post(&uid, channel, text, replyTo, cleanAtts, "message", 0)
 	if cid, ok := data["client_id"].(string); ok {
 		msg.ClientID = truncateRunes(cid, 64)
 	}
-	runtime.Broadcast(
-		gin.H{"type": "message", "channel": channel, "message": msg},
-		runtime.RecipientsForChannel(channel),
-	)
+	dmpost.BroadcastNew(channel, msg)
 
-	// DM-only: poke Web Push for the other participant (fire-and-forget).
+	// DM-only: poke Web Push for the other participant (fire-and-forget), and
+	// relay to Matrix when the peer is a bridged remote user.
 	if a, b, ok := db.ParseDMChannel(channel); ok {
 		other := a
 		if b != userID {
 			other = b
 		}
-		go maybeSendDMPush(userID, other, channel, msg)
+		go dmpost.SendDMPush(userID, other, channel, msg)
+		if bridge := matrix.Active(); bridge != nil {
+			bridge.OnLocalMessage(userID, channel, msg)
+		}
 	}
 }
 
@@ -368,10 +316,10 @@ func handleWSEdit(userID int, data map[string]any) {
 	if err := db.UpdateMessageText(msgID, text, ts); err != nil {
 		return
 	}
-	runtime.Broadcast(
-		gin.H{"type": "message_edited", "channel": meta.Channel, "id": msgID, "text": text, "edited_at": ts},
-		runtime.RecipientsForChannel(meta.Channel),
-	)
+	dmpost.BroadcastEdited(meta.Channel, msgID, text, ts)
+	if bridge := matrix.Active(); bridge != nil {
+		bridge.OnLocalEdit(userID, msgID, meta.Channel, text)
+	}
 }
 
 func handleWSOpenDM(client *runtime.Client, userID int, data map[string]any) {
@@ -409,54 +357,6 @@ func handleWSSwitch(client *runtime.Client, data map[string]any) {
 	if _, _, isDM := db.ParseDMChannel(channel); isDM {
 		client.SetChannel(channel)
 	}
-}
-
-// ---------- Web Push for DMs ----------
-
-func truncateForPush(text string, limit int) string {
-	text = trimSpace(text)
-	r := []rune(text)
-	if len(r) <= limit {
-		return text
-	}
-	return strings.TrimRight(string(r[:limit-1]), " \t\n\r") + "…"
-}
-
-// maybeSendDMPush sends a Web Push to recipientID for a DM, when appropriate.
-func maybeSendDMPush(senderID, recipientID int, channel string, msg broadcastMessage) {
-	if senderID == recipientID {
-		return
-	}
-	if subs, _ := db.ListPushSubscriptions(recipientID); len(subs) == 0 {
-		return
-	}
-	body := truncateForPush(msg.Text, 140)
-	if body == "" && len(msg.Attachments) > 0 {
-		if len(msg.Attachments) == 1 {
-			body = "Sent a file"
-		} else {
-			body = fmt.Sprintf("Sent %d files", len(msg.Attachments))
-		}
-	}
-	title := "New message"
-	if msg.Author != nil && msg.Author.DisplayName != "" {
-		title = msg.Author.DisplayName
-	}
-	if body == "" {
-		body = "New message"
-	}
-	payload := map[string]any{
-		"title":      title,
-		"body":       body,
-		"url":        "/",
-		"channel":    channel,
-		"sender_id":  senderID,
-		"icon":       "/static/icons/favicon-192.png",
-		"badge":      "/static/icons/favicon-32.png",
-		"tag":        "dm-" + channel,
-		"created_at": msg.CreatedAt,
-	}
-	push.SendToUser(recipientID, payload)
 }
 
 // ---------- small value helpers ----------
