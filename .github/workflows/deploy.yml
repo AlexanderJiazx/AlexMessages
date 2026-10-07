@@ -1,26 +1,34 @@
 name: Deploy
 
-# Seamless deploy chain. Every push to FreshRefactor runs the full test suite;
-# only when it is green does the deploy job cross-compile the three linux/amd64
-# binaries, ship them to the production host over SSH, restart the systemd
-# units, and health-check them (rolling the binaries back if a unit fails to
-# come up). Manual runs are available from the Actions tab (workflow_dispatch).
+# Test → build → ship to the Raspberry Pi ("picloud") on every push to a
+# production branch — which includes merging a pull request into one.
+# Pull requests themselves only run the tests. Manual runs: Actions tab →
+# Deploy → Run workflow (workflow_dispatch).
 #
-# The deploy job is gated on the repo variable DEPLOY_ENABLED == 'true', so the
-# workflow is inert (tests only) until you have configured the secrets and the
-# server (see DEPLOY.md → "Continuous deployment"). Flip that variable on once
-# everything is in place.
+# Topology (see DEPLOY.md → "Production"): the Pi has no public address. Its
+# frp client (frpc) dials the frps on the GCP relay at 35.226.215.209 and
+# publishes the Pi's sshd there as port 2222 (and nginx as 80/443). So the
+# runner reaches the Pi with `ssh -p 2222 alexander@35.226.215.209`; the
+# relay only forwards TCP, the SSH session terminates on the Pi itself.
+#
+# The deploy job is gated on the repo variable DEPLOY_ENABLED == 'true' and
+# needs the DEPLOY_SSH_KEY secret (DEPLOY.md → "Continuous deployment").
+# Until both exist the workflow only runs the tests.
 
 on:
   push:
-    branches: [FreshRefactor]
+    # FreshRefactor is the default branch (PR merges land there); `react` is
+    # the branch currently live on the Pi. Both deploy.
+    branches: [FreshRefactor, react]
+  pull_request:
+    branches: [FreshRefactor, react]
   workflow_dispatch:
 
 # Never let two deploys race; let an in-flight deploy finish rather than
 # interrupt a half-applied release.
 concurrency:
-  group: deploy-production
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('test-{0}', github.ref) || 'deploy-production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -39,12 +47,33 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: shared/package-lock.json
+      - name: Shared TypeScript core — typecheck + unit tests
+        working-directory: shared
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+
   deploy:
-    name: Ship to production
+    name: Ship to picloud
     needs: test
-    if: vars.DEPLOY_ENABLED == 'true'
+    if: github.event_name != 'pull_request' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: production
+    env:
+      # Overridable with repo variables of the same name.
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST || '35.226.215.209' }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '2222' }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'alexander' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/alexander/alexmessage' }}
+      # admin, messages, meet — must match the systemd units' *_PORT values.
+      HEALTH_PORTS: ${{ vars.HEALTH_PORTS || '6001 6002 6003' }}
+      PUBLIC_URL: ${{ vars.PUBLIC_URL || 'https://messages.alexanderjia.com' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -52,25 +81,34 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Cross-compile linux/amd64 binaries
+      - name: Cross-compile linux/arm64 binaries (Raspberry Pi)
         run: |
           mkdir -p bin
           for c in server admin meet; do
-            GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
               go build -trimpath -ldflags='-s -w' -o "bin/$c" "./cmd/$c"
           done
+          file bin/*
 
       - name: Bundle release (binaries + assets, never data/)
         run: |
-          tar czf release.tgz \
+          tar czf release.tgz --exclude static/test-speech.wav \
             bin/ static/ fonts/ sound/ \
             index.html login.html admin.html meet.html meet_login.html
+          ls -lh release.tgz
 
-      - name: Configure SSH
+      - name: Configure SSH (through the frp relay)
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          # The Pi's own host key as published on the relay port. Pinned here
+          # so a swapped relay can't impersonate the Pi; override with the
+          # DEPLOY_KNOWN_HOSTS secret if the Pi is ever reinstalled.
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS || '[35.226.215.209]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJJ9b5k82WEzUca3oWtKKKdYIot4WVq6D2xStYxUJJyZ' }}
         run: |
+          if [[ -z "$DEPLOY_SSH_KEY" ]]; then
+            echo "::error::DEPLOY_SSH_KEY secret is not set (DEPLOY.md → Continuous deployment)"
+            exit 1
+          fi
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY"     > ~/.ssh/deploy_key
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
@@ -78,19 +116,29 @@ jobs:
           chmod 644 ~/.ssh/known_hosts
 
       - name: Ship & restart
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          HEALTH_PORTS: ${{ vars.HEALTH_PORTS }}
         run: |
           set -euo pipefail
           ssh_opts=(-i ~/.ssh/deploy_key
                     -o UserKnownHostsFile=~/.ssh/known_hosts
+                    -o StrictHostKeyChecking=yes
                     -o IdentitiesOnly=yes
-                    -o BatchMode=yes)
-          scp "${ssh_opts[@]}" release.tgz \
+                    -o BatchMode=yes
+                    -o ConnectTimeout=30
+                    -o ServerAliveInterval=15)
+          scp -P "$DEPLOY_PORT" "${ssh_opts[@]}" release.tgz \
             "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/release.tgz"
-          ssh "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "APP_DIR='$DEPLOY_PATH' HEALTH_PORTS='${HEALTH_PORTS:-8765 9090 9091}' bash -s" \
+          ssh -p "$DEPLOY_PORT" "${ssh_opts[@]}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "APP_DIR='$DEPLOY_PATH' HEALTH_PORTS='$HEALTH_PORTS' bash -s" \
             < deploy/remote_deploy.sh
+
+      - name: Public health check (relay → nginx → app)
+        run: |
+          # /api/me answers 401 when unauthenticated — that 401 means "up".
+          for i in 1 2 3 4 5; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$PUBLIC_URL/api/me" || echo 000)"
+            echo "$PUBLIC_URL/api/me -> $code"
+            [[ "$code" == "401" ]] && exit 0
+            sleep 3
+          done
+          echo "::error::$PUBLIC_URL is not answering through the relay"
+          exit 1

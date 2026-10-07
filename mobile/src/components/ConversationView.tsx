@@ -8,15 +8,33 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import Animated, { useAnimatedStyle, useSharedValue } from "react-native-reanimated";
+import Animated, {
+  useAnimatedScrollHandler,
+  useAnimatedStyle,
+  useSharedValue,
+} from "react-native-reanimated";
+import {
+  KeyboardGestureArea,
+  KeyboardStickyView,
+  useKeyboardState,
+  useReanimatedKeyboardAnimation,
+} from "react-native-keyboard-controller";
 import { nameFor } from "@alexmessages/shared";
 import { useChatState, useSession } from "../session";
 import { dismissForChannel } from "../notify";
 import { colors, type } from "../theme";
-import { Composer, VOICE_LIFT } from "./Composer";
+import { Composer, COMPOSER_INPUT_ID, VOICE_LIFT } from "./Composer";
 import { ImageViewer } from "./ImageViewer";
 import { MessageList, Topbar, TOPBAR_H } from "./MessageList";
 import { EdgeFade, GlassSurface } from "./Glass";
+
+/**
+ * iOS follows the keyboard on the UI thread (react-native-keyboard-controller,
+ * see app/_layout.tsx): the composer and the message list move with the
+ * system keyboard animation frame by frame, and with the finger during
+ * interactive dismissal. Android keeps the layout-driven KeyboardAvoidingView.
+ */
+const ios = Platform.OS === "ios";
 
 /**
  * The conversation surface. The message stream runs edge to edge; the glass
@@ -49,10 +67,7 @@ export function ConversationView({
   // The voice morph grows the pill into that headroom; the list rides up with
   // it on the UI thread, frame-locked to the pill.
   const voiceTall = useSharedValue(0);
-  const liftStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: -VOICE_LIFT * voiceTall.value }],
-  }));
-  const keyboardUp = useKeyboardVisible();
+  const keyboardUp = useKeyboardVisible(!ios);
 
   // Mark the channel active for read receipts; clear its notification.
   // In the narrow layout, leaving the screen deselects the channel so new
@@ -69,35 +84,95 @@ export function ConversationView({
   const onImagePress = useCallback((url: string) => setViewerUrl(url), []);
 
   const top = fullBleed ? insets.top : 0;
-  // The home-indicator inset only applies while the keyboard is down.
+  // The home-indicator inset sits under the composer while the keyboard is
+  // down. Android's KeyboardAvoidingView drops it while the keyboard is up;
+  // on iOS it stays put and the keyboard lift absorbs it.
   const bottom = fullBleed && !keyboardUp ? insets.bottom : 0;
+  const dockPad = Math.max(bottom, 6);
+  // iOS: how much of the keyboard's height the composer (and the list) must
+  // rise by — the keyboard height less the dock's resting gap to the screen
+  // bottom, keeping 6pt between the dock and the keyboard.
+  const keyboardOffset = dockPad - 6 + (fullBleed ? 0 : insets.bottom);
+  // iOS: interactive dismissal grabs the keyboard once a drag reaches the
+  // composer's top edge (as in Messages), not the keyboard's: the 6pt gap
+  // plus the visible composer, without its empty voice headroom.
+  const gestureOffset = 6 + dockH - dockPad - VOICE_LIFT;
   const headerH = top + TOPBAR_H;
+
+  // iOS: the list rides up with the keyboard exactly like the composer (the
+  // same transform KeyboardStickyView applies), so the newest message stays
+  // glued above it — through the system animation and an interactive drag.
+  // The list keeps its size (no relayout, no re-pinning mid-animation); the
+  // part lifted off the top stays reachable through `topSlack`.
+  const keyboard = useReanimatedKeyboardAnimation();
+  const liftStyle = useAnimatedStyle(
+    () => ({
+      transform: [
+        {
+          translateY:
+            (ios ? keyboard.height.value + keyboard.progress.value * keyboardOffset : 0) -
+            VOICE_LIFT * voiceTall.value,
+        },
+      ],
+    }),
+    [keyboardOffset]
+  );
+  const keyboardHeight = useKeyboardState((k) => (k.isVisible ? k.height : 0));
+  const topSlack = ios ? Math.max(0, keyboardHeight - keyboardOffset) : 0;
+
+  const stream = (
+    <Animated.View style={[styles.flex, liftStyle]}>
+      <MessageList
+        channel={channel}
+        onImagePress={onImagePress}
+        topInset={headerH}
+        bottomInset={composerH}
+        topSlack={topSlack}
+      />
+    </Animated.View>
+  );
+  const fade = <EdgeFade edge="bottom" height={composerH + 14} solid={bottom} />;
+  const dock = (
+    <View
+      style={{ paddingBottom: dockPad }}
+      onLayout={(e) => setDockH(e.nativeEvent.layout.height)}
+      pointerEvents="box-none"
+    >
+      <Composer peerName={peerName} voiceTall={voiceTall} />
+    </View>
+  );
 
   return (
     <View style={styles.root}>
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-      >
-        <View style={styles.flex}>
-          <Animated.View style={[styles.flex, liftStyle]}>
-            <MessageList
-              channel={channel}
-              onImagePress={onImagePress}
-              topInset={headerH}
-              bottomInset={composerH}
-            />
-          </Animated.View>
-          <EdgeFade edge="bottom" height={composerH + 14} solid={bottom} />
-          <View
-            style={[styles.composerDock, { paddingBottom: Math.max(bottom, 6) }]}
-            onLayout={(e) => setDockH(e.nativeEvent.layout.height)}
+      {ios ? (
+        <KeyboardGestureArea
+          style={styles.flex}
+          textInputNativeID={COMPOSER_INPUT_ID}
+          offset={gestureOffset}
+        >
+          {stream}
+          <KeyboardStickyView
+            style={StyleSheet.absoluteFill}
+            offset={{ closed: 0, opened: keyboardOffset }}
             pointerEvents="box-none"
           >
-            <Composer peerName={peerName} voiceTall={voiceTall} />
+            <ComposerDragArea>
+              {fade}
+              {dock}
+            </ComposerDragArea>
+          </KeyboardStickyView>
+        </KeyboardGestureArea>
+      ) : (
+        <KeyboardAvoidingView style={styles.flex} behavior="height">
+          <View style={styles.flex}>
+            {stream}
+            {fade}
+            <View style={styles.composerDock} pointerEvents="box-none">
+              {dock}
+            </View>
           </View>
-        </View>
-      </KeyboardAvoidingView>
+        </KeyboardAvoidingView>
+      )}
 
       <EdgeFade edge="top" height={headerH + 18} solid={top} />
       <View style={[styles.header, { paddingTop: top }]} pointerEvents="box-none">
@@ -122,18 +197,60 @@ export function ConversationView({
   );
 }
 
-function useKeyboardVisible(): boolean {
+/**
+ * iOS: drag the composer down to pull the keyboard away, as in Messages.
+ * UIKit only hands the keyboard to a finger through a scroll view with
+ * interactive dismissal that is actually being scrolled, so the composer sits
+ * at the bottom of a transparent, full-height one. It never takes touches
+ * itself (box-none), so drags on the message list still scroll the list.
+ * The scroll view's own rubber-banding is cancelled out on the UI thread —
+ * the composer only follows the keyboard; moving with the finger as well
+ * would run it ahead of the keyboard and behind it. With the keyboard down
+ * there is nothing to dismiss, and it stops scrolling.
+ */
+function ComposerDragArea({ children }: { children: React.ReactNode }) {
+  const keyboardShown = useKeyboardState((k) => k.isVisible);
+  const offset = useSharedValue(0);
+  const onScroll = useAnimatedScrollHandler((e) => {
+    offset.value = e.contentOffset.y;
+  });
+  const holdStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: offset.value }],
+  }));
+  return (
+    <Animated.ScrollView
+      style={styles.dragArea}
+      contentContainerStyle={styles.dragContent}
+      pointerEvents="box-none"
+      scrollEnabled={keyboardShown}
+      alwaysBounceVertical
+      keyboardDismissMode="interactive"
+      keyboardShouldPersistTaps="always"
+      contentInsetAdjustmentBehavior="never"
+      showsVerticalScrollIndicator={false}
+      scrollsToTop={false}
+      onScroll={onScroll}
+      scrollEventThrottle={16}
+    >
+      <Animated.View style={[styles.dragContent, holdStyle]} pointerEvents="box-none">
+        {children}
+      </Animated.View>
+    </Animated.ScrollView>
+  );
+}
+
+/** Android only: the KeyboardAvoidingView path drops the bottom inset while typing. */
+function useKeyboardVisible(enabled: boolean): boolean {
   const [up, setUp] = useState(false);
   useEffect(() => {
-    const showEvt = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
-    const hideEvt = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
-    const a = Keyboard.addListener(showEvt, () => setUp(true));
-    const b = Keyboard.addListener(hideEvt, () => setUp(false));
+    if (!enabled) return;
+    const a = Keyboard.addListener("keyboardDidShow", () => setUp(true));
+    const b = Keyboard.addListener("keyboardDidHide", () => setUp(false));
     return () => {
       a.remove();
       b.remove();
     };
-  }, []);
+  }, [enabled]);
   return up;
 }
 
@@ -150,6 +267,15 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
+  },
+  dragArea: {
+    flex: 1,
+    overflow: "visible",
+  },
+  dragContent: {
+    flexGrow: 1,
+    justifyContent: "flex-end",
+    pointerEvents: "box-none",
   },
   header: {
     position: "absolute",

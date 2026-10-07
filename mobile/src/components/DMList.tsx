@@ -47,8 +47,8 @@ export function DMList({
   const s = useChatState();
   const { store } = useSession();
   const [query, setQuery] = useState("");
-  // Rows are hosted by the native long-press menu, which measures them
-  // without the list's width limit — so they get an explicit width.
+  // Rows get an explicit width: SwipeRow slides them across exactly one
+  // list width, and the pinned grid splits it into thirds.
   const window = useWindowDimensions();
   const [listW, setListW] = useState(0);
   const rowW = listW || window.width;
@@ -121,6 +121,9 @@ export function DMList({
         data={recent}
         keyExtractor={(it) => it.channel}
         ListHeaderComponent={header}
+        // A long-pressed pinned cell lifts (with its shadow) inside this
+        // header; above the rows, so the first row can't cut the shadow off.
+        ListHeaderComponentStyle={styles.header}
         renderItem={({ item, index }) => (
           <DmRow
             channel={item.channel}
@@ -283,7 +286,7 @@ function DmRow({
 
   return (
     <SwipeRow width={width} leading={swipe.leading} trailing={swipe.trailing}>
-      <LongPressMenu actions={actions} title={name} cornerRadius={14} fill>
+      <LongPressMenu actions={actions} title={name} cornerRadius={14} fill previewBackground={colors.bg}>
         <Pressable
           style={({ pressed }) => [
             styles.row,
@@ -343,13 +346,14 @@ function PinnedCell({
   const name = nameFor(s.users, peerId);
   const actions = useDmActions(channel, name);
   return (
-    <LongPressMenu actions={actions} title={name} cornerRadius={20}>
+    // No background and no pressed dimming on the cell itself: the long-press
+    // lift is drawn with the card's surroundings still in place, so an opaque
+    // neighbour would cover its shadow with a hard edge, and a dimmed cell
+    // would let the shadow show through the card. The menu paints the card's
+    // fill (previewBackground) instead.
+    <LongPressMenu actions={actions} title={name} cornerRadius={20} previewBackground={colors.bg}>
       <Pressable
-        style={({ pressed }) => [
-          styles.pinCellInner,
-          { width },
-          (pressed || active) && { opacity: 0.7 },
-        ]}
+        style={[styles.pinCellInner, { width }]}
         onPress={onPress}
         accessibilityRole="button"
         accessibilityLabel={`Conversation with ${name}${unread ? ", unread" : ""}`}
@@ -358,7 +362,14 @@ function PinnedCell({
           <Avatar user={store.userFor(peerId)} size={72} />
           {unread && <View style={styles.pinUnread} />}
         </View>
-        <Text style={[styles.pinName, unread && { fontWeight: "600", color: colors.ink }]} numberOfLines={1}>
+        <Text
+          style={[
+            styles.pinName,
+            unread && { fontWeight: "600", color: colors.ink },
+            active && styles.pinNameActive,
+          ]}
+          numberOfLines={1}
+        >
           {name.split(" ")[0]}
         </Text>
       </Pressable>
@@ -412,6 +423,9 @@ const styles = StyleSheet.create({
     right: 80,
     textAlign: "center",
   },
+  header: {
+    zIndex: 1,
+  },
   list: {
     paddingTop: BAR_H,
     paddingBottom: 32,
@@ -450,7 +464,6 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
   },
   pinCellInner: {
-    backgroundColor: colors.bg,
     alignItems: "center",
     paddingVertical: 8,
     gap: 6,
@@ -459,6 +472,10 @@ const styles = StyleSheet.create({
     ...type.footnote,
     color: colors.muted,
     maxWidth: 96,
+  },
+  pinNameActive: {
+    fontWeight: "600",
+    color: colors.sageDeep,
   },
   pinUnread: {
     position: "absolute",
