@@ -46,27 +46,35 @@ func (b *Bridge) requireHS(c *gin.Context) {
 }
 
 // putTransaction handles PUT /_matrix/app/v1/transactions/{txnId}.
-// The txn id is recorded first so redeliveries are cheap no-ops.
+// The txn is recorded only AFTER every event is applied; on failure we
+// return 5xx so the homeserver redelivers. Idempotency lives per-event
+// (matrix_event_id, room mapping, read watermark) — NOT at the txn level:
+// homeservers reuse low transaction ids after a restart, so deduping by
+// txn id would drop brand-new events permanently. Ephemeral events
+// (m.receipt) ride in a separate array.
 func (b *Bridge) putTransaction(c *gin.Context) {
 	txnID := c.Param("txnID")
 	var body struct {
-		Events []hsEvent `json:"events"`
+		Events    []hsEvent `json:"events"`
+		Ephemeral []hsEvent `json:"ephemeral"`
 	}
 	raw, err := c.GetRawData()
 	if err != nil || json.Unmarshal(raw, &body) != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"errcode": "M_BAD_JSON", "error": "could not parse transaction"})
 		return
 	}
-	fresh, err := db.TryRecordMatrixTxn(txnID)
-	if err != nil {
+	if err := b.processTransaction(txnID, body.Events, body.Ephemeral); err != nil {
+		debuglog.Emit("matrix", "warn", "txn_failed",
+			"Matrix transaction failed; returning error so the HS retries",
+			map[string]any{"txn": txnID, "err": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"errcode": "M_UNKNOWN", "error": "transaction failed; retry it"})
+		return
+	}
+	if _, err := db.TryRecordMatrixTxn(txnID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"errcode": "M_UNKNOWN", "error": "internal error"})
 		return
 	}
-	if !fresh {
-		c.JSON(http.StatusOK, gin.H{}) // already applied
-		return
-	}
-	b.processTransaction(txnID, body.Events)
 	c.JSON(http.StatusOK, gin.H{})
 }
 

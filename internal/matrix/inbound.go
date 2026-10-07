@@ -3,6 +3,7 @@ package matrix
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -32,17 +33,54 @@ type hsEvent struct {
 	Content        map[string]any `json:"content"`
 }
 
-// processTransaction applies one AS transaction. txnID idempotency is handled
-// by the caller (TryRecordMatrixTxn).
-func (b *Bridge) processTransaction(txnID string, events []hsEvent) {
-	for _, ev := range events {
-		if err := b.processEvent(ev); err != nil {
-			debuglog.Emit("matrix", "warn", "event_failed",
-				"Matrix event processing failed", map[string]any{
+// errSkipEvent marks a per-event failure that can never succeed on retry
+// (semantic rejects: malformed ids, cross-user edits, missing media urls).
+// Such events are logged and dropped while the transaction still commits;
+// any other error fails the whole transaction so the homeserver retries it.
+var errSkipEvent = errors.New("skip event permanently")
+
+// permanentEventErr reports whether a processing failure should drop the
+// event rather than fail the transaction: errSkipEvent, plus terminal
+// homeserver responses (4xx that aren't rate limits).
+func permanentEventErr(err error) bool {
+	if errors.Is(err, errSkipEvent) {
+		return true
+	}
+	var he *HTTPError
+	return errors.As(err, &he) && !he.Retryable()
+}
+
+// processTransaction applies one AS transaction (timeline events plus the
+// ephemeral block that carries receipts). Returns an error when any event
+// hit a retryable failure — the caller answers 5xx and leaves the txn
+// unrecorded so the homeserver redelivers it.
+func (b *Bridge) processTransaction(txnID string, events, ephemeral []hsEvent) error {
+	all := make([]hsEvent, 0, len(events)+len(ephemeral))
+	all = append(all, events...)
+	all = append(all, ephemeral...)
+	var failures []string
+	for _, ev := range all {
+		err := b.processEvent(ev)
+		if err == nil {
+			continue
+		}
+		if permanentEventErr(err) {
+			debuglog.Emit("matrix", "warn", "event_skipped",
+				"Matrix event dropped (permanent)", map[string]any{
 					"txn": txnID, "type": ev.Type, "event": ev.EventID, "err": err.Error(),
 				})
+			continue
 		}
+		debuglog.Emit("matrix", "warn", "event_failed",
+			"Matrix event processing failed", map[string]any{
+				"txn": txnID, "type": ev.Type, "event": ev.EventID, "err": err.Error(),
+			})
+		failures = append(failures, ev.EventID)
 	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%d event(s) failed: %s", len(failures), strings.Join(failures, ", "))
+	}
+	return nil
 }
 
 func (b *Bridge) processEvent(ev hsEvent) error {
@@ -90,6 +128,14 @@ func (b *Bridge) handleMember(ev hsEvent) error {
 		return nil
 	}
 	asUser = target
+	// Already bridged this room? A re-delivered invite — an HS retry, or a
+	// txn-id collision after a homeserver restart — must not re-run the
+	// join/membership probe below.
+	if remote, _ := db.GetUserByMatrixID(ev.Sender); remote != nil {
+		if rid, _ := db.MatrixRoomFor(db.DMChannelID(local.ID, remote.ID)); rid == ev.RoomID {
+			return nil
+		}
+	}
 	// The puppet may never have sent anything yet — register before joining.
 	if err := b.ensurePuppet(context.Background(), username); err != nil {
 		return fmt.Errorf("register puppet %s: %w", username, err)
@@ -106,19 +152,56 @@ func (b *Bridge) handleMember(ev hsEvent) error {
 	channel := db.DMChannelID(local.ID, remote.ID)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if err := b.hs.joinRoom(ctx, ev.RoomID, asUser); err != nil {
+		return fmt.Errorf("join %s: %w", ev.RoomID, err)
+	}
+	// A bridged "DM" must be exactly a 1:1 — an invite into a room that
+	// already has (or invites) anyone other than the sender and the puppet
+	// would map a Matrix group chat onto a private thread, leaking the local
+	// user's replies to a third party. Verify membership before mapping the
+	// room; on mismatch the puppet leaves and the room is never mapped.
+	members, err := b.hs.roomMembers(ctx, ev.RoomID, asUser)
+	if err != nil {
+		return fmt.Errorf("list members %s: %w", ev.RoomID, err)
+	}
+	if !isDMOnlyRoom(members, ev.Sender, asUser) {
+		debuglog.Emit("matrix", "warn", "group_invite_declined",
+			"Declined invite into a non-1:1 room", map[string]any{
+				"room": ev.RoomID, "sender": ev.Sender, "puppet": asUser,
+			})
+		if lerr := b.hs.leaveRoom(ctx, ev.RoomID, asUser); lerr != nil {
+			debuglog.Emit("matrix", "warn", "leave_failed",
+				"Puppet could not leave a declined group room", map[string]any{
+					"room": ev.RoomID, "err": lerr.Error(),
+				})
+		}
+		return nil
+	}
 	if rid, _ := db.MatrixRoomFor(channel); rid != ev.RoomID {
 		if err := db.SetMatrixRoom(channel, ev.RoomID); err != nil {
 			return err
 		}
-	}
-	if err := b.hs.joinRoom(ctx, ev.RoomID, asUser); err != nil {
-		return fmt.Errorf("join %s: %w", ev.RoomID, err)
 	}
 	// Best-effort profile fill-in (avatar etc.) in the background queue.
 	b.enqueue("sync_profile", func(ctx context.Context) error {
 		return b.syncRemoteProfile(ctx, ev.Sender)
 	})
 	return nil
+}
+
+// isDMOnlyRoom reports whether the room's effective membership (joined or
+// invited) is exactly the sender and the puppet — i.e. a genuine 1:1.
+func isDMOnlyRoom(members []hsEvent, senderMXID, puppetMXID string) bool {
+	for _, m := range members {
+		membership, _ := m.Content["membership"].(string)
+		if membership != "join" && membership != "invite" {
+			continue
+		}
+		if m.StateKey != senderMXID && m.StateKey != puppetMXID {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------- m.room.message ----------
@@ -134,7 +217,7 @@ func (b *Bridge) handleRoomMessage(ev hsEvent) error {
 	}
 	a, c, ok := db.ParseDMChannel(channel)
 	if !ok || (remote.ID != a && remote.ID != c) {
-		return fmt.Errorf("sender %s is not a participant of %s", ev.Sender, channel)
+		return fmt.Errorf("%w: sender %s is not a participant of %s", errSkipEvent, ev.Sender, channel)
 	}
 	localID := a
 	if remote.ID == a {
@@ -197,7 +280,7 @@ func (b *Bridge) handleEdit(ev hsEvent, rel map[string]any, remote *db.User) err
 		return nil
 	}
 	if target.UserID == nil || *target.UserID != remote.ID {
-		return fmt.Errorf("edit from %s on another user's message", ev.Sender)
+		return fmt.Errorf("%w: edit from %s on another user's message", errSkipEvent, ev.Sender)
 	}
 	newContent, _ := ev.Content["m.new_content"].(map[string]any)
 	body, _ := newContent["body"].(string)
@@ -229,7 +312,7 @@ func (b *Bridge) downloadAttachment(userID int, msgtype string, content map[stri
 		url, _ = fileObj["url"].(string) // encrypted-room shape; ciphertext still lands as a file
 	}
 	if url == "" {
-		return db.Attachment{}, fmt.Errorf("%s event has no url", msgtype)
+		return db.Attachment{}, fmt.Errorf("%w: %s event has no url", errSkipEvent, msgtype)
 	}
 	raw, mimeType, err := b.hs.downloadMedia(context.Background(), url)
 	if err != nil {

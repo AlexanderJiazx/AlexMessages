@@ -878,9 +878,10 @@ func SetMatrixRoom(channel, roomID string) error {
 	return err
 }
 
-// TryRecordMatrixTxn marks a homeserver transaction id as processed.
-// It returns false when the id was already claimed (a redelivery), making
-// transaction handling idempotent.
+// TryRecordMatrixTxn logs a homeserver transaction id as applied. Audit
+// trail only — homeservers reuse low txn ids after a restart, so the id
+// must never be used as a delivery gate; per-event idempotency
+// (matrix_event_id, room mapping, read watermark) carries correctness.
 func TryRecordMatrixTxn(txnID string) (bool, error) {
 	res, err := pool.Exec(
 		"INSERT OR IGNORE INTO matrix_txns (txn_id, created_at) VALUES (?, ?)",

@@ -19,7 +19,12 @@ func RegistrationYAML(cfg *Config, asToken, hsToken, baseURL string) string {
 	fmt.Fprintf(&sb, "hs_token: %s\n", hsToken)
 	fmt.Fprintf(&sb, "sender_localpart: %s\n", cfg.BotLocalpart)
 	fmt.Fprintf(&sb, "rate_limited: false\n")
-	fmt.Fprintf(&sb, "push_ephemeral: true\n")
+	// MSC2409: receipt/typing ephemeral events arrive in the transaction's
+	// `ephemeral` array only when the subscription flag is set. Synapse
+	// reads `receive_ephemeral` (stable); the de.sorunome-prefixed key is
+	// the unstable identifier older homeservers (and conduwuit) honor.
+	fmt.Fprintf(&sb, "de.sorunome.msc2409.push_ephemeral: true\n")
+	fmt.Fprintf(&sb, "receive_ephemeral: true\n")
 	fmt.Fprintf(&sb, "namespaces:\n")
 	fmt.Fprintf(&sb, "  users:\n")
 	fmt.Fprintf(&sb, "    - exclusive: true\n")

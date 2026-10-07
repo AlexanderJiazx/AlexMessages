@@ -192,6 +192,10 @@ func (b *Bridge) OnLocalEdit(userID int, msgID, channel, text string) {
 		return
 	}
 	remoteID := peer.ID
+	// Each edit gets its own txn id: the homeserver dedupes by txn id, so a
+	// reused "am_<id>_edit" would silently drop every edit after the first.
+	// Generated once here so retries of THIS edit keep the same id.
+	editTxn := txnID(msgID, "edit_"+randHex(4))
 	b.enqueue("send_edit", func(ctx context.Context) error {
 		sender, err := db.GetUserByID(userID)
 		if err != nil || sender == nil {
@@ -224,7 +228,7 @@ func (b *Bridge) OnLocalEdit(userID int, msgID, channel, text string) {
 				"event_id": target,
 			},
 		}
-		_, err = b.hs.sendEvent(ctx, roomID, "m.room.message", txnID(msgID, "edit"), puppet, content)
+		_, err = b.hs.sendEvent(ctx, roomID, "m.room.message", editTxn, puppet, content)
 		return err
 	})
 }
@@ -347,11 +351,17 @@ func (b *Bridge) sendMessage(ctx context.Context, roomID, puppet string, msg dmp
 	for i, att := range msg.Attachments {
 		content, err := b.buildMediaContent(ctx, att)
 		if err != nil {
+			if !permanentEventErr(err) {
+				// Transient failure (5xx/429/network): fail the op so
+				// withRetry retries — a swallowed upload loses the file
+				// silently. Resend is safe: sent events dedupe by txn id.
+				return fmt.Errorf("upload attachment %s: %w", att.Name, err)
+			}
 			debuglog.Emit("matrix", "warn", "attachment_relay_failed",
-				"Attachment upload to Matrix failed", map[string]any{
+				"Attachment upload to Matrix failed (permanent)", map[string]any{
 					"message": msg.ID, "name": att.Name, "err": err.Error(),
 				})
-			continue // one bad attachment must not drop the message
+			continue // one permanently bad attachment must not drop the message
 		}
 		ev, err := b.hs.sendEvent(ctx, roomID, "m.room.message",
 			txnID(msg.ID, fmt.Sprintf("a%d", i)), puppet, content)
@@ -369,7 +379,8 @@ func (b *Bridge) buildMediaContent(ctx context.Context, att db.Attachment) (map[
 	rel := strings.TrimPrefix(att.URL, "/uploads/")
 	raw, err := os.ReadFile(filepath.Join(db.UploadRoot, filepath.FromSlash(rel)))
 	if err != nil {
-		return nil, err
+		// A missing/unreadable local file will not fix itself on retry.
+		return nil, fmt.Errorf("%w: %v", errSkipEvent, err)
 	}
 	mxc, err := b.hs.upload(ctx, att.Name, att.Mime, raw)
 	if err != nil {

@@ -15,11 +15,11 @@ async function hsState(): Promise<any> {
   return r.json();
 }
 
-async function injectEvents(events: any[]) {
+async function injectEvents(events: any[], extra: any = {}) {
   const r = await fetch(`${HS}/__inject`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ events }),
+    body: JSON.stringify({ events, ...extra }),
   });
   expect(r.ok).toBeTruthy();
 }
@@ -74,5 +74,69 @@ test.describe("matrix bridge", () => {
       },
     ]);
     await expect(msgBody(page, inbound)).toBeVisible();
+  });
+
+  test("a 1:1 invite becomes a DM; a group invite is declined", async ({ page }) => {
+    await login(page, USERS.bob);
+    await dismissPushPrompt(page);
+
+    // Inbound invite for a clean 1:1 room — fake-HS reports sender+puppet only.
+    const dmRoom = "!dm-room:e2e.test";
+    const dmSender = "@mx_erin:e2e.test";
+    await injectEvents(
+      [
+        {
+          type: "m.room.member",
+          sender: dmSender,
+          room_id: dmRoom,
+          state_key: "@am_e2e_bob:e2e.test",
+          event_id: `$inv-dm-${Date.now()}`,
+          content: { membership: "invite", displayname: "Erin" },
+        },
+        {
+          type: "m.room.message",
+          sender: dmSender,
+          room_id: dmRoom,
+          event_id: `$inv-msg-${Date.now()}`,
+          origin_server_ts: Date.now(),
+          content: { msgtype: "m.text", body: "hi bob, it is erin" },
+        },
+      ],
+      { room_members: { [dmRoom]: { [dmSender]: "join" } } },
+    );
+
+    // The new DM shows up in bob's list (display name syncs to the HS
+    // profile asynchronously, so assert on the localpart).
+    const erinRow = page.locator(".dm-row", { hasText: "mx_erin" });
+    await expect(erinRow).toBeVisible();
+    await expect(erinRow.locator(".mx-badge")).toHaveText("Matrix");
+
+    // Group invite: the room already contains a third participant — the
+    // puppet must join+leave (to verify) and never map the room to a DM.
+    const gRoom = "!grp-room:e2e.test";
+    const gSender = "@mx_mallory:e2e.test";
+    await injectEvents(
+      [
+        {
+          type: "m.room.member",
+          sender: gSender,
+          room_id: gRoom,
+          state_key: "@am_e2e_bob:e2e.test",
+          event_id: `$inv-g-${Date.now()}`,
+          content: { membership: "invite", displayname: "Mallory" },
+        },
+      ],
+      {
+        room_members: {
+          [gRoom]: { [gSender]: "join", "@mx_walter:e2e.test": "join" },
+        },
+      },
+    );
+
+    await expect
+      .poll(async () => (await hsState()).leaves.map((l: any) => l.roomId))
+      .toContain(gRoom);
+    // The group sender must NOT appear as a DM in the rail.
+    await expect(page.locator(".dm-row", { hasText: "mallory" })).toHaveCount(0);
   });
 });

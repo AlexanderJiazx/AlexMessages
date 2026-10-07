@@ -303,16 +303,20 @@ paths change behavior.
 - **Rooms.** A DM `dm:<min>:<max>` maps 1:1 to a Matrix room
   (`matrix_rooms` table). First message `createRoom`s as the puppet with
   `is_direct` + `invite`; an inbound `m.room.member` invite addressed to a
-  puppet auto-joins it. `matrix_txns` persists processed transaction IDs so
-  AS pushes are idempotent.
+  puppet auto-joins it after verifying the room is a genuine 1:1 (a group
+  invite is declined: puppet joins, reads `/members`, leaves). `matrix_txns`
+  logs applied transaction ids for audit only — homeservers reuse low ids
+  after a restart, so idempotency lives per-event (`matrix_event_id`, room
+  mapping, read watermark).
 - **AS API** (`routes.go`, mounted on the user app): `PUT
   /_matrix/app/v1/transactions/{txnId}` plus legacy unprefixed
   `/transactions`/`/users`/`/rooms`; `hs_token` checked via `?access_token=`
   or `Authorization: Bearer` with a constant-time compare.
 - **Inbound** (`inbound.go`): `m.room.message` (`m.text`/`m.image`/`m.video`/
-  `m.audio`/`m.file` — media downloaded via `/_matrix/media/download` into
-  `data/uploads/`), `m.replace` edits → `message_edited`, `m.receipt` →
-  `dm_read`, `m.room.member` invites/joins. Rows go through the same
+  `m.audio`/`m.file` — media downloaded via MSC3916 `/_matrix/client/v1/
+  media/download` with a legacy `/_matrix/media/v3` fallback into
+  `data/uploads/`), `m.replace` edits → `message_edited`, `m.receipt`
+  ephemeral events → `dm_read`, `m.room.member` invites/joins. Rows go through the same
   `internal/dmpost` persist+broadcast+push path the WS `message` handler
   uses (extracted to avoid a `matrix` → `webapp` import cycle).
 - **Outbound** (`bridge.go`): send/edit/read → `sendEvent`/`receipt` on a

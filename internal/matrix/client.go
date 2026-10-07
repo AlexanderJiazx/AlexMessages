@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -132,6 +133,25 @@ func (h *hsClient) joinRoom(ctx context.Context, roomID, asUser string) error {
 		asUser, nil, map[string]any{}, &out)
 }
 
+// leaveRoom makes the puppet leave a room (used to decline group invites).
+func (h *hsClient) leaveRoom(ctx context.Context, roomID, asUser string) error {
+	return h.do(ctx, "POST",
+		"/_matrix/client/v3/rooms/"+url.PathEscape(roomID)+"/leave",
+		asUser, nil, map[string]any{}, nil)
+}
+
+// roomMembers returns the room's m.room.member state events (joined AND
+// invited users) — the membership check before a bridged room can map to a DM.
+func (h *hsClient) roomMembers(ctx context.Context, roomID, asUser string) ([]hsEvent, error) {
+	var out struct {
+		Chunk []hsEvent `json:"chunk"`
+	}
+	err := h.do(ctx, "GET",
+		"/_matrix/client/v3/rooms/"+url.PathEscape(roomID)+"/members",
+		asUser, nil, nil, &out)
+	return out.Chunk, err
+}
+
 // sendEvent sends a timeline event and returns its event id. txnID makes the
 // send idempotent on the homeserver side.
 func (h *hsClient) sendEvent(ctx context.Context, roomID, eventType, txnID, asUser string, content any) (string, error) {
@@ -151,14 +171,25 @@ func (h *hsClient) sendReadReceipt(ctx context.Context, roomID, eventID, asUser 
 	return h.do(ctx, "POST", path, asUser, nil, map[string]any{}, nil)
 }
 
-// upload pushes bytes to the homeserver's media repo and returns the mxc:// URI.
+// upload pushes bytes to the homeserver's media repo and returns the mxc://
+// URI. MSC3916 authenticated uploads live at /_matrix/media/v1/upload (the
+// client/v1/media/* endpoints cover downloads only) — try it first and fall
+// back to the legacy media/v3 path on M_UNRECOGNIZED/404 (older homeservers).
 func (h *hsClient) upload(ctx context.Context, filename, mime string, data []byte) (string, error) {
+	mxc, err := h.uploadAt(ctx, "/_matrix/media/v1/upload", filename, mime, data)
+	if unimplemented(err) {
+		mxc, err = h.uploadAt(ctx, "/_matrix/media/v3/upload", filename, mime, data)
+	}
+	return mxc, err
+}
+
+func (h *hsClient) uploadAt(ctx context.Context, path, filename, mime string, data []byte) (string, error) {
 	var out struct {
 		ContentURI string `json:"content_uri"`
 	}
 	q := url.Values{"filename": {filename}}
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		h.cfg.HomeserverURL+"/_matrix/media/v3/upload?"+q.Encode(), bytes.NewReader(data))
+		h.cfg.HomeserverURL+path+"?"+q.Encode(), bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
@@ -220,16 +251,38 @@ func ParseMXC(mxc string) (server, mediaID string, ok bool) {
 	return rest[:i], rest[i+1:], true
 }
 
-// downloadMedia is download() with the content type returned.
+// unimplemented reports whether an HS response means the endpoint doesn't
+// exist on this server (a fallback path may work): 404/M_UNRECOGNIZED.
+func unimplemented(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	return he.Status == http.StatusNotFound || he.Errcode == "M_UNRECOGNIZED"
+}
+
+// downloadMedia is download() with the content type returned. Modern
+// homeservers (MSC3916, Synapse ≥1.120) reject unauthenticated downloads of
+// newly uploaded media on the legacy /_matrix/media/v3 path, so the
+// authenticated /_matrix/client/v1/media endpoint is tried first with a
+// fallback for older homeservers.
 func (h *hsClient) downloadMedia(ctx context.Context, mxc string) (data []byte, mime string, err error) {
 	server, mediaID, ok := ParseMXC(mxc)
 	if !ok {
 		return nil, "", fmt.Errorf("bad mxc uri %q", mxc)
 	}
+	enc := url.PathEscape(server) + "/" + url.PathEscape(mediaID)
+	q := url.Values{"allow_remote": {"true"}, "timeout_ms": {"20000"}}
+	data, mime, err = h.downloadAt(ctx, "/_matrix/client/v1/media/download/"+enc, q)
+	if unimplemented(err) {
+		data, mime, err = h.downloadAt(ctx, "/_matrix/media/v3/download/"+enc, q)
+	}
+	return data, mime, err
+}
+
+func (h *hsClient) downloadAt(ctx context.Context, path string, q url.Values) ([]byte, string, error) {
 	var buf bytes.Buffer
-	mime, err = h.doRaw(ctx,
-		"/_matrix/media/v3/download/"+url.PathEscape(server)+"/"+url.PathEscape(mediaID),
-		url.Values{"allow_remote": {"true"}, "timeout_ms": {"20000"}}, &buf)
+	mime, err := h.doRaw(ctx, path, q, &buf)
 	if err != nil {
 		return nil, "", err
 	}
