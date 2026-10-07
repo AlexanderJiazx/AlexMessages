@@ -1,4 +1,5 @@
 import { nameFor } from "@shared/format";
+import { isRemoteUser } from "@shared/matrix";
 import { store } from "../client";
 import { useChatState } from "../hooks";
 import { Icon } from "./icons";
@@ -20,12 +21,16 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
         <h1>
           <span>{name}</span>
         </h1>
-        <MatrixBadge user={peerId != null ? s.users[peerId] : null} />
-        {s.activeChannel && (
-          <span className="presence-chip">
-            <span className="cdot" style={{ background: online ? "var(--sage)" : "var(--faint)" }} />
-            <span>{online ? "online" : "offline"}</span>
-          </span>
+        {peerId != null && isRemoteUser(s.users[peerId]) ? (
+          // Presence is meaningless for bridged users — the badge replaces it.
+          <MatrixBadge user={s.users[peerId]} />
+        ) : (
+          s.activeChannel && (
+            <span className="presence-chip">
+              <span className="cdot" style={{ background: online ? "var(--sage)" : "var(--faint)" }} />
+              <span>{online ? "online" : "offline"}</span>
+            </span>
+          )
         )}
       </div>
     </div>

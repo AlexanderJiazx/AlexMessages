@@ -114,6 +114,7 @@ body::before {
 .dm .av { width: 36px; height: 36px; font-size: 12.5px; }
 .dm-row.active .dm { color: var(--sage-deep); }
 .dm .who { display:flex; flex-direction:column; min-width:0; gap: 1px; }
+.dm .who .who-top { display:flex; align-items:center; min-width:0; }
 .dm .who b { font-size: 13.5px; font-weight:500; color: inherit; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .dm-row.active .who b { font-weight: 600; }
 .dm-row.unread .who b { font-weight: 600; color: var(--ink); }
@@ -217,13 +218,12 @@ body::before {
    a PublicUser is shown (rail rows, topbar, profile sheet). */
 .mx-badge {
   display:inline-flex; align-items:center; vertical-align: middle;
+  flex: none; align-self: flex-start;
   margin-left: 6px; padding: 1px 7px; border-radius: 999px;
   background: var(--sage-tint); border: 1px solid var(--sage-soft);
   color: var(--sage-deep); font-size: 10px; font-weight: 600;
   letter-spacing: .05em; text-transform: uppercase; line-height: 1.5;
 }
-/* topbar places it as a chip under the title next to presence */
-.topbar .title .mx-badge { margin: 4px 0 0 8px; }
 
 /* New-chat hint shown while a full Matrix ID is typed. */
 .mx-offer {

@@ -108,10 +108,10 @@ function DmRow({
       >
         <Avatar uid={item.peerId} />
         <div className="who">
-          <b>
-            {nameFor(s.users, item.peerId)}
+          <span className="who-top">
+            <b>{nameFor(s.users, item.peerId)}</b>
             <MatrixBadge user={s.users[item.peerId]} />
-          </b>
+          </span>
           <span className="sub">{preview}</span>
         </div>
         <span
