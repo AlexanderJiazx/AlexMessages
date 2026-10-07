@@ -156,11 +156,14 @@ type PublicUser struct {
 	DisplayName string `json:"display_name"`
 	Bio         string `json:"bio"`
 	Avatar      string `json:"avatar"`
+	// MatrixID is the remote Matrix user id for bridged accounts; null for
+	// local users. It is always serialized (clients check presence vs null).
+	MatrixID *string `json:"matrix_id"`
 }
 
 // UserPublic projects a db.User to its public view.
 func UserPublic(u *db.User) PublicUser {
-	return PublicUser{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Bio: u.Bio, Avatar: u.Avatar}
+	return PublicUser{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Bio: u.Bio, Avatar: u.Avatar, MatrixID: u.MatrixID}
 }
 
 // AllKnownUsers returns every approved user keyed by id, so the client can

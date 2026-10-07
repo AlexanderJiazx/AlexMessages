@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { nameFor } from "@shared/format";
+import { isMatrixID } from "@shared/matrix";
 import { api, store, toast } from "../client";
 import { useChatState } from "../hooks";
 import { Avatar } from "./Avatar";
 import { Icon } from "./icons";
+import { MatrixBadge } from "./MatrixBadge";
 import { enablePushFlow } from "../push";
 
 /** Generic modal shell: dimmed backdrop, .card content, Escape/backdrop close. */
@@ -99,6 +101,11 @@ export function NewDmModal({ on, onClose }: { on: boolean; onClose: () => void }
             outline: "none",
           }}
         />
+        {isMatrixID(val) && (
+          <div className="mx-offer">
+            <Icon name="mail" size={12} sw={1.8} /> Message {val.trim()} on Matrix
+          </div>
+        )}
         {err && (
           <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 8 }}>{err}</div>
         )}
@@ -223,7 +230,10 @@ export function ProfileSheet({
           <div className="profile-row">
             <Avatar uid={uid} large />
             <div className="name-block">
-              <div className="name">{u?.display_name || nameFor(s.users, uid)}</div>
+              <div className="name">
+                {u?.display_name || nameFor(s.users, uid)}
+                <MatrixBadge user={u} />
+              </div>
             </div>
           </div>
           <div className="field">
@@ -261,6 +271,12 @@ export function ProfileSheet({
                 <span className="k">User ID</span>
                 <span className="v">#{uid ?? "?"}</span>
               </div>
+              {u?.matrix_id && (
+                <div className="row">
+                  <span className="k">Network</span>
+                  <span className="v">Matrix</span>
+                </div>
+              )}
               <div className="row">
                 <span className="k">Status</span>
                 <span

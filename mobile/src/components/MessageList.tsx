@@ -11,7 +11,7 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
-import { fmtStampLabel, type ChatMessage } from "@alexmessages/shared";
+import { fmtStampLabel, isRemoteUser, type ChatMessage } from "@alexmessages/shared";
 import { useChatState, useSession } from "../session";
 import { colors, type } from "../theme";
 import { Bubble } from "./Bubble";
@@ -294,9 +294,11 @@ export function Topbar({
             <Text style={styles.capsuleName} numberOfLines={1}>
               {name}
             </Text>
-            <Text style={[styles.capsuleStatus, online && styles.capsuleStatusOn]}>
-              {online ? "Online" : "Offline"}
-            </Text>
+            <View style={styles.capsuleStatusRow}>
+              <Text style={[styles.capsuleStatus, online && styles.capsuleStatusOn]}>
+                {isRemoteUser(peer) ? "on Matrix" : online ? "Online" : "Offline"}
+              </Text>
+            </View>
           </View>
           <Icon name="chevron-forward" size={13} color={colors.faint} />
         </GlassSurface>
@@ -351,6 +353,10 @@ const styles = StyleSheet.create({
     ...type.headline,
     fontSize: 16,
     color: colors.ink,
+  },
+  capsuleStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
   },
   capsuleStatus: {
     fontSize: 11.5,

@@ -2,7 +2,7 @@ import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { nameFor } from "@alexmessages/shared";
+import { isRemoteUser, nameFor } from "@alexmessages/shared";
 import { useChatState, useSession } from "../src/session";
 import { colors, type, WIDE_BREAKPOINT } from "../src/theme";
 import { Avatar } from "../src/components/Avatar";
@@ -48,7 +48,7 @@ export default function ProfileScreen() {
           <View style={styles.statusRow}>
             <View style={[styles.dot, online && styles.dotOn]} />
             <Text style={styles.statusText}>
-              @{u?.username || "?"} · {online ? "Online" : "Offline"}
+              @{u?.username || "?"} · {isRemoteUser(u) ? "Matrix" : online ? "Online" : "Offline"}
             </Text>
           </View>
         </View>
@@ -72,6 +72,7 @@ export default function ProfileScreen() {
 
         <View style={styles.card}>
           <Detail k="Username" v={`@${u?.username || "?"}`} />
+          {u?.matrix_id && <Detail k="Network" v="Matrix" />}
           <Detail k="User ID" v={`#${valid ? uid : "?"}`} last />
         </View>
       </ScrollView>

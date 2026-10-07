@@ -14,6 +14,12 @@ export interface PublicUser {
   bio: string;
   /** Public avatar URL under /avatars/, or "" when the user has no photo. */
   avatar: string;
+  /**
+   * Remote Matrix user id ("@alice:matrix.org") for bridged accounts;
+   * null for local users. Serialized explicitly as null by the server —
+   * older servers omit the key, so clients must tolerate undefined too.
+   */
+  matrix_id?: string | null;
 }
 
 /** File attached to a message. `width`/`height` are 0 when unknown. */

@@ -212,6 +212,25 @@ body::before {
   line-height: 1.3;
 }
 .presence-chip .cdot { width:6px; height:6px; border-radius:50%; background: var(--sage); }
+
+/* "Matrix" pill marking a bridged remote user — rides beside names wherever
+   a PublicUser is shown (rail rows, topbar, profile sheet). */
+.mx-badge {
+  display:inline-flex; align-items:center; vertical-align: middle;
+  margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  background: var(--sage-tint); border: 1px solid var(--sage-soft);
+  color: var(--sage-deep); font-size: 10px; font-weight: 600;
+  letter-spacing: .05em; text-transform: uppercase; line-height: 1.5;
+}
+/* topbar places it as a chip under the title next to presence */
+.topbar .title .mx-badge { margin: 4px 0 0 8px; }
+
+/* New-chat hint shown while a full Matrix ID is typed. */
+.mx-offer {
+  display:flex; align-items:center; gap:6px;
+  margin-top: 8px; color: var(--sage-deep); font-size: 12.5px; font-weight: 500;
+}
+
 .iconbtn {
   width: 32px; height:32px; display:inline-flex; align-items:center; justify-content:center;
   background: transparent; border:1px solid transparent; border-radius: 9px; color: var(--muted);
