@@ -92,8 +92,10 @@ export default function ChatHome() {
 
   return (
     <SafeAreaView style={styles.root} edges={["top"]}>
+      {/* No "selected" row on phones: the thread is pushed, and tinting the
+          tapped row green would flash on top of the grey press highlight. */}
       <DMList
-        activeChannel={s.activeChannel}
+        activeChannel={null}
         onOpenChannel={openChannel}
         onNewDm={onNewDm}
         onOpenSettings={onOpenSettings}

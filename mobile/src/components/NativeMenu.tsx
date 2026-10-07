@@ -1,7 +1,13 @@
 import React from "react";
 import { Platform, Pressable, View, type StyleProp, type ViewStyle } from "react-native";
-import { Button, ContextMenu, Group, Host, Image, Menu, RNHostView } from "@expo/ui/swift-ui";
 import {
+  Button,
+  ContextMenu,
+  Group,
+  Host,
+  Image,
+  Menu,
+  RNHostView,
   accessibilityLabel,
   buttonStyle,
   contentShape,
@@ -9,7 +15,7 @@ import {
   glassEffect,
   menuIndicator,
   shapes,
-} from "@expo/ui/swift-ui/modifiers";
+} from "./SwiftUI";
 import type { SFSymbol } from "sf-symbols-typescript";
 import { colors, glassSupported } from "../theme";
 import { showActionSheet } from "./ActionSheet";
@@ -104,12 +110,31 @@ export function LongPressMenu({
               contentShape(shapes.roundedRectangle({ cornerRadius }), "contextMenuPreview"),
             ]}
           >
-            <RNHostView matchContents>{children}</RNHostView>
+            <RNHostView matchContents>{withoutPressAfterHold(children)}</RNHostView>
           </Group>
         </ContextMenu.Trigger>
       </ContextMenu>
     </Host>
   );
+}
+
+/** Hold time after which a release is a long press, not a tap. */
+const HOLD_MS = 350;
+const noop = () => {};
+
+/**
+ * The system context menu doesn't always cancel the RN touch underneath it,
+ * so releasing after the menu appeared could also fire the trigger's onPress
+ * (e.g. opening the conversation). Give a pressable trigger an onLongPress
+ * so RN treats any hold as a long press and never reports it as a tap.
+ */
+function withoutPressAfterHold(child: React.ReactElement) {
+  const props = child.props as { onPress?: unknown; onLongPress?: unknown };
+  if (!props.onPress || props.onLongPress) return child;
+  return React.cloneElement(child as React.ReactElement<Record<string, unknown>>, {
+    onLongPress: noop,
+    delayLongPress: HOLD_MS,
+  });
 }
 
 /**

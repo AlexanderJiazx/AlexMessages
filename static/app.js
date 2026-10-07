@@ -197,12 +197,25 @@
     </div>`;
   }
 
-  // Attachment kind for previews: "image" | "video" | "file".
+  // Attachment kind: "image" | "video" | "audio" | "file" (mirrors shared/src/format.ts).
   function attachmentKind(a) {
     const mime = (a && a.mime) || "";
     if (mime.startsWith("image/")) return "image";
     if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+    const ext = (((a && a.name) || "").split(".").pop() || "").toLowerCase();
+    if (["mp4", "mov", "webm", "m4v", "mkv", "avi"].includes(ext)) return "video";
+    if (["mp3", "wav", "m4a", "aac", "ogg", "oga", "flac", "caf", "opus", "weba"].includes(ext)) return "audio";
     return "file";
+  }
+
+  // Recorded voice messages are uploaded as "voice-message.<ext>" by every
+  // client; that name separates them from audio files a user attached.
+  function isVoiceMessage(a) {
+    if (attachmentKind(a) !== "audio") return false;
+    const name = a.name || "";
+    const dot = name.lastIndexOf(".");
+    return (dot < 0 ? name : name.slice(0, dot)) === "voice-message";
   }
 
   // One-line preview of the latest message in a thread, for the sidebar.
@@ -215,7 +228,8 @@
       const prefix = mine ? "You: " : "";
       if (m.text) return prefix + m.text.replace(/\s+/g, " ").slice(0, 80);
       if (m.attachments && m.attachments.length) {
-        return prefix + "Attachment: " + attachmentKind(m.attachments[0]);
+        const a = m.attachments[0];
+        return prefix + (isVoiceMessage(a) ? "Voice message" : "Attachment: " + attachmentKind(a));
       }
       return "";
     }
@@ -818,6 +832,7 @@
       img.addEventListener("click", () => openLightbox(img.src));
     });
     wireImagePlaceholders(wrap);
+    wireVoiceMessages(wrap);
     hydrateLinkPreview(wrap.querySelector(".link-previews"), m);
     return wrap;
   }
@@ -843,12 +858,146 @@
         <img class="att-img" src="${escapeHTML(a.url)}" alt="${escapeHTML(a.name)}" loading="lazy"/>
       </div>`;
     }
+    const kind = attachmentKind(a);
+    if (kind === "video") {
+      return `<div class="att-video-wrap">
+        <video class="att-video" src="${escapeHTML(a.url)}" controls playsinline preload="metadata"></video>
+        <a class="att-media-name" href="${escapeHTML(a.url)}" target="_blank" rel="noopener" download="${escapeHTML(a.name)}">${escapeHTML(a.name)}</a>
+      </div>`;
+    }
+    if (kind === "audio" && isVoiceMessage(a)) {
+      return `<div class="voice-msg" data-voice="${escapeHTML(a.url)}">
+        <button type="button" class="voice-play" aria-label="Play voice message">${VOICE_PLAY_SVG}</button>
+        <div class="voice-wave" role="slider" aria-label="Voice message position"></div>
+        <span class="voice-time">0:00</span>
+        <audio src="${escapeHTML(a.url)}" preload="metadata"></audio>
+      </div>`;
+    }
+    if (kind === "audio") {
+      return `<div class="att-audio-wrap">
+        <span class="att-audio-ico">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        </span>
+        <div class="att-audio-body">
+          <audio class="att-audio" src="${escapeHTML(a.url)}" controls preload="metadata"></audio>
+          <a class="att-audio-name" href="${escapeHTML(a.url)}" target="_blank" rel="noopener" download="${escapeHTML(a.name)}">${escapeHTML(a.name)} · ${fmtSize(a.size)}</a>
+        </div>
+      </div>`;
+    }
     return `<a class="att-file" href="${escapeHTML(a.url)}" target="_blank" rel="noopener" download="${escapeHTML(a.name)}">
       <span class="ico">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
       </span>
       <span class="meta"><b>${escapeHTML(a.name)}</b><span>${fmtSize(a.size)}</span></span>
     </a>`;
+  }
+
+  // ──────── Voice messages: play · waveform · time ────────
+  const VOICE_BARS = 36;
+  const VOICE_PLAY_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.52.85l12-7.5a1 1 0 0 0 0-1.7l-12-7.5A1 1 0 0 0 7 4.5z" fill="currentColor"/></svg>';
+  const VOICE_PAUSE_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4" width="4.5" height="16" rx="1.2" fill="currentColor"/><rect x="13.5" y="4" width="4.5" height="16" rx="1.2" fill="currentColor"/></svg>';
+  const voiceDecodeCache = new Map();
+  let voiceCurrent = null;
+
+  // Peak envelope (0..1) + duration, decoded offline; null if undecodable.
+  function decodeVoice(url) {
+    if (!voiceDecodeCache.has(url)) {
+      voiceDecodeCache.set(url, (async () => {
+        try {
+          const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+          if (!Ctx) return null;
+          const buf = await (await fetch(url)).arrayBuffer();
+          const audio = await new Ctx(1, 1, 44100).decodeAudioData(buf);
+          const data = audio.getChannelData(0);
+          const step = Math.max(1, Math.floor(data.length / VOICE_BARS));
+          const peaks = [];
+          for (let i = 0; i < VOICE_BARS; i++) {
+            let sum = 0;
+            const end = Math.min(data.length, (i + 1) * step);
+            for (let j = i * step; j < end; j++) sum += data[j] * data[j];
+            peaks.push(Math.sqrt(sum / Math.max(1, end - i * step)));
+          }
+          const max = Math.max(...peaks, 1e-4);
+          return { peaks: peaks.map(v => Math.max(0.08, Math.min(1, v / max))), duration: audio.duration };
+        } catch { return null; }
+      })());
+    }
+    return voiceDecodeCache.get(url);
+  }
+
+  function voiceFallbackPeaks(url) {
+    let h = hash(url) || 1;
+    const out = [];
+    for (let i = 0; i < VOICE_BARS; i++) {
+      h = (h * 1103515245 + 12345) & 0x7fffffff;
+      out.push(0.2 + ((h >> 8) % 1000) / 1250);
+    }
+    return out;
+  }
+
+  function fmtClock(sec) {
+    const s = Math.max(0, Math.round(sec));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  function wireVoiceMessages(scope) {
+    scope.querySelectorAll(".voice-msg").forEach(el => {
+      const url = el.getAttribute("data-voice");
+      const audio = el.querySelector("audio");
+      const btn = el.querySelector(".voice-play");
+      const wave = el.querySelector(".voice-wave");
+      const time = el.querySelector(".voice-time");
+      let duration = 0;
+      const drawBars = (peaks) => {
+        wave.innerHTML = peaks.map(v => `<span style="height:${Math.round(v * 100)}%"></span>`).join("");
+        paint();
+      };
+      const paint = () => {
+        const p = duration > 0 ? audio.currentTime / duration : 0;
+        const bars = wave.children;
+        for (let i = 0; i < bars.length; i++) bars[i].classList.toggle("on", (i + 0.5) / bars.length <= p);
+        const shown = !audio.paused || audio.currentTime > 0 ? duration - audio.currentTime : duration;
+        time.textContent = duration ? fmtClock(shown) : "0:00";
+      };
+      // WebAudio-recorded WAVs can report Infinity until fully buffered.
+      const onMeta = () => {
+        if (Number.isFinite(audio.duration) && audio.duration > 0) { duration = audio.duration; paint(); }
+      };
+      drawBars(voiceFallbackPeaks(url));
+      decodeVoice(url).then(d => {
+        if (!d) return;
+        if (!duration) duration = d.duration;
+        drawBars(d.peaks);
+      });
+      audio.addEventListener("loadedmetadata", onMeta);
+      audio.addEventListener("durationchange", onMeta);
+      audio.addEventListener("timeupdate", paint);
+      audio.addEventListener("play", () => {
+        el.classList.add("playing");
+        btn.innerHTML = VOICE_PAUSE_SVG;
+        btn.setAttribute("aria-label", "Pause voice message");
+      });
+      audio.addEventListener("pause", () => {
+        el.classList.remove("playing");
+        btn.innerHTML = VOICE_PLAY_SVG;
+        btn.setAttribute("aria-label", "Play voice message");
+      });
+      audio.addEventListener("ended", () => { audio.currentTime = 0; paint(); });
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (!audio.paused) { audio.pause(); return; }
+        if (voiceCurrent && voiceCurrent !== audio) voiceCurrent.pause();
+        voiceCurrent = audio;
+        audio.play().catch(() => {});
+      });
+      wave.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (!duration) return;
+        const r = wave.getBoundingClientRect();
+        audio.currentTime = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * duration;
+        paint();
+      });
+    });
   }
 
   // Reveal images once loaded; placeholders keep the reserved box meanwhile.

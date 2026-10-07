@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-nati
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import * as Haptics from "expo-haptics";
-import { Host, Image as SFImage } from "@expo/ui/swift-ui";
+import { Host, Image as SFImage } from "./SwiftUI";
 import type { SFSymbol } from "sf-symbols-typescript";
 import { toast, useSession } from "../session";
 import { useVoiceRecorder } from "../audio";
@@ -287,7 +287,10 @@ function RoundButton({
   );
 }
 
-/** SF Symbol on iOS 26 (non-interactive, so the Pressable keeps the touch); Ionicons elsewhere. */
+/**
+ * SF Symbol on iOS 26 (non-interactive, so the Pressable keeps the touch);
+ * Ionicons elsewhere. Ignores safe areas so the keyboard can't offset it.
+ */
 export function Glyph({
   sf,
   ion,
@@ -301,7 +304,7 @@ export function Glyph({
 }) {
   if (glassSupported) {
     return (
-      <Host matchContents pointerEvents="none">
+      <Host matchContents ignoreSafeArea="all" pointerEvents="none">
         <SFImage systemName={sf} size={size} color={color} />
       </Host>
     );

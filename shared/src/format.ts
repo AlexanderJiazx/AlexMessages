@@ -158,6 +158,21 @@ export function attachmentKind(a: Pick<Attachment, "mime" | "name">): Attachment
   return "file";
 }
 
+/**
+ * File name every client gives a recorded voice message (`voice-message.wav`
+ * on web/iOS, `.m4a` on Android). The name is the marker that separates a
+ * voice message (rendered as a waveform player) from an audio file the user
+ * uploaded (rendered as a named audio card).
+ */
+export const VOICE_MESSAGE_BASENAME = "voice-message";
+
+export function isVoiceMessage(a: Pick<Attachment, "mime" | "name">): boolean {
+  if (attachmentKind(a) !== "audio") return false;
+  const name = a.name || "";
+  const dot = name.lastIndexOf(".");
+  return (dot < 0 ? name : name.slice(0, dot)) === VOICE_MESSAGE_BASENAME;
+}
+
 /** Compact description of one attachment for previews: "📎 photo.jpg" style
  *  handled by callers; this returns the noun. */
 export function attachmentLabel(a: Pick<Attachment, "mime" | "name">): string {
@@ -167,7 +182,7 @@ export function attachmentLabel(a: Pick<Attachment, "mime" | "name">): string {
     case "video":
       return "Video";
     case "audio":
-      return "Voice message";
+      return isVoiceMessage(a) ? "Voice message" : "Audio";
     default:
       return "Attachment";
   }
@@ -185,7 +200,8 @@ export function lastMessagePreviewFor(
     const prefix = meId != null && m.user_id === meId ? "You: " : "";
     if (m.text) return prefix + m.text.replace(/\s+/g, " ").slice(0, 80);
     if (m.attachments && m.attachments.length) {
-      return prefix + "Attachment: " + attachmentKind(m.attachments[0]);
+      const a = m.attachments[0];
+      return prefix + (isVoiceMessage(a) ? "Voice message" : "Attachment: " + attachmentKind(a));
     }
     return "";
   }

@@ -6,6 +6,7 @@ import {
   firstUrl,
   fmtSize,
   fmtTime,
+  isVoiceMessage,
   nameFor,
 } from "@shared/format";
 import type { ChatMessage } from "@shared/store";
@@ -14,6 +15,7 @@ import { useChatState } from "../hooks";
 import { renderBodyNodes } from "../format-ui";
 import { Avatar } from "./Avatar";
 import { Icon } from "./icons";
+import { VoiceMessage } from "./VoiceMessage";
 
 /**
  * One message row: avatar slot, header (name + time), bubble (reply-ref,
@@ -229,7 +231,10 @@ function EditArea({ m, onDone }: { m: ChatMessage; onDone: () => void }) {
   );
 }
 
-/** One attachment: inline image (reserved box), <video>/<audio> player, or file card. */
+/**
+ * One attachment: inline image (reserved box), <video> player, voice-message
+ * waveform player, named audio card (uploaded audio files), or file card.
+ */
 function AttachmentView({
   a,
   onImageClick,
@@ -251,6 +256,7 @@ function AttachmentView({
         </div>
       );
     case "audio":
+      if (isVoiceMessage(a)) return <VoiceMessage a={a} />;
       return (
         <div className="att-audio-wrap">
           <span className="att-audio-ico">
@@ -258,9 +264,9 @@ function AttachmentView({
           </span>
           <div className="att-audio-body">
             <audio className="att-audio" src={a.url} controls preload="metadata" />
-            <span className="att-audio-name">
+            <a className="att-audio-name" href={a.url} target="_blank" rel="noopener" download={a.name}>
               {a.name} · {fmtSize(a.size)}
-            </span>
+            </a>
           </div>
         </div>
       );

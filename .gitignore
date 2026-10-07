@@ -24,6 +24,7 @@ web/playwright-report/
 mobile/report.xml
 mobile/.expo/
 mobile/dist/
+mobile/build/
 mobile/ios/
 mobile/android/
 mobile/.kotlin/

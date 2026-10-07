@@ -153,6 +153,13 @@ const PATHS: Record<string, JSX.Element> = {
     </>
   ),
   play: <path d="M6 4l14 8-14 8V4z" />,
+  playFill: <path d="M7 4.5v15a1 1 0 0 0 1.52.85l12-7.5a1 1 0 0 0 0-1.7l-12-7.5A1 1 0 0 0 7 4.5z" fill="currentColor" stroke="none" />,
+  pauseFill: (
+    <>
+      <rect x="6" y="4" width="4.5" height="16" rx="1.2" fill="currentColor" stroke="none" />
+      <rect x="13.5" y="4" width="4.5" height="16" rx="1.2" fill="currentColor" stroke="none" />
+    </>
+  ),
 };
 
 export type IconName = keyof typeof PATHS;

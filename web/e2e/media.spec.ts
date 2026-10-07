@@ -46,6 +46,9 @@ test.describe("media attachments", () => {
     await page.getByRole("button", { name: "Send" }).click();
     await expect(page.locator("audio.att-audio").last()).toBeVisible();
     await expect(page.getByText(/tone\.wav/).last()).toBeVisible();
+    // An uploaded audio file is not a voice message.
+    const msg = page.locator(".msg").filter({ has: page.locator("audio.att-audio") }).last();
+    await expect(msg.locator(".voice-msg")).toHaveCount(0);
   });
 
   test("generic file renders a download card", async ({ page }) => {

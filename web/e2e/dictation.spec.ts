@@ -65,9 +65,16 @@ test.describe("voice dictation", () => {
     await expect(page.getByRole("group", { name: "Voice dictation" })).toBeVisible();
     await page.waitForTimeout(1200);
     await page.getByRole("button", { name: "Send as voice message" }).click();
-    // An audio player lands in the stream for the sent clip.
-    await expect(page.locator("audio.att-audio").last()).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText(/voice-message\.wav/).last()).toBeVisible();
+    // A voice-message player (not the named audio-file card) lands in the stream.
+    const voice = page.locator(".voice-msg").last();
+    await expect(voice).toBeVisible({ timeout: 10_000 });
+    await expect(voice.getByRole("button", { name: "Play voice message" })).toBeVisible();
+    await expect(voice.locator(".voice-wave span")).not.toHaveCount(0);
+    await expect(voice.locator(".voice-time")).not.toHaveText("0:00");
+    await expect(page.getByText(/voice-message\.wav/)).toHaveCount(0);
+    // Playing it flips the control to pause.
+    await voice.getByRole("button", { name: "Play voice message" }).click();
+    await expect(voice.getByRole("button", { name: "Pause voice message" })).toBeVisible();
   });
 
   test("waveform animates while recording", async ({ page }) => {

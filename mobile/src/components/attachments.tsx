@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -8,22 +8,27 @@ import {
   Text,
   View,
 } from "react-native";
-import { useAudioPlayer } from "expo-audio";
+import { useAudioPlayer, useAudioPlayerStatus, type AudioPlayer } from "expo-audio";
 import { useVideoPlayer, VideoView } from "expo-video";
 import {
   attachmentKind,
   fmtSize,
+  hash,
+  isVoiceMessage,
+  wavPeaks,
   type Attachment,
 } from "@alexmessages/shared";
 import { colors, radius } from "../theme";
 import { Icon } from "./Icon";
 import { useSession } from "../session";
+import { enablePlayback } from "../audio";
 
 const MAX_W = 260;
 
 /**
  * Attachment rendering — image with reserved box + fullscreen viewer,
- * inline video player, audio player pill, or a file card. Mirrors the web
+ * inline video player, voice-message waveform player, named audio-file
+ * card, or a file card. Mirrors the web
  * client's attachmentKind routing.
  */
 export function AttachmentView({
@@ -42,7 +47,11 @@ export function AttachmentView({
     case "video":
       return <VideoAttachment a={a} />;
     case "audio":
-      return <AudioAttachment a={a} mine={mine} />;
+      return isVoiceMessage(a) ? (
+        <VoiceAttachment a={a} mine={mine} />
+      ) : (
+        <AudioFileAttachment a={a} mine={mine} />
+      );
     default:
       return <FileAttachment a={a} mine={mine} />;
   }
@@ -119,46 +128,157 @@ function VideoAttachment({ a }: { a: Attachment }) {
   );
 }
 
-/** Audio attachment — compact play/pause pill with progress. */
-function AudioAttachment({ a, mine }: { a: Attachment; mine: boolean }) {
-  const uri = useAttachmentUrl(a.url);
+/** The voice message / audio file currently playing; starting another pauses it. */
+let currentPlayer: AudioPlayer | null = null;
+
+/** Shared play/pause for the in-bubble players. */
+function usePlayback(uri: string) {
   const player = useAudioPlayer(uri);
-  const [playing, setPlaying] = useState(false);
-  const [pos, setPos] = useState(0);
+  const status = useAudioPlayerStatus(player);
 
-  const toggle = useCallback(() => {
-    if (playing) {
+  useEffect(() => {
+    if (status.didJustFinish) {
       player.pause();
-      setPlaying(false);
-    } else {
-      if (player.duration > 0 && pos >= player.duration - 0.1) player.seekTo(0);
-      player.play();
-      setPlaying(true);
+      void player.seekTo(0);
     }
-  }, [playing, player, pos]);
+  }, [status.didJustFinish, player]);
 
-  // Poll playback position while playing.
-  React.useEffect(() => {
-    if (!playing) return;
-    const t = setInterval(() => {
-      setPos(player.currentTime);
-      if (player.duration > 0 && player.currentTime >= player.duration) setPlaying(false);
-    }, 250);
-    return () => clearInterval(t);
-  }, [playing, player]);
+  useEffect(
+    () => () => {
+      if (currentPlayer === player) currentPlayer = null;
+    },
+    [player],
+  );
 
-  const dur = player.duration || 0;
-  const pct = dur > 0 ? Math.min(1, pos / dur) : 0;
+  const toggle = useCallback(async () => {
+    if (status.playing) {
+      player.pause();
+      return;
+    }
+    // Recording leaves the session in a mode the silent switch mutes.
+    await enablePlayback();
+    if (currentPlayer && currentPlayer !== player) currentPlayer.pause();
+    currentPlayer = player;
+    if (status.duration > 0 && status.currentTime >= status.duration - 0.1) await player.seekTo(0);
+    player.play();
+  }, [player, status.playing, status.duration, status.currentTime]);
+
+  return { player, status, toggle };
+}
+
+const VOICE_BARS = 30;
+/** Decoded waveforms per URL — a sent clip never changes. */
+const peakCache = new Map<string, Promise<{ peaks: number[]; duration: number } | null>>();
+
+/** Real envelope for WAV clips (web + iOS recordings); null otherwise. */
+function loadPeaks(uri: string, name: string) {
+  if (!/\.wav$/i.test(name)) return Promise.resolve(null);
+  let p = peakCache.get(uri);
+  if (!p) {
+    p = fetch(uri)
+      .then((r) => (r.ok ? r.arrayBuffer() : null))
+      .then((buf) => (buf ? wavPeaks(buf, VOICE_BARS) : null))
+      .catch(() => null);
+    peakCache.set(uri, p);
+  }
+  return p;
+}
+
+/** Stable stand-in bars (Android's AAC clips can't be decoded in JS). */
+function placeholderPeaks(seed: string): number[] {
+  let h = hash(seed) || 1;
+  const out: number[] = [];
+  for (let i = 0; i < VOICE_BARS; i++) {
+    h = (h * 1103515245 + 12345) & 0x7fffffff;
+    out.push(0.2 + ((h >> 8) % 1000) / 1250);
+  }
+  return out;
+}
+
+function fmtClock(sec: number): string {
+  const s = Math.max(0, Math.round(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Recorded voice message — Messages-style play · waveform · time. */
+function VoiceAttachment({ a, mine }: { a: Attachment; mine: boolean }) {
+  const uri = useAttachmentUrl(a.url);
+  const { player, status, toggle } = usePlayback(uri);
+  const [peaks, setPeaks] = useState(() => placeholderPeaks(a.url));
+  const [decodedDur, setDecodedDur] = useState(0);
+  const [waveW, setWaveW] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    void loadPeaks(uri, a.name).then((d) => {
+      if (!live || !d) return;
+      setPeaks(d.peaks);
+      setDecodedDur(d.duration);
+    });
+    return () => {
+      live = false;
+    };
+  }, [uri, a.name]);
+
+  const dur = status.duration > 0 ? status.duration : decodedDur;
+  const progress = dur > 0 ? Math.min(1, status.currentTime / dur) : 0;
+  const started = status.playing || status.currentTime > 0;
+  const fg = mine ? colors.surface : colors.sageDeep;
+  const dim = mine ? "rgba(255,255,255,0.45)" : "rgba(53,80,64,0.28)";
+
+  return (
+    <View style={styles.voice}>
+      <Pressable
+        style={({ pressed }) => [styles.voiceBtn, mine && styles.voiceBtnMine, pressed && { opacity: 0.7 }]}
+        onPress={() => void toggle()}
+        hitSlop={6}
+        accessibilityRole="button"
+        accessibilityLabel={status.playing ? "Pause voice message" : "Play voice message"}
+      >
+        <Icon name={status.playing ? "pause" : "play"} size={16} color={fg} />
+      </Pressable>
+      <Pressable
+        style={styles.voiceWave}
+        onLayout={(e) => setWaveW(e.nativeEvent.layout.width)}
+        onPress={(e) => {
+          if (!dur || !waveW) return;
+          void player.seekTo(Math.min(1, Math.max(0, e.nativeEvent.locationX / waveW)) * dur);
+        }}
+        accessibilityLabel="Voice message position"
+      >
+        {peaks.map((v, i) => (
+          <View
+            key={i}
+            style={[
+              styles.voiceBar,
+              { height: Math.max(3, Math.round(v * 24)) },
+              { backgroundColor: (i + 0.5) / peaks.length <= progress ? fg : dim },
+            ]}
+          />
+        ))}
+      </Pressable>
+      <Text style={[styles.voiceTime, mine && styles.voiceTimeMine]}>
+        {fmtClock(started ? dur - status.currentTime : dur)}
+      </Text>
+    </View>
+  );
+}
+
+/** Uploaded audio file — named card with play/pause and a progress track. */
+function AudioFileAttachment({ a, mine }: { a: Attachment; mine: boolean }) {
+  const uri = useAttachmentUrl(a.url);
+  const { status, toggle } = usePlayback(uri);
+  const pct = status.duration > 0 ? Math.min(1, status.currentTime / status.duration) : 0;
 
   return (
     <View style={[styles.audioWrap, mine && styles.audioWrapMine]}>
       <Pressable
         style={[styles.audioBtn, mine && styles.audioBtnMine]}
-        onPress={toggle}
-        accessibilityLabel={playing ? "Pause audio" : "Play audio"}
+        onPress={() => void toggle()}
+        accessibilityLabel={status.playing ? "Pause audio" : "Play audio"}
       >
         <Icon
-          name={playing ? "pause" : "play"}
+          name={status.playing ? "pause" : "play"}
           size={15}
           color={mine ? colors.surface : colors.sageDeep}
         />
@@ -231,6 +351,45 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: colors.muted,
     maxWidth: MAX_W,
+  },
+  voice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    width: 220,
+    paddingVertical: 2,
+  },
+  voiceBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.sageTint,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  voiceBtnMine: {
+    backgroundColor: "rgba(255,255,255,0.22)",
+  },
+  voiceWave: {
+    flex: 1,
+    height: 28,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  voiceBar: {
+    width: 3,
+    borderRadius: 1.5,
+  },
+  voiceTime: {
+    fontSize: 13,
+    color: colors.muted,
+    fontVariant: ["tabular-nums"],
+    minWidth: 32,
+    textAlign: "right",
+  },
+  voiceTimeMine: {
+    color: "rgba(255,255,255,0.85)",
   },
   audioWrap: {
     flexDirection: "row",

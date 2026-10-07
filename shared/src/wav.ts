@@ -83,3 +83,58 @@ export function downmixToMono(interleaved: Float32Array, channels: number): Floa
 function writeAscii(view: DataView, offset: number, text: string): void {
   for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
 }
+
+/**
+ * RMS envelope of a 16-bit PCM WAV, bucketed into `bars` values normalized
+ * to 0..1 (floor 0.08 so silence still draws a bar), plus the clip duration.
+ * Walks the RIFF chunks, so extra chunks (`LIST`, `FLLR` from iOS) are fine.
+ * Returns null for anything that isn't 16-bit PCM WAV — callers fall back to
+ * placeholder bars (e.g. Android's AAC `.m4a` voice messages).
+ */
+export function wavPeaks(buf: ArrayBuffer, bars: number): { peaks: number[]; duration: number } | null {
+  if (buf.byteLength < 12 || bars < 1) return null;
+  const v = new DataView(buf);
+  const tag = (off: number) =>
+    String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3));
+  if (tag(0) !== "RIFF" || tag(8) !== "WAVE") return null;
+  let channels = 0;
+  let rate = 0;
+  let bits = 0;
+  let off = 12;
+  while (off + 8 <= buf.byteLength) {
+    const id = tag(off);
+    const len = v.getUint32(off + 4, true);
+    const body = off + 8;
+    if (id === "fmt " && len >= 16) {
+      if (v.getUint16(body, true) !== 1) return null; // PCM only
+      channels = v.getUint16(body + 2, true);
+      rate = v.getUint32(body + 4, true);
+      bits = v.getUint16(body + 14, true);
+    } else if (id === "data") {
+      if (bits !== 16 || channels < 1 || rate < 1) return null;
+      const frameBytes = 2 * channels;
+      const end = Math.min(buf.byteLength, body + len);
+      const frames = Math.floor((end - body) / frameBytes);
+      if (frames < 1) return null;
+      const per = Math.max(1, Math.floor(frames / bars));
+      const raw: number[] = [];
+      for (let b = 0; b < bars; b++) {
+        const f0 = b * per;
+        const f1 = Math.min(frames, f0 + per);
+        let sum = 0;
+        for (let f = f0; f < f1; f++) {
+          const s = v.getInt16(body + f * frameBytes, true) / 0x8000;
+          sum += s * s;
+        }
+        raw.push(f1 > f0 ? Math.sqrt(sum / (f1 - f0)) : 0);
+      }
+      const max = Math.max(...raw, 1e-4);
+      return {
+        peaks: raw.map((x) => Math.max(0.08, Math.min(1, x / max))),
+        duration: frames / rate,
+      };
+    }
+    off = body + len + (len & 1); // chunks are word-aligned
+  }
+  return null;
+}

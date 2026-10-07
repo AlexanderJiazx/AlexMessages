@@ -1,5 +1,8 @@
 import React from "react";
-import { Ionicons } from "@expo/vector-icons";
+// Deep import: the package index eagerly requires every icon family's font
+// file, which would bundle all ~20 vector-icon fonts (~4 MB). Only Ionicons
+// is used, so importing it directly keeps the other fonts out of the app.
+import Ionicons from "@expo/vector-icons/build/Ionicons";
 import { colors } from "../theme";
 
 /**

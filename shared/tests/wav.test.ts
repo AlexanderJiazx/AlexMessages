@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { downmixToMono, encodeWav, resampleMono } from "../src/wav";
+import { downmixToMono, encodeWav, resampleMono, wavPeaks } from "../src/wav";
 
 describe("encodeWav", () => {
   it("writes a valid RIFF/WAVE header", () => {
@@ -53,5 +53,35 @@ describe("downmixToMono", () => {
   it("passes mono through untouched", () => {
     const mono = new Float32Array([0.3]);
     expect(downmixToMono(mono, 1)).toBe(mono);
+  });
+});
+
+describe("wavPeaks", () => {
+  it("buckets a WAV into normalized bars and reports its duration", () => {
+    // 1 s at 8 kHz: quiet first half, loud second half.
+    const pcm = new Float32Array(8000);
+    for (let i = 0; i < pcm.length; i++) pcm[i] = (i < 4000 ? 0.1 : 0.8) * Math.sin(i / 3);
+    const out = wavPeaks(encodeWav(pcm, { sampleRate: 8000 }), 4);
+    expect(out).not.toBeNull();
+    expect(out!.duration).toBeCloseTo(1, 3);
+    expect(out!.peaks).toHaveLength(4);
+    expect(out!.peaks[3]).toBeGreaterThan(0.99);
+    expect(out!.peaks[0]).toBeLessThan(0.2);
+  });
+
+  it("skips non-data chunks before the samples", () => {
+    const wav = new Uint8Array(encodeWav(new Float32Array(800).fill(0.5), { sampleRate: 8000 }));
+    // Splice a 6-byte "LIST" chunk between "fmt " and "data".
+    const list = new Uint8Array([0x4c, 0x49, 0x53, 0x54, 6, 0, 0, 0, 1, 2, 3, 4, 5, 6]);
+    const spliced = new Uint8Array(wav.length + list.length);
+    spliced.set(wav.subarray(0, 36));
+    spliced.set(list, 36);
+    spliced.set(wav.subarray(36), 36 + list.length);
+    const out = wavPeaks(spliced.buffer, 8);
+    expect(out!.duration).toBeCloseTo(0.1, 3);
+  });
+
+  it("rejects non-WAV data", () => {
+    expect(wavPeaks(new TextEncoder().encode("ftypM4A not a wav").buffer, 8)).toBeNull();
   });
 });

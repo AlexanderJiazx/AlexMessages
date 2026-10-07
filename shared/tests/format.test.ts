@@ -10,6 +10,7 @@ import {
   fmtStampLabel,
   hash,
   initialsFor,
+  isVoiceMessage,
   lastMessagePreviewFor,
   nameFor,
   PEER_COLORS,
@@ -100,6 +101,15 @@ describe("attachment kinds", () => {
     expect(attachmentKind({ mime: "", name: "voice.wav" })).toBe("audio");
     expect(attachmentKind({ mime: "", name: "doc.txt" })).toBe("file");
   });
+
+  it("separates recorded voice messages from uploaded audio files", () => {
+    expect(isVoiceMessage({ mime: "audio/wav", name: "voice-message.wav" })).toBe(true);
+    expect(isVoiceMessage({ mime: "audio/mp4", name: "voice-message.m4a" })).toBe(true);
+    expect(isVoiceMessage({ mime: "application/octet-stream", name: "voice-message.m4a" })).toBe(true);
+    expect(isVoiceMessage({ mime: "audio/mpeg", name: "song.mp3" })).toBe(false);
+    expect(isVoiceMessage({ mime: "audio/wav", name: "my-voice-message.wav" })).toBe(false);
+    expect(isVoiceMessage({ mime: "application/pdf", name: "voice-message.pdf" })).toBe(false);
+  });
 });
 
 describe("body segments", () => {
@@ -155,6 +165,8 @@ describe("sidebar previews", () => {
     const m = mk(2, "", 1);
     m.attachments = [{ name: "v.mp4", url: "/u", size: 1, mime: "video/mp4", width: 0, height: 0 }];
     expect(lastMessagePreviewFor([m], 1)).toBe("Attachment: video");
+    m.attachments = [{ name: "voice-message.wav", url: "/u", size: 1, mime: "audio/wav", width: 0, height: 0 }];
+    expect(lastMessagePreviewFor([m], 1)).toBe("Voice message");
   });
 
   it("fmtSize formats bytes", () => {

@@ -1,5 +1,6 @@
 import React, { useMemo, useRef, useState } from "react";
 import {
+  Alert,
   Animated,
   Pressable,
   StyleSheet,
@@ -19,6 +20,7 @@ import { Avatar } from "./Avatar";
 import { Icon } from "./Icon";
 import { LongPressMenu, type MenuAction } from "./NativeMenu";
 import { EdgeFade, GlassIconButton, GlassSurface } from "./Glass";
+import { closeOpenSwipeRow, SwipeRow, type SwipeAction } from "./SwipeRow";
 
 const BAR_H = 56;
 
@@ -130,6 +132,7 @@ export function DMList({
         contentContainerStyle={styles.list}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
+        onScrollBeginDrag={closeOpenSwipeRow}
         onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], {
           useNativeDriver: true,
         })}
@@ -175,9 +178,24 @@ export function DMList({
   );
 }
 
-/** Long-press menu actions shared by list rows and pinned cells. */
-function useDmActions(channel: string): MenuAction[] {
+/** "Delete for me", confirmed first — from the swipe action and the menu. */
+function useConfirmDelete(channel: string, name: string) {
   const { store } = useSession();
+  return () =>
+    Alert.alert(
+      "Delete Conversation?",
+      `This deletes your copy of the conversation with ${name}. They'll still see it.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: () => void store.deleteDm(channel) },
+      ]
+    );
+}
+
+/** Long-press menu actions shared by list rows and pinned cells. */
+function useDmActions(channel: string, name: string): MenuAction[] {
+  const { store } = useSession();
+  const confirmDelete = useConfirmDelete(channel, name);
   const st = store.dmStateFor(channel);
   const unread = store.isUnread(channel);
   return [
@@ -195,9 +213,45 @@ function useDmActions(channel: string): MenuAction[] {
       label: "Delete for me",
       systemImage: "trash",
       destructive: true,
-      onPress: () => void store.deleteDm(channel),
+      onPress: confirmDelete,
     },
   ];
+}
+
+/** Swipe actions, as in Messages: right → Unread/Read + Pin, left → Delete. */
+function useSwipeActions(channel: string, name: string) {
+  const { store } = useSession();
+  const confirmDelete = useConfirmDelete(channel, name);
+  const unread = store.isUnread(channel);
+  const leading: SwipeAction[] = [
+    {
+      key: "unread",
+      label: unread ? "Read" : "Unread",
+      sf: unread ? "message.fill" : "message.badge.filled.fill",
+      ion: unread ? "chatbubble" : "chatbubble-ellipses",
+      color: colors.sage,
+      onPress: () => void (unread ? store.markRead(channel) : store.markUnread(channel)),
+    },
+    {
+      key: "pin",
+      label: "Pin",
+      sf: "pin.fill",
+      ion: "pin",
+      color: "#D99A2B",
+      onPress: () => void store.togglePin(channel, true),
+    },
+  ];
+  const trailing: SwipeAction[] = [
+    {
+      key: "delete",
+      label: "Delete",
+      sf: "trash.fill",
+      ion: "trash",
+      color: colors.danger,
+      onPress: confirmDelete,
+    },
+  ];
+  return { leading, trailing };
 }
 
 function DmRow({
@@ -222,42 +276,45 @@ function DmRow({
   const when = fmtListTime(store.lastMessageTS(channel));
   const name = nameFor(s.users, peerId);
   const online = s.online.has(peerId);
-  const actions = useDmActions(channel);
+  const actions = useDmActions(channel, name);
+  const swipe = useSwipeActions(channel, name);
 
   return (
-    <LongPressMenu actions={actions} title={name} cornerRadius={14} fill>
-      <Pressable
-        style={({ pressed }) => [
-          styles.row,
-          { width },
-          active && styles.rowActive,
-          pressed && !active && styles.rowPressed,
-        ]}
-        onPress={onPress}
-        accessibilityRole="button"
-        accessibilityLabel={`Conversation with ${name}${unread ? ", unread" : ""}`}
-      >
-        <View style={styles.dotSlot}>
-          {unread && <View style={styles.unreadDot} accessibilityLabel="Unread messages" />}
-        </View>
-        <View>
-          <Avatar user={store.userFor(peerId)} size={52} />
-          {online && <View style={styles.onlineBadge} />}
-        </View>
-        <View style={[styles.rowBody, !last && styles.rowSeparator]}>
-          <View style={styles.rowTop}>
-            <Text style={styles.rowName} numberOfLines={1}>
-              {name}
-            </Text>
-            <Text style={[styles.rowTime, unread && styles.rowTimeUnread]}>{when}</Text>
-            <Icon name="chevron-forward" size={14} color={colors.faint} />
+    <SwipeRow width={width} leading={swipe.leading} trailing={swipe.trailing}>
+      <LongPressMenu actions={actions} title={name} cornerRadius={14} fill>
+        <Pressable
+          style={({ pressed }) => [
+            styles.row,
+            { width },
+            active && styles.rowActive,
+            pressed && !active && styles.rowPressed,
+          ]}
+          onPress={onPress}
+          accessibilityRole="button"
+          accessibilityLabel={`Conversation with ${name}${unread ? ", unread" : ""}`}
+        >
+          <View style={styles.dotSlot}>
+            {unread && <View style={styles.unreadDot} accessibilityLabel="Unread messages" />}
           </View>
-          <Text style={[styles.rowPreview, unread && styles.rowPreviewUnread]} numberOfLines={2}>
-            {preview || " "}
-          </Text>
-        </View>
-      </Pressable>
-    </LongPressMenu>
+          <View>
+            <Avatar user={store.userFor(peerId)} size={52} />
+            {online && <View style={styles.onlineBadge} />}
+          </View>
+          <View style={[styles.rowBody, !last && styles.rowSeparator]}>
+            <View style={styles.rowTop}>
+              <Text style={styles.rowName} numberOfLines={1}>
+                {name}
+              </Text>
+              <Text style={[styles.rowTime, unread && styles.rowTimeUnread]}>{when}</Text>
+              <Icon name="chevron-forward" size={14} color={colors.faint} />
+            </View>
+            <Text style={[styles.rowPreview, unread && styles.rowPreviewUnread]} numberOfLines={2}>
+              {preview || " "}
+            </Text>
+          </View>
+        </Pressable>
+      </LongPressMenu>
+    </SwipeRow>
   );
 }
 
@@ -278,7 +335,7 @@ function PinnedCell({
   const { store } = useSession();
   const unread = store.isUnread(channel);
   const name = nameFor(s.users, peerId);
-  const actions = useDmActions(channel);
+  const actions = useDmActions(channel, name);
   return (
     <LongPressMenu actions={actions} title={name} cornerRadius={20}>
       <Pressable

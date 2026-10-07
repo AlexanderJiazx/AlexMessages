@@ -45,6 +45,29 @@ const RECORDING_OPTIONS: RecordingOptions = {
       }),
 };
 
+/**
+ * Session for playing voice messages and audio attachments. Every field of
+ * expo-audio's native AudioMode has a default, so a partial
+ * setAudioModeAsync() resets the rest — notably `playsInSilentMode: false`,
+ * which on iOS selects the `.soloAmbient` category and the ring/silent
+ * switch mutes all playback. Always set the full playback mode.
+ */
+const PLAYBACK_MODE = {
+  playsInSilentMode: true,
+  allowsRecording: false,
+  interruptionMode: "duckOthers",
+  shouldPlayInBackground: false,
+} as const;
+
+/** Puts the audio session in playback mode (audible on silent, loudspeaker). */
+export async function enablePlayback(): Promise<void> {
+  try {
+    await setAudioModeAsync(PLAYBACK_MODE);
+  } catch {
+    /* noop — playback still works, just obeys the silent switch */
+  }
+}
+
 export interface VoiceRecorder {
   isRecording: boolean;
   durationMillis: number;
@@ -92,7 +115,7 @@ export function useVoiceRecorder(): VoiceRecorder {
     try {
       if (!state.isRecording) return null;
       await recorder.stop();
-      await setAudioModeAsync({ allowsRecording: false });
+      await enablePlayback();
       const uri = recorder.uri;
       if (!uri || Date.now() - startedRef.current < 400) return null;
       if (Platform.OS === "ios") return { uri, mime: "audio/wav", ext: "wav" };
@@ -105,7 +128,7 @@ export function useVoiceRecorder(): VoiceRecorder {
   const cancel = async (): Promise<void> => {
     try {
       if (state.isRecording) await recorder.stop();
-      await setAudioModeAsync({ allowsRecording: false });
+      await enablePlayback();
     } catch {
       /* noop */
     }

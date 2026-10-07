@@ -24,8 +24,9 @@ import { GlassContainer } from "expo-glass-effect";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import * as Haptics from "expo-haptics";
-import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { Host, Image as SFImage } from "@expo/ui/swift-ui";
+// Deep import (see Icon.tsx) — avoids bundling every vector-icon font.
+import MaterialCommunityIcons from "@expo/vector-icons/build/MaterialCommunityIcons";
+import { Host, Image as SFImage } from "./SwiftUI";
 import { fmtSize, nameFor, type Attachment } from "@alexmessages/shared";
 import { toast, useChatState, useSession } from "../session";
 import { colors, glassSupported, radius, type } from "../theme";
@@ -370,12 +371,14 @@ export function Composer({
 /**
  * Voice-message glyph: the SF Symbol `waveform` on iOS 26 (rendered by
  * SwiftUI, non-interactive so the RN Pressable keeps the touch), Material's
- * waveform elsewhere.
+ * waveform elsewhere. `ignoreSafeArea`: the Host's UIHostingController
+ * otherwise applies the keyboard safe area, which pushes the glyph to the
+ * top of the pill whenever the keyboard is up.
  */
 function WaveformIcon() {
   if (glassSupported) {
     return (
-      <Host matchContents pointerEvents="none">
+      <Host matchContents ignoreSafeArea="all" pointerEvents="none">
         <SFImage systemName="waveform" size={19} color={colors.muted} />
       </Host>
     );

@@ -1,6 +1,6 @@
 appId: com.alexanderjia.messages
 ---
-# Settings: grouped root list → each section pushes its own page.
+# Settings: grouped root list → each section is a pushed native stack screen.
 - runFlow: subflows/login.yaml
 - tapOn: "Settings"
 - assertVisible: "Profile"
@@ -11,16 +11,17 @@ appId: com.alexanderjia.messages
 - tapOn: "Profile"
 - assertVisible: "Display name"
 - assertVisible: "Bio"
-- tapOn: "Back"
+- runFlow: subflows/nav-back.yaml
 - tapOn: "Account"
 - assertVisible: "Update Password"
 - assertVisible: "Log Out of All Devices"
 - assertVisible: "Delete Account…"
-- tapOn: "Back"
+- runFlow: subflows/nav-back.yaml
 - tapOn: "Notifications"
 - assertVisible: "Direct message alerts"
-- tapOn: "Back"
+- runFlow: subflows/nav-back.yaml
 - tapOn: "Data"
 - assertVisible: "Export my data"
-- tapOn: "Close"
+- runFlow: subflows/nav-back.yaml
+- tapOn: "Done"
 - assertVisible: "Messages"

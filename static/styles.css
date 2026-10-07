@@ -962,3 +962,74 @@ textarea.input::placeholder { color: var(--faint); }
   .menu-btn, .rail-close { display: none; }
   .pane.left { transform: none !important; }
 }
+
+/* ──────── Media attachments (video / audio / gif) ──────── */
+.att-video-wrap {
+  border-radius: 10px; overflow: hidden; background: #000;
+  max-width: 360px; display: flex; flex-direction: column;
+}
+.att-video {
+  display: block; width: 100%; max-height: 320px; background: #000;
+}
+.att-media-name {
+  display: block; padding: 6px 10px; font-size: 11px; color: var(--muted);
+  background: var(--paper); text-decoration: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.att-media-name:hover { color: var(--sage-deep); text-decoration: underline; }
+.att-audio-wrap {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--line);
+  max-width: 340px;
+}
+.att-audio-ico {
+  width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+  background: var(--sage-tint); display: grid; place-items: center;
+  color: var(--sage-deep);
+}
+.att-audio-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.att-audio { width: 100%; height: 32px; }
+.att-audio-name {
+  font-size: 11px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.att-audio-name { text-decoration: none; }
+.att-audio-name:hover { color: var(--sage-deep); text-decoration: underline; }
+
+/* Recorded voice message: play · waveform · time (uploaded audio files keep
+   the named .att-audio card above). */
+.voice-msg {
+  display: flex; align-items: center; gap: 10px;
+  width: 260px; max-width: 100%; padding: 2px 0;
+}
+.voice-play {
+  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+  display: grid; place-items: center; border: 0; cursor: pointer;
+  background: var(--sage); color: #fff;
+}
+.voice-play:hover { background: var(--sage-deep); }
+.voice-play svg { margin-left: 1px; }
+.voice-msg.playing .voice-play svg { margin-left: 0; }
+.voice-wave {
+  flex: 1; min-width: 0; height: 28px; cursor: pointer;
+  display: flex; align-items: center; gap: 2px;
+}
+.voice-wave span {
+  flex: 1; min-width: 2px; max-width: 3px; min-height: 3px;
+  border-radius: 2px; background: var(--faint); opacity: .55;
+  transition: background .12s, opacity .12s;
+}
+.voice-wave span.on { background: var(--sage-deep); opacity: 1; }
+.voice-time {
+  font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums;
+  min-width: 30px; text-align: right;
+}
+.voice-msg audio { display: none; }
+
+@media (max-width: 640px) {
+  .att-video-wrap { max-width: 82vw; }
+  .att-audio-wrap { max-width: 78vw; }
+  .voice-msg { width: min(260px, 66vw); }
+}

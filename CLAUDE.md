@@ -198,6 +198,10 @@ Android from one codebase, plus `expo start --web`.
   home tab; two-pane on wide screens), `conversation` (a single DM thread —
   pushed as a separate route on narrow screens, embedded as the right pane on
   wide ones), plus `settings`, `new-chat`, `profile` as **modals**.
+  `settings/` is its own nested native stack (`_layout` + `index`, `profile`,
+  `account`, `notifications`, `data`, `admin`), so sections push with the
+  platform transition and the native header owns back/Done; the grouped-list
+  primitives live in `src/components/SettingsList.tsx`.
 - `src/session.tsx` — the mobile twin of `web/src/client.ts`: one `ApiClient` +
   one `ChatStore` created once the server URL and bearer token are known.
   Auth token in `expo-secure-store` (AsyncStorage fallback on web); server URL
@@ -214,7 +218,9 @@ Android from one codebase, plus `expo start --web`.
   bubble `#E9E8E0`…), the `type` scale, the `720` wide-layout breakpoint, and
   `glassSupported` (iOS ≥ 26 with the Liquid Glass API present).
 - `src/components/` — `Glass` (glass primitives + `EdgeFade`), `NativeMenu`
-  (context / popover menus), `DMList`,
+  (context / popover menus), `DMList` (rows wrapped in `SwipeRow`:
+  iMessage-style swipe right → Unread/Read + Pin, left → Delete, full swipe
+  fires the outermost action), `SwipeRow`,
   `ConversationView`, `MessageList`, `Bubble`, `Composer` (+ `DictationBar`),
   `Avatar`, `Icon`, `Sheet`, `ActionSheet`, `attachments`, `ImageViewer`,
   `Toasts`.
@@ -238,7 +244,13 @@ turns the pill into a review player (play · waveform · duration · transcribe
 recorder live in `DictationBar` (`VoicePanel`). Bubbles are iMessage-style
 runs (own = sage, right; peer = warm grey, left; no avatars in a DM) with
 centered timestamps at hour-long pauses; Settings is an inset-grouped list
-that pushes Profile/Account/Notifications/Data/Admin pages inside the sheet.
+whose Profile/Account/Notifications/Data/Admin pages are native stack pushes
+inside the sheet. Voice messages (`voice-message.<ext>`, see
+`isVoiceMessage` in `shared/src/format.ts`) render as a play · waveform ·
+time bubble on every client; other audio uploads stay a named audio card.
+Playback must go through `enablePlayback()` (`src/audio.ts`) — expo-audio's
+partial `setAudioModeAsync` resets `playsInSilentMode`, and the iOS silent
+switch then mutes everything.
 Type sizes come from `theme.type` (iOS Dynamic Type defaults). Wide layouts
 (iPad, tablets, desktop web) switch `chat` to a two-pane rail + conversation.
 

@@ -1,0 +1,15 @@
+appId: com.alexanderjia.messages
+---
+# Native stack back button: UIKit tags it "BackButton"; Android's toolbar
+# labels the up arrow "Navigate up".
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          id: "BackButton"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "Navigate up"
