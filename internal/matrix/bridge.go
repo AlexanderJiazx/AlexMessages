@@ -373,11 +373,45 @@ func (b *Bridge) sendMessage(ctx context.Context, roomID, puppet string, msg dmp
 	return nil
 }
 
+// attachmentLocalPath maps a stored attachment URL to a file inside the
+// sender's own upload directory — and nowhere else. Anything that would
+// escape the per-user directory (dot segments, extra separators, backslashes)
+// or resolve outside it through a symlink is refused as a permanent skip.
+func attachmentLocalPath(att db.Attachment) (string, error) {
+	rel := strings.TrimPrefix(att.URL, "/uploads/")
+	parts := strings.Split(rel, "/")
+	bad := len(parts) != 2 ||
+		parts[0] == "" || parts[0] == "." || parts[0] == ".." ||
+		parts[1] == "" || parts[1] == "." || parts[1] == ".." ||
+		strings.ContainsAny(parts[0]+parts[1], "\\")
+	if bad {
+		return "", fmt.Errorf("%w: attachment url %q escapes the upload dir", errSkipEvent, att.URL)
+	}
+	userDir := filepath.Join(db.UploadRoot, parts[0])
+	file := filepath.Join(userDir, parts[1])
+	resolved, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		// A missing/unreadable file will not fix itself on retry.
+		return "", fmt.Errorf("%w: %v", errSkipEvent, err)
+	}
+	root, err := filepath.EvalSymlinks(userDir)
+	if err == nil {
+		if r, err := filepath.Rel(root, resolved); err != nil || r == ".." ||
+			strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("%w: attachment url %q escapes the upload dir", errSkipEvent, att.URL)
+		}
+	}
+	return file, nil
+}
+
 // buildMediaContent uploads a local attachment file to the homeserver's media
 // repo and returns the m.room.message content for it.
 func (b *Bridge) buildMediaContent(ctx context.Context, att db.Attachment) (map[string]any, error) {
-	rel := strings.TrimPrefix(att.URL, "/uploads/")
-	raw, err := os.ReadFile(filepath.Join(db.UploadRoot, filepath.FromSlash(rel)))
+	path, err := attachmentLocalPath(att)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		// A missing/unreadable local file will not fix itself on retry.
 		return nil, fmt.Errorf("%w: %v", errSkipEvent, err)

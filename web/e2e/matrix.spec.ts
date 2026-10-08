@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { dismissPushPrompt, login, USERS, msgBody } from "./helpers";
+import fs from "node:fs";
+import path from "node:path";
 
 /**
  * Matrix appservice bridge e2e: the app server runs bridged against
@@ -138,5 +140,76 @@ test.describe("matrix bridge", () => {
       .toContain(gRoom);
     // The group sender must NOT appear as a DM in the rail.
     await expect(page.locator(".dm-row", { hasText: "mallory" })).toHaveCount(0);
+  });
+
+  // Regression: /uploads/<uid>/../../file attachments over an authenticated
+  // WebSocket must be stripped — previously the bridge read and uploaded a
+  // file outside data/uploads to the homeserver.
+  test("attachment path traversal over WebSocket never reaches the HS", async ({ page }) => {
+    await login(page, USERS.alice);
+    await dismissPushPrompt(page);
+
+    // Open a real bridged DM so outbound relays to the fake HS.
+    const mxid = "@mx_traversal:e2e.test";
+    await page.getByRole("button", { name: "New conversation" }).click();
+    await page.locator(".card input[type='text']").fill(mxid);
+    await page.getByRole("button", { name: "Start chat" }).click();
+    await expect
+      .poll(async () => (await hsState()).createRooms.map((r: any) => r.room_id))
+      .not.toHaveLength(0);
+
+    // One normal text message so the remote user is a DM partner (visible in
+    // the WS init payload) and the outbound path is proven working.
+    const hello = `ws-harness-check ${Date.now()}`;
+    await page.locator("textarea").fill(hello);
+    await page.locator("textarea").press("Enter");
+    await expect
+      .poll(async () => (await hsState()).sends.some((s: any) => s.content?.body === hello))
+      .toBe(true);
+
+    // Plant the file the attack targets: inside data/, outside data/uploads.
+    const runDir = process.env.E2E_RUN_DIR || "/tmp/am-e2e";
+    fs.mkdirSync(path.join(runDir, "data"), { recursive: true });
+    fs.writeFileSync(path.join(runDir, "data", "review-marker.txt"), "e2e-marker-content");
+
+    // Authenticated raw WebSocket: same session cookie as the page.
+    const cookies = await page.context().cookies();
+    const session = cookies.find((c) => c.name === "am_session");
+    expect(session).toBeTruthy();
+    const ws = new WebSocket(`ws://127.0.0.1:${process.env.E2E_PORT || "8795"}/ws?token=${session!.value}`);
+    const init = await new Promise<any>((resolve, reject) => {
+      ws.onmessage = (e) => resolve(JSON.parse(String(e.data)));
+      ws.onerror = reject;
+      setTimeout(() => reject(new Error("ws init timeout")), 5000);
+    });
+    expect(init.type).toBe("init");
+    const me = init.me.id;
+    const remote = init.users.find((u: any) => u.matrix_id === mxid);
+    expect(remote).toBeTruthy();
+    const ch = `dm:${Math.min(me, remote.id)}:${Math.max(me, remote.id)}`;
+
+    // Send a message whose only attachment is a traversal escape.
+    ws.send(JSON.stringify({
+      type: "message",
+      channel: ch,
+      text: "",
+      attachments: [{
+        url: `/uploads/${me}/../../review-marker.txt`,
+        name: "review-marker.txt",
+        size: 38,
+        mime: "text/plain",
+      }],
+      client_id: "traversal-probe",
+    }));
+    await page.waitForTimeout(500); // give a bad implementation time to leak
+
+    const st = await hsState();
+    expect(st.uploads.filter((u: any) => u.filename === "review-marker.txt")).toHaveLength(0);
+    expect(
+      st.sends.filter(
+        (s: any) => s.content?.filename === "review-marker.txt" || typeof s.content?.url === "string",
+      ),
+    ).toHaveLength(0);
+    ws.close();
   });
 });

@@ -8,6 +8,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -214,9 +215,17 @@ func InitDB() error {
 		}
 	}
 	// Indexes on the nullable bridge columns (no-op on repeat startups).
+	// A pre-fix DB may hold duplicated matrix_event_ids from the old
+	// non-atomic inbound path: unlink the extra copies (the message rows
+	// themselves are kept) so the dedup index below can be created.
 	for _, ddl := range []string{
 		"CREATE INDEX IF NOT EXISTS idx_users_matrix_id ON users(matrix_id)",
-		"CREATE INDEX IF NOT EXISTS idx_msg_matrix_event ON messages(matrix_event_id)",
+		"UPDATE messages SET matrix_event_id = NULL WHERE matrix_event_id IS NOT NULL " +
+			"AND rowid NOT IN (SELECT MIN(rowid) FROM messages " +
+			"WHERE matrix_event_id IS NOT NULL GROUP BY matrix_event_id)",
+		"DROP INDEX IF EXISTS idx_msg_matrix_event",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_matrix_event_uq " +
+			"ON messages(matrix_event_id) WHERE matrix_event_id IS NOT NULL",
 	} {
 		if _, err := pool.Exec(ddl); err != nil {
 			return err
@@ -529,6 +538,64 @@ func InsertMessage(msgID, channel string, userID *int, text string, replyTo *str
 		msgID, channel, nullableInt(userID), msgType, text, nullableStr(replyTo), ts,
 	)
 	return ts, err
+}
+
+// ErrDuplicateMatrixEvent is returned by InsertBridgedMessage when the
+// Matrix event id is already linked to a message — the DB-level backstop
+// for redelivery, even if two copies race past the read-then-write dedup.
+var ErrDuplicateMatrixEvent = errors.New("matrix event already linked to a message")
+
+// InsertBridgedMessage atomically persists a message, its attachments, and
+// the Matrix event id it came from, in one transaction. Any failure rolls
+// everything back — a half-written message must never acknowledge an
+// appservice transaction. eventID="" stores NULL (ordinary local message).
+// createdAt<=0 means "now".
+func InsertBridgedMessage(msgID, channel string, userID *int, text string, replyTo *string, msgType string, createdAt int64, eventID string, attachments []Attachment) (int64, error) {
+	ts := NowTS()
+	if createdAt > 0 {
+		ts = createdAt
+	}
+	tx, err := pool.Begin()
+	if err != nil {
+		return 0, err
+	}
+	var ev any
+	if eventID != "" {
+		ev = eventID
+	}
+	if _, err := tx.Exec(
+		"INSERT INTO messages (id, channel, user_id, type, text, reply_to, created_at, matrix_event_id) "+
+			"VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		msgID, channel, nullableInt(userID), msgType, text, nullableStr(replyTo), ts, ev,
+	); err != nil {
+		_ = tx.Rollback()
+		if eventID != "" && strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return 0, ErrDuplicateMatrixEvent
+		}
+		return 0, err
+	}
+	owner := 0
+	if userID != nil {
+		owner = *userID
+	}
+	for _, a := range attachments {
+		rel := a.URL
+		if strings.HasPrefix(rel, "/uploads/") {
+			rel = rel[len("/uploads/"):]
+		}
+		if _, err := tx.Exec(
+			"INSERT INTO attachments (message_id, user_id, name, rel_path, size, mime, width, height, created_at) "+
+				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			msgID, owner, a.Name, rel, a.Size, a.Mime, a.Width, a.Height, NowTS(),
+		); err != nil {
+			_ = tx.Rollback()
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return ts, nil
 }
 
 // MessageMeta is the slice of a message row the edit path needs to authorize
@@ -878,6 +945,14 @@ func SetMatrixRoom(channel, roomID string) error {
 	return err
 }
 
+// DeleteMatrixRoomByRoom drops the mapping for a room — used when a room
+// stops being a private 1:1 (a third participant joined or was invited),
+// so nothing private can ever be relayed into it again.
+func DeleteMatrixRoomByRoom(roomID string) error {
+	_, err := pool.Exec("DELETE FROM matrix_rooms WHERE room_id = ?", roomID)
+	return err
+}
+
 // TryRecordMatrixTxn logs a homeserver transaction id as applied. Audit
 // trail only — homeservers reuse low txn ids after a restart, so the id
 // must never be used as a delivery gate; per-event idempotency
@@ -990,6 +1065,28 @@ func SetDMLastRead(userID int, channel string, ts int64) error {
 	st.LastReadAt = ts
 	st.ForceUnread = false
 	return writeDMState(userID, channel, st)
+}
+
+// AdvanceDMLastRead moves last_read_at forward monotonically in one
+// atomic upsert: a stale read receipt can never regress the watermark.
+// Reports whether the row actually advanced — broadcast only then.
+func AdvanceDMLastRead(userID int, channel string, ts int64) (bool, error) {
+	res, err := pool.Exec(
+		"INSERT INTO dm_state (user_id, channel, pinned, last_read_at, cleared_at, force_unread) "+
+			"VALUES (?, ?, 0, ?, 0, 0) "+
+			"ON CONFLICT(user_id, channel) DO UPDATE SET "+
+			"last_read_at = excluded.last_read_at, force_unread = 0 "+
+			"WHERE dm_state.last_read_at < excluded.last_read_at",
+		userID, channel, ts,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // SetDMUnread forces an unread state — zero last_read_at and flag it sticky.

@@ -255,6 +255,13 @@ func handleWSMessage(userID int, data map[string]any) {
 		if !ok || !strings.HasPrefix(url, userPrefix) {
 			continue
 		}
+		// The rest of the URL must be a single plain filename inside the
+		// sender's own upload directory — no extra path segments and no
+		// dot/dot-dot navigation that could escape it.
+		rest := url[len(userPrefix):]
+		if rest == "" || rest == "." || rest == ".." || strings.ContainsAny(rest, "/\\") {
+			continue
+		}
 		cleanAtts = append(cleanAtts, db.Attachment{
 			Name:   truncateRunes(strOrDefault(am, "name", "file"), 120),
 			URL:    url,
@@ -264,6 +271,9 @@ func handleWSMessage(userID int, data map[string]any) {
 			Height: clampDimension(am["height"]),
 		})
 	}
+	if text == "" && len(cleanAtts) == 0 {
+		return // nothing left to send after filtering (e.g. all-rejected attachments)
+	}
 
 	var replyTo *string
 	if v, ok := data["reply_to"].(string); ok {
@@ -271,7 +281,12 @@ func handleWSMessage(userID int, data map[string]any) {
 	}
 
 	uid := userID
-	msg := dmpost.Post(&uid, channel, text, replyTo, cleanAtts, "message", 0)
+	msg, err := dmpost.Post(&uid, channel, text, replyTo, cleanAtts, "message", 0, "")
+	if err != nil {
+		// Nothing was persisted — do not broadcast or relay an optimistic
+		// message that a reload would lose.
+		return
+	}
 	if cid, ok := data["client_id"].(string); ok {
 		msg.ClientID = truncateRunes(cid, 64)
 	}

@@ -103,12 +103,18 @@ func (b *Bridge) processEvent(ev hsEvent) error {
 
 func (b *Bridge) handleMember(ev hsEvent) error {
 	membership, _ := ev.Content["membership"].(string)
-	if membership != "invite" || ev.StateKey == "" {
+	if ev.StateKey == "" {
 		return nil
 	}
 	target := ev.StateKey
-	asUser := ""
-	var local *db.User
+	if _, isPuppet := b.cfg.UsernameForPuppet(target); !isPuppet && target != b.cfg.BotMXID() {
+		// A member event about someone who is neither our puppet nor our
+		// bot: a third party may be entering a bridged room.
+		return b.handleForeignMember(ev, membership)
+	}
+	if membership != "invite" {
+		return nil
+	}
 	if target == b.cfg.BotMXID() {
 		// A bot invite has no local user to attach to; the DM model needs a
 		// real participant, so log and skip.
@@ -121,13 +127,13 @@ func (b *Bridge) handleMember(ev hsEvent) error {
 	if !ok {
 		return nil // invite for someone else's namespace
 	}
-	local, _ = db.GetUserByUsername(username)
+	local, _ := db.GetUserByUsername(username)
 	if local == nil {
 		debuglog.Emit("matrix", "warn", "invite_unknown_puppet",
 			"Invite for a puppet with no local user", map[string]any{"puppet": target})
 		return nil
 	}
-	asUser = target
+	asUser := target
 	// Already bridged this room? A re-delivered invite — an HS retry, or a
 	// txn-id collision after a homeserver restart — must not re-run the
 	// join/membership probe below.
@@ -150,6 +156,27 @@ func (b *Bridge) handleMember(ev hsEvent) error {
 		_ = db.UpdateUserProfile(remote.ID, &name, nil)
 	}
 	channel := db.DMChannelID(local.ID, remote.ID)
+	if rid, _ := db.MatrixRoomFor(channel); rid != "" {
+		if rid == ev.RoomID {
+			return nil
+		}
+		// The DM is already committed to a room — a second invite from the
+		// same peer is a phantom room whose messages would be acked and
+		// discarded. Decline it explicitly so the puppet never stays.
+		debuglog.Emit("matrix", "warn", "second_room_declined",
+			"Declined second room invite for an established DM", map[string]any{
+				"room": ev.RoomID, "mapped_room": rid, "sender": ev.Sender,
+			})
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if lerr := b.hs.leaveRoom(ctx, ev.RoomID, asUser); lerr != nil {
+			debuglog.Emit("matrix", "warn", "leave_failed",
+				"Puppet could not leave a declined second room", map[string]any{
+					"room": ev.RoomID, "err": lerr.Error(),
+				})
+		}
+		cancel()
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := b.hs.joinRoom(ctx, ev.RoomID, asUser); err != nil {
@@ -202,6 +229,67 @@ func isDMOnlyRoom(members []hsEvent, senderMXID, puppetMXID string) bool {
 		}
 	}
 	return true
+}
+
+// handleForeignMember fires when anyone who is neither our puppet nor our
+// bot gains membership (join or invite) in a room. If that room is bridged
+// as a DM it is no longer a 1:1 — tear the mapping down and withdraw the
+// puppet before the next local private reply can be relayed into a group.
+// Leave/ban events shrink readership rather than expand it, so they are
+// ignored here.
+func (b *Bridge) handleForeignMember(ev hsEvent, membership string) error {
+	if membership != "join" && membership != "invite" {
+		return nil
+	}
+	channel, _ := db.MatrixChannelFor(ev.RoomID)
+	if channel == "" {
+		return nil // not one of our bridged rooms
+	}
+	// The DM peer's own member changes are expected — only someone outside
+	// the pair poisons the room. Resolve the pair: the remote side carries
+	// matrix_id, the local side names the puppet.
+	p1, p2, ok := db.ParseDMChannel(channel)
+	if !ok {
+		return nil
+	}
+	remoteMXID, puppet := "", ""
+	for _, id := range []int{p1, p2} {
+		u, _ := db.GetUserByID(id)
+		if u == nil {
+			continue
+		}
+		if u.MatrixID != nil && *u.MatrixID != "" {
+			remoteMXID = *u.MatrixID
+		} else {
+			puppet = b.cfg.PuppetMXID(u.Username)
+		}
+	}
+	if ev.StateKey == remoteMXID {
+		return nil // the DM peer themself
+	}
+	// Third party arrived — privacy first: drop the mapping so nothing can
+	// ever be relayed into this room again, then withdraw the puppet. The
+	// next outbound message opens a fresh 1:1 room instead.
+	debuglog.Emit("matrix", "warn", "room_unmapped_third_party",
+		"Unmapped room after a third participant arrived", map[string]any{
+			"room": ev.RoomID, "third_party": ev.StateKey,
+			"membership": membership, "sender": ev.Sender,
+		})
+	if err := db.DeleteMatrixRoomByRoom(ev.RoomID); err != nil {
+		return err
+	}
+	if puppet == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := b.hs.leaveRoom(ctx, ev.RoomID, puppet); err != nil {
+		debuglog.Emit("matrix", "warn", "leave_failed",
+			"Puppet could not leave a poisoned room", map[string]any{
+				"room": ev.RoomID, "err": err.Error(),
+			})
+	}
+	return nil
 }
 
 // ---------- m.room.message ----------
@@ -262,8 +350,13 @@ func (b *Bridge) handleRoomMessage(ev hsEvent) error {
 		}
 	}
 	uid := remote.ID
-	msg := dmpost.Post(&uid, channel, text, nil, atts, "message", ts)
-	_ = db.SetMessageMatrixEventID(msg.ID, ev.EventID)
+	msg, err := dmpost.Post(&uid, channel, text, nil, atts, "message", ts, ev.EventID)
+	if err != nil {
+		if errors.Is(err, db.ErrDuplicateMatrixEvent) {
+			return nil // already persisted once — this is a redelivery
+		}
+		return err // retryable — fail the txn so the HS redelivers it
+	}
 	dmpost.BroadcastNew(channel, msg)
 	go dmpost.SendDMPush(remote.ID, localID, channel, msg)
 	return nil
@@ -478,24 +571,30 @@ func (b *Bridge) handleReceipt(ev hsEvent) error {
 			if err != nil {
 				continue
 			}
-			// Anchor the read marker at the referenced event's local timestamp,
-			// falling back to the receipt's own ts.
+			// The read position is the referenced event, not the moment the
+			// receipt was generated: anchor at the event's local timestamp
+			// whenever it resolves, else at the receipt's own ts (the closest
+			// position we have). No anchor at all → nothing to mark.
 			var cutoff int64
 			if msg, _ := db.GetMessageByMatrixEventID(eventID); msg != nil {
 				cutoff = msg.CreatedAt
-			}
-			if meta, _ := raw.(map[string]any); meta != nil {
-				if t, ok := meta["ts"].(float64); ok && int64(t/1000) > cutoff {
+			} else if meta, _ := raw.(map[string]any); meta != nil {
+				if t, ok := meta["ts"].(float64); ok {
 					cutoff = int64(t / 1000)
 				}
 			}
 			if cutoff <= 0 {
-				cutoff = db.NowTS()
-			}
-			if err := db.SetDMLastRead(remote.ID, channel, cutoff); err != nil {
 				continue
 			}
-			dmpost.BroadcastRead(remote.ID, channel, cutoff)
+			// Monotonic: a replayed older receipt must not drag the watermark
+			// backward (Read → Delivered). Broadcast only on a real advance.
+			advanced, err := db.AdvanceDMLastRead(remote.ID, channel, cutoff)
+			if err != nil {
+				return err
+			}
+			if advanced {
+				dmpost.BroadcastRead(remote.ID, channel, cutoff)
+			}
 		}
 	}
 	return nil

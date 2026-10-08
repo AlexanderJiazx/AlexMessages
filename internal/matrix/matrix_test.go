@@ -3,6 +3,7 @@ package matrix
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -733,7 +734,7 @@ func TestOutboundSend(t *testing.T) {
 	localID := mustLocalUser(t, "bob")
 	remoteID := remoteIDAfterSetup(t, b, localID, "@alice:hs.local")
 
-	msg := dmpost.Post(&localID, db.DMChannelID(localID, remoteID), "hi alice", nil, nil, "message", 0)
+	msg, _ := dmpost.Post(&localID, db.DMChannelID(localID, remoteID), "hi alice", nil, nil, "message", 0, "")
 	b.OnLocalMessage(localID, db.DMChannelID(localID, remoteID), msg)
 
 	if len(hs.sends) != 1 {
@@ -793,7 +794,7 @@ func TestOutboundVoiceAttachment(t *testing.T) {
 		URL:  "/uploads/" + fmt.Sprint(localID) + "/abc123_voice-message.m4a",
 		Mime: "audio/mp4", Size: 10,
 	}
-	msg := dmpost.Post(&localID, db.DMChannelID(localID, remoteID), "", nil, []db.Attachment{att}, "message", 0)
+	msg, _ := dmpost.Post(&localID, db.DMChannelID(localID, remoteID), "", nil, []db.Attachment{att}, "message", 0, "")
 	b.OnLocalMessage(localID, db.DMChannelID(localID, remoteID), msg)
 
 	if len(hs.sends) != 1 {
@@ -826,7 +827,7 @@ func TestOutboundEditAndReceipt(t *testing.T) {
 	remoteID := remoteIDAfterSetup(t, b, localID, "@alice:hs.local")
 	ch := db.DMChannelID(localID, remoteID)
 
-	msg := dmpost.Post(&localID, ch, "draft", nil, nil, "message", 0)
+	msg, _ := dmpost.Post(&localID, ch, "draft", nil, nil, "message", 0, "")
 	b.OnLocalMessage(localID, ch, msg)
 	b.OnLocalEdit(localID, msg.ID, ch, "final")
 
@@ -859,7 +860,7 @@ func TestOutboundRetryOn5xx(t *testing.T) {
 	ch := db.DMChannelID(localID, remoteID)
 	// Room must exist before the send or ensureRoom runs (also a send path) —
 	// let it create the room first, then fail the message send once.
-	msg := dmpost.Post(&localID, ch, "retry me", nil, nil, "message", 0)
+	msg, _ := dmpost.Post(&localID, ch, "retry me", nil, nil, "message", 0, "")
 	hs.failSends = 1
 	b.OnLocalMessage(localID, ch, msg)
 	// First send attempt failed once then retried: exactly one successful send.
@@ -1156,7 +1157,7 @@ func TestEditTxnIDsUnique(t *testing.T) {
 	remoteID := remoteIDAfterSetup(t, b, localID, "@alice:hs.local")
 	ch := db.DMChannelID(localID, remoteID)
 
-	msg := dmpost.Post(&localID, ch, "v1", nil, nil, "message", 0)
+	msg, _ := dmpost.Post(&localID, ch, "v1", nil, nil, "message", 0, "")
 	b.OnLocalMessage(localID, ch, msg)
 	b.OnLocalEdit(localID, msg.ID, ch, "v2")
 	b.OnLocalEdit(localID, msg.ID, ch, "v3")
@@ -1261,12 +1262,441 @@ func TestOutboundAttachmentUploadRetry(t *testing.T) {
 	// Fail the first upload attempt; the retry must succeed — previously the
 	// failure was logged and the attachment silently dropped.
 	hs.failUploads = 1
-	msg := dmpost.Post(&localID, ch, "", nil, []db.Attachment{att}, "message", 0)
+	msg, _ := dmpost.Post(&localID, ch, "", nil, []db.Attachment{att}, "message", 0, "")
 	b.OnLocalMessage(localID, ch, msg)
 	if len(hs.uploads) != 1 {
 		t.Fatalf("uploads = %v — retry did not happen", hs.uploads)
 	}
 	if len(hs.sends) != 1 {
 		t.Fatalf("sends = %v", hs.sends)
+	}
+}
+
+// ---------- second-round review regression tests ----------
+
+// An attachment URL with dot segments or extra path components must never
+// reach the filesystem — the reviewer exploited /uploads/<uid>/../../<file>
+// to upload a file outside data/uploads through the outbound path.
+func TestAttachmentPathTraversalRejected(t *testing.T) {
+	initDB(t)
+	hs := newFakeHS()
+	defer hs.Close()
+	b := newTestBridge(hs)
+	localID := mustLocalUser(t, "bob")
+	remoteID := remoteIDAfterSetup(t, b, localID, "@alice:hs.local")
+	ch := db.DMChannelID(localID, remoteID)
+
+	// The file the attack targets: inside data/, outside data/uploads.
+	marker := filepath.Join(db.DataDir, "review-marker.txt")
+	if err := os.WriteFile(marker, []byte("should-never-upload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	uid := fmt.Sprint(localID)
+	for _, url := range []string{
+		"/uploads/" + uid + "/../../review-marker.txt",
+		"/uploads/" + uid + "/../review-marker.txt",
+		"/uploads/" + uid + "/../../review-marker.txt",
+		"/uploads/" + uid + "/sub/../review-marker.txt",
+		"/uploads/" + uid + "/",
+		"/uploads/../" + uid + "/x.txt",
+		"/uploads/" + uid + "\\..\\review-marker.txt",
+	} {
+		msg, _ := dmpost.Post(&localID, ch, "", nil, []db.Attachment{
+			{Name: "x.txt", URL: url, Mime: "text/plain", Size: 5},
+		}, "message", 0, "")
+		b.OnLocalMessage(localID, ch, msg)
+	}
+	if len(hs.uploads) != 0 {
+		t.Fatalf("escaping attachment reached the media repo: %v", hs.uploads)
+	}
+	for _, s := range hs.sends {
+		if u, _ := s.Content["url"].(string); u != "" {
+			t.Fatalf("escaping attachment was sent as an event: %+v", s.Content)
+		}
+	}
+}
+
+// A symlink inside the user's upload dir that resolves outside it is an
+// escape too — resolve the target and refuse it.
+func TestAttachmentSymlinkEscapeRejected(t *testing.T) {
+	initDB(t)
+	hs := newFakeHS()
+	defer hs.Close()
+	b := newTestBridge(hs)
+	localID := mustLocalUser(t, "bob")
+	remoteID := remoteIDAfterSetup(t, b, localID, "@alice:hs.local")
+	ch := db.DMChannelID(localID, remoteID)
+
+	marker := filepath.Join(db.DataDir, "secret.txt")
+	if err := os.WriteFile(marker, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := db.UserUploadDir(localID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "evil.txt")
+	if err := os.Symlink(marker, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	msg, _ := dmpost.Post(&localID, ch, "", nil, []db.Attachment{
+		{Name: "evil.txt", URL: "/uploads/" + fmt.Sprint(localID) + "/evil.txt", Mime: "text/plain", Size: 7},
+	}, "message", 0, "")
+	b.OnLocalMessage(localID, ch, msg)
+	if len(hs.uploads) != 0 {
+		t.Fatalf("symlink escape uploaded: %v", hs.uploads)
+	}
+
+	// A real file inside the dir still works — the guard must not over-block.
+	os.WriteFile(filepath.Join(dir, "ok.txt"), []byte("inside"), 0o644)
+	msg, _ = dmpost.Post(&localID, ch, "", nil, []db.Attachment{
+		{Name: "ok.txt", URL: "/uploads/" + fmt.Sprint(localID) + "/ok.txt", Mime: "text/plain", Size: 6},
+	}, "message", 0, "")
+	b.OnLocalMessage(localID, ch, msg)
+	if len(hs.uploads) != 1 || hs.uploads[0] != "ok.txt" {
+		t.Fatalf("legit upload blocked: %v", hs.uploads)
+	}
+}
+
+// After a valid DM is mapped, a third participant's join must tear the
+// bridge down: unmap the room, withdraw the puppet, and route the next
+// local message into a fresh 1:1 room — never into the group.
+func TestThirdPartyJoinUnmapsRoom(t *testing.T) {
+	initDB(t)
+	hs := newFakeHS()
+	defer hs.Close()
+	b := newTestBridge(hs)
+	r := asRouter(b)
+	localID := mustLocalUser(t, "bob")
+	setupRoom(t, b, localID, "@alice:hs.local", "!r1:hs.local")
+	ch := channelFor(t, localID, "@alice:hs.local")
+
+	// The peer's own membership changes must not disturb the mapping.
+	putTxn(t, r, b, "txn-self", map[string]any{"events": []any{
+		map[string]any{
+			"type": "m.room.member", "sender": "@alice:hs.local",
+			"room_id": "!r1:hs.local", "state_key": "@alice:hs.local",
+			"event_id": "$self", "content": map[string]any{"membership": "join"},
+		},
+	}}, "hs_tok")
+	if rid, _ := db.MatrixRoomFor(ch); rid != "!r1:hs.local" {
+		t.Fatalf("peer's own member event unmapped the room: %q", rid)
+	}
+
+	putTxn(t, r, b, "txn-3p", map[string]any{"events": []any{
+		map[string]any{
+			"type": "m.room.member", "sender": "@mallory:hs.local",
+			"room_id": "!r1:hs.local", "state_key": "@mallory:hs.local",
+			"event_id": "$3p", "content": map[string]any{"membership": "join"},
+		},
+	}}, "hs_tok")
+	if rid, _ := db.MatrixRoomFor(ch); rid != "" {
+		t.Fatalf("room still mapped after third-party join: %q", rid)
+	}
+	if !contains(hs.leaves, "!r1:hs.local as @am_bob:hs.local") {
+		t.Fatalf("puppet did not leave the poisoned room: %v", hs.leaves)
+	}
+
+	// The next local message must open a fresh 1:1 room, not reuse !r1.
+	msg, _ := dmpost.Post(&localID, ch, "after poison", nil, nil, "message", 0, "")
+	b.OnLocalMessage(localID, ch, msg)
+	if len(hs.sends) != 1 || hs.sends[0].RoomID == "!r1:hs.local" {
+		t.Fatalf("reply went into the poisoned room: %+v", hs.sends)
+	}
+	if rid, _ := db.MatrixRoomFor(ch); rid != hs.sends[0].RoomID {
+		t.Fatalf("mapping = %q, want the fresh room %q", rid, hs.sends[0].RoomID)
+	}
+}
+
+// A pending third-party invite on a mapped room is enough to poison it —
+// the invite can be accepted at any later moment.
+func TestThirdPartyInviteUnmapsRoom(t *testing.T) {
+	initDB(t)
+	hs := newFakeHS()
+	defer hs.Close()
+	b := newTestBridge(hs)
+	r := asRouter(b)
+	localID := mustLocalUser(t, "bob")
+	setupRoom(t, b, localID, "@alice:hs.local", "!r1:hs.local")
+	ch := channelFor(t, localID, "@alice:hs.local")
+
+	putTxn(t, r, b, "txn-3inv", map[string]any{"events": []any{
+		map[string]any{
+			"type": "m.room.member", "sender": "@alice:hs.local",
+			"room_id": "!r1:hs.local", "state_key": "@mallory:hs.local",
+			"event_id": "$3inv", "content": map[string]any{"membership": "invite"},
+		},
+	}}, "hs_tok")
+	if rid, _ := db.MatrixRoomFor(ch); rid != "" {
+		t.Fatalf("room still mapped after third-party invite: %q", rid)
+	}
+	if !contains(hs.leaves, "!r1:hs.local as @am_bob:hs.local") {
+		t.Fatalf("puppet did not leave the poisoned room: %v", hs.leaves)
+	}
+	// Messages arriving in the now-unmapped room must be dropped.
+	putTxn(t, r, b, "txn-msg", map[string]any{"events": []any{
+		map[string]any{
+			"type": "m.room.message", "sender": "@mallory:hs.local",
+			"room_id": "!r1:hs.local", "event_id": "$leak",
+			"content": map[string]any{"msgtype": "m.text", "body": "from the group"},
+		},
+	}}, "hs_tok")
+	msgs, _ := db.FetchChannelWindow(ch, 50, nil, nil)
+	if len(msgs) != 0 {
+		t.Fatalf("message from unmapped room persisted: %+v", msgs)
+	}
+}
+
+// A persistence failure must fail the txn (5xx → HS redelivers) and persist
+// nothing — before the fix it returned 200 with zero rows written.
+func TestInboundMessageInsertFailureRetried(t *testing.T) {
+	initDB(t)
+	hs := newFakeHS()
+	defer hs.Close()
+	b := newTestBridge(hs)
+	r := asRouter(b)
+	localID := mustLocalUser(t, "bob")
+	setupRoom(t, b, localID, "@alice:hs.local", "!r1:hs.local")
+	ch := channelFor(t, localID, "@alice:hs.local")
+
+	body := map[string]any{"events": []any{
+		map[string]any{
+			"type": "m.room.message", "sender": "@alice:hs.local",
+			"room_id": "!r1:hs.local", "event_id": "$fail1",
+			"origin_server_ts": 1700000000000,
+			"content":          map[string]any{"msgtype": "m.text", "body": "hi"},
+		},
+	}}
+	// Force every write to fail: read-only data dir makes sqlite unable to
+	// create its journal next to the database.
+	if err := os.Chmod(db.DataDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	w := putTxn(t, r, b, "txnF", body, "hs_tok")
+	if err := os.Chmod(db.DataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 500 {
+		t.Fatalf("persist failure got %d, want 500 so the HS retries", w.Code)
+	}
+	msgs, _ := db.FetchChannelWindow(ch, 50, nil, nil)
+	if len(msgs) != 0 {
+		t.Fatalf("failed txn persisted %d messages", len(msgs))
+	}
+	if w := putTxn(t, r, b, "txnF", body, "hs_tok"); w.Code != 200 {
+		t.Fatalf("redelivery got %d", w.Code)
+	}
+	if w := putTxn(t, r, b, "txnF2", body, "hs_tok"); w.Code != 200 {
+		t.Fatalf("second redelivery got %d", w.Code)
+	}
+	msgs, _ = db.FetchChannelWindow(ch, 50, nil, nil)
+	if len(msgs) != 1 {
+		t.Fatalf("after redelivery messages = %d, want exactly 1", len(msgs))
+	}
+}
+
+// Dedup is enforced by the database itself: a second insert carrying the
+// same Matrix event id must fail even if the read-check raced past.
+func TestInsertBridgedMessageDedupesEventID(t *testing.T) {
+	initDB(t)
+	u1 := mustLocalUser(t, "bob")
+	u2 := mustLocalUser(t, "carol")
+	ch := db.DMChannelID(u1, u2)
+
+	if _, err := db.InsertBridgedMessage("m1", ch, &u1, "x", nil, "message", 0, "$ev1", nil); err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	_, err := db.InsertBridgedMessage("m2", ch, &u1, "x again", nil, "message", 0, "$ev1", nil)
+	if !errors.Is(err, db.ErrDuplicateMatrixEvent) {
+		t.Fatalf("dup event insert: %v, want ErrDuplicateMatrixEvent", err)
+	}
+	msgs, _ := db.FetchChannelWindow(ch, 50, nil, nil)
+	if len(msgs) != 1 {
+		t.Fatalf("dup insert left %d messages", len(msgs))
+	}
+	// Persistence failure propagates (bogus FK) and writes nothing.
+	bad := 999999
+	if _, err := db.InsertBridgedMessage("m3", ch, &bad, "x", nil, "message", 0, "$ev2",
+		[]db.Attachment{{Name: "a", URL: "/uploads/x/a", Mime: "text/plain"}}); err == nil {
+		t.Fatal("insert with bogus user should fail")
+	}
+	msgs, _ = db.FetchChannelWindow(ch, 50, nil, nil)
+	if len(msgs) != 1 {
+		t.Fatalf("failed insert left partial state: %d messages", len(msgs))
+	}
+}
+
+// A second 1:1 room invite for an already-mapped DM is declined: the puppet
+// leaves it, the original mapping stays, its inbound events are dropped,
+// and local replies still go to the established room.
+func TestSecondRoomInviteDeclined(t *testing.T) {
+	initDB(t)
+	hs := newFakeHS()
+	defer hs.Close()
+	b := newTestBridge(hs)
+	r := asRouter(b)
+	localID := mustLocalUser(t, "bob")
+	setupRoom(t, b, localID, "@alice:hs.local", "!r1:hs.local")
+	ch := channelFor(t, localID, "@alice:hs.local")
+
+	putTxn(t, r, b, "txn-2r", map[string]any{"events": []any{
+		map[string]any{
+			"type": "m.room.member", "sender": "@alice:hs.local",
+			"room_id": "!r2:hs.local", "state_key": "@am_bob:hs.local",
+			"event_id": "$inv2", "content": map[string]any{"membership": "invite"},
+		},
+	}}, "hs_tok")
+	if rid, _ := db.MatrixRoomFor(ch); rid != "!r1:hs.local" {
+		t.Fatalf("mapping moved to %q, want !r1", rid)
+	}
+	if contains(hs.joins, "!r2:hs.local as @am_bob:hs.local") {
+		t.Fatalf("puppet joined the second room: %v", hs.joins)
+	}
+	if !contains(hs.leaves, "!r2:hs.local as @am_bob:hs.local") {
+		t.Fatalf("second room not declined: %v", hs.leaves)
+	}
+
+	// Messages sent inside the declined room are acknowledged but never land.
+	putTxn(t, r, b, "txn-2m", map[string]any{"events": []any{
+		map[string]any{
+			"type": "m.room.message", "sender": "@alice:hs.local",
+			"room_id": "!r2:hs.local", "event_id": "$r2msg",
+			"content": map[string]any{"msgtype": "m.text", "body": "to room2"},
+		},
+	}}, "hs_tok")
+	msgs, _ := db.FetchChannelWindow(ch, 50, nil, nil)
+	if len(msgs) != 0 {
+		t.Fatalf("declined room delivered %d messages", len(msgs))
+	}
+	// And outbound replies still target the established room.
+	msg, _ := dmpost.Post(&localID, ch, "still room1", nil, nil, "message", 0, "")
+	b.OnLocalMessage(localID, ch, msg)
+	if hs.lastSend().RoomID != "!r1:hs.local" {
+		t.Fatalf("reply went to %q, want !r1", hs.lastSend().RoomID)
+	}
+}
+
+// The receipt's own generation time is not a read position: anchor the
+// watermark at the referenced event's local timestamp so a late receipt
+// cannot mark a newer message read.
+func TestReceiptAnchorsToReferencedEvent(t *testing.T) {
+	initDB(t)
+	hs := newFakeHS()
+	defer hs.Close()
+	b := newTestBridge(hs)
+	r := asRouter(b)
+	localID := mustLocalUser(t, "bob")
+	remoteID := remoteIDAfterSetup(t, b, localID, "@alice:hs.local")
+	ch := db.DMChannelID(localID, remoteID)
+
+	msg100, _ := dmpost.Post(&localID, ch, "m100", nil, nil, "message", 100, "")
+	msg150, _ := dmpost.Post(&localID, ch, "m150", nil, nil, "message", 150, "")
+	b.OnLocalMessage(localID, ch, msg100) // stored as $evt1
+	b.OnLocalMessage(localID, ch, msg150) // stored as $evt2
+	evID, _ := db.MatrixEventIDForMessage(msg100.ID)
+	if evID != "$evt1" {
+		t.Fatalf("event link = %q", evID)
+	}
+
+	// Receipt generated at t=200 but referencing the message at t=100 —
+	// the message at t=150 must NOT be read.
+	putTxn(t, r, b, "txn-rcpt", map[string]any{"ephemeral": []any{
+		map[string]any{
+			"type": "m.receipt", "room_id": hs.sends[0].RoomID,
+			"sender": "@alice:hs.local",
+			"content": map[string]any{
+				evID: map[string]any{"m.read": map[string]any{
+					"@alice:hs.local": map[string]any{"ts": 200000},
+				}},
+			},
+		},
+	}}, "hs_tok")
+	st, err := db.GetDMState(remoteID, ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.LastReadAt != 100 {
+		t.Fatalf("last_read_at = %d, want 100 (anchored at the referenced message)", st.LastReadAt)
+	}
+}
+
+// A replayed older receipt must not drag last_read_at backward.
+func TestReadWatermarkMonotonic(t *testing.T) {
+	initDB(t)
+	hs := newFakeHS()
+	defer hs.Close()
+	b := newTestBridge(hs)
+	r := asRouter(b)
+	localID := mustLocalUser(t, "bob")
+	setupRoom(t, b, localID, "@alice:hs.local", "!r1:hs.local")
+	ch := channelFor(t, localID, "@alice:hs.local")
+	remoteID := remoteID(t, "@alice:hs.local")
+
+	receipt := func(evID string, ts int64) map[string]any {
+		return map[string]any{"ephemeral": []any{
+			map[string]any{
+				"type": "m.receipt", "room_id": "!r1:hs.local", "sender": "@alice:hs.local",
+				"content": map[string]any{
+					evID: map[string]any{"m.read": map[string]any{
+						"@alice:hs.local": map[string]any{"ts": ts},
+					}},
+				},
+			},
+		}}
+	}
+	putTxn(t, r, b, "t1", receipt("$a", 200000), "hs_tok")
+	putTxn(t, r, b, "t2", receipt("$b", 100000), "hs_tok") // replayed older
+	st, _ := db.GetDMState(remoteID, ch)
+	if st.LastReadAt != 200 {
+		t.Fatalf("watermark regressed: %d, want 200", st.LastReadAt)
+	}
+	putTxn(t, r, b, "t3", receipt("$c", 300000), "hs_tok")
+	st, _ = db.GetDMState(remoteID, ch)
+	if st.LastReadAt != 300 {
+		t.Fatalf("watermark did not advance: %d, want 300", st.LastReadAt)
+	}
+}
+
+// GET /users/{id} must create the puppet on the homeserver before claiming
+// it — a bare 200 made the HS trust a user that did not exist.
+func TestQueryUserRegistersPuppet(t *testing.T) {
+	initDB(t)
+	hs := newFakeHS()
+	defer hs.Close()
+	b := newTestBridge(hs)
+	r := asRouter(b)
+	mustLocalUser(t, "bob")
+	mustLocalUser(t, "carol")
+
+	get := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer hs_tok")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	if w := get("/_matrix/app/v1/users/@am_bob:hs.local"); w.Code != 200 {
+		t.Fatalf("puppet query: %d", w.Code)
+	}
+	if !contains(hs.registers, "am_bob") {
+		t.Fatalf("claimed @am_bob without registering: %v", hs.registers)
+	}
+	before := len(hs.registers)
+	if w := get("/_matrix/app/v1/users/@am_bob:hs.local"); w.Code != 200 {
+		t.Fatalf("repeat query: %d", w.Code)
+	}
+	if len(hs.registers) != before {
+		t.Fatalf("repeat query re-registered: %v", hs.registers)
+	}
+	// Transient registration failure → 5xx (the HS retries the query), not 200.
+	hs.failRegs = 1
+	if w := get("/_matrix/app/v1/users/@am_carol:hs.local"); w.Code != 500 {
+		t.Fatalf("register failure got %d, want 500", w.Code)
+	}
+	if w := get("/_matrix/app/v1/users/@am_carol:hs.local"); w.Code != 200 {
+		t.Fatalf("retry after register failure got %d", w.Code)
+	}
+	if !contains(hs.registers, "am_carol") {
+		t.Fatalf("retry did not register: %v", hs.registers)
 	}
 }

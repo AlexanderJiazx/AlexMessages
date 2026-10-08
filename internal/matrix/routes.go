@@ -97,6 +97,18 @@ func (b *Bridge) queryUser(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"errcode": "M_NOT_FOUND", "error": "no such local user"})
 		return
 	}
+	// A 200 claims the id — the homeserver then trusts it exists. Make that
+	// true: register the puppet through the client-server API first, and
+	// fail (retryably) when registration does.
+	if err := b.ensurePuppet(c.Request.Context(), username); err != nil {
+		debuglog.Emit("matrix", "warn", "query_register_failed",
+			"Could not register queried puppet", map[string]any{
+				"mxid": mxid, "err": err.Error(),
+			})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"errcode": "M_UNKNOWN", "error": "puppet registration failed; retry"})
+		return
+	}
 	debuglog.Emit("matrix", "debug", "user_queried",
 		"Homeserver queried a puppet user", map[string]any{"mxid": mxid})
 	c.JSON(http.StatusOK, gin.H{})

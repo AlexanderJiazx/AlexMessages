@@ -47,29 +47,19 @@ func newMessageID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// Post persists a message (+ attachments) and returns the live broadcast
-// shape, including the resolved author. This is the shared insert path used by
-// the WS "message" handler and by the Matrix bridge's inbound events.
-// createdAt=0 means "now".
-func Post(userID *int, channel, text string, replyTo *string, attachments []db.Attachment, msgType string, createdAt int64) Message {
+// Post persists a message + its attachments (and the Matrix event id it came
+// from, when bridged) in one transaction and returns the live broadcast shape
+// including the resolved author. Any persistence failure is propagated — the
+// caller must never acknowledge, broadcast, or relay a message that was not
+// stored. This is the shared insert path used by the WS "message" handler and
+// by the Matrix bridge's inbound events. createdAt=0 means "now";
+// eventID="" stores NULL.
+func Post(userID *int, channel, text string, replyTo *string, attachments []db.Attachment, msgType string, createdAt int64, eventID string) (Message, error) {
 	msgID := newMessageID()
-	ts, err := db.InsertMessage(msgID, channel, userID, text, replyTo, msgType, ptrOrNil(createdAt))
+	ts, err := db.InsertBridgedMessage(msgID, channel, userID, text, replyTo, msgType, createdAt, eventID, attachments)
 	if err != nil {
 		debuglog.Emit("messages", "error", "dm_insert_failed", "Message insert failed", map[string]any{"err": err.Error()})
-	}
-	if createdAt > 0 {
-		ts = createdAt
-	}
-	for _, a := range attachments {
-		rel := a.URL
-		if strings.HasPrefix(a.URL, "/uploads/") {
-			rel = a.URL[len("/uploads/"):]
-		}
-		owner := 0
-		if userID != nil {
-			owner = *userID
-		}
-		_ = db.InsertAttachment(msgID, owner, a.Name, rel, a.Size, a.Mime, a.Width, a.Height)
+		return Message{}, err
 	}
 	var author *runtime.PublicUser
 	if userID != nil {
@@ -88,14 +78,7 @@ func Post(userID *int, channel, text string, replyTo *string, attachments []db.A
 		ReplyTo:     replyTo,
 		Attachments: attachments,
 		CreatedAt:   ts,
-	}
-}
-
-func ptrOrNil(v int64) *int64 {
-	if v <= 0 {
-		return nil
-	}
-	return &v
+	}, nil
 }
 
 // BroadcastNew fans a new message out to the channel participants.
