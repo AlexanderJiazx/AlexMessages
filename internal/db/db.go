@@ -233,6 +233,18 @@ func InitDB() error {
 	}
 	return nil
 }
+
+// CloseDB closes the shared pool (primarily for tests; servers keep it for
+// the process lifetime). Safe to call when the pool was never opened.
+func CloseDB() error {
+	if pool == nil {
+		return nil
+	}
+	err := pool.Close()
+	pool = nil
+	return err
+}
+
 func ensureColumn(table, column, ddl string) error {
 	rows, err := pool.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {

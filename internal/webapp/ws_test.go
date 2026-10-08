@@ -28,6 +28,12 @@ func initWSTestDB(t *testing.T) {
 	if err := db.InitDB(); err != nil {
 		t.Fatalf("InitDB: %v", err)
 	}
+	// Close the pool before t.TempDir cleanup so the dir empties on Linux CI.
+	t.Cleanup(func() {
+		if err := db.CloseDB(); err != nil {
+			t.Errorf("CloseDB: %v", err)
+		}
+	})
 }
 
 func mustWSUser(t *testing.T, username string) int {
