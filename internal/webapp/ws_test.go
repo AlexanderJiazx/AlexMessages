@@ -28,8 +28,18 @@ func initWSTestDB(t *testing.T) {
 	if err := db.InitDB(); err != nil {
 		t.Fatalf("InitDB: %v", err)
 	}
-	// Close the pool before t.TempDir cleanup so the dir empties on Linux CI.
+	// The WS handler's disconnect defer writes a debug event into sqlite.
+	// Wait for it (bounded) so no -journal file can appear inside data/
+	// while t.TempDir's RemoveAll runs — that race fails Linux CI.
 	t.Cleanup(func() {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			evs, err := db.QueryDebugEvents(db.DebugFilter{Search: "ws_disconnect"})
+			if err != nil || len(evs) > 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 		if err := db.CloseDB(); err != nil {
 			t.Errorf("CloseDB: %v", err)
 		}
