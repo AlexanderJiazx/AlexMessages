@@ -15,9 +15,11 @@ import { fmtStampLabel, type ChatMessage } from "@alexmessages/shared";
 import { useChatState, useSession } from "../session";
 import { colors, type } from "../theme";
 import { Bubble } from "./Bubble";
+import type { ImagePressHandler } from "./attachments";
 import { Avatar } from "./Avatar";
 import { Icon } from "./Icon";
 import { GlassIconButton, GlassSurface } from "./Glass";
+import { NoScrollEdgeEffects } from "./ScrollEdge";
 
 /** Consecutive messages from one sender within this window form a group. */
 const GROUP_GAP_S = 5 * 60;
@@ -30,19 +32,17 @@ type Row =
   | { kind: "loading"; id: string };
 
 /**
- * The message stream — a bottom-pinned FlatList (newest at the bottom),
- * grouped into iMessage-style runs with centered timestamps at conversation
- * pauses, lazy history paging at the top edge, and reply-jump scrolling.
- * `topInset`/`bottomInset` reserve room for the floating header + composer
- * so content scrolls underneath them.
+ * The message stream — an inverted FlatList, the standard chat list: rows are
+ * newest-first and drawn from the bottom, so a thread opens on its newest
+ * message with nothing to scroll, new messages land at the bottom, and older
+ * history pages in at the top without moving what's on screen. Grouped into
+ * iMessage-style runs with centered timestamps at conversation pauses, plus
+ * reply-jump scrolling. `topInset`/`bottomInset` reserve room for the
+ * floating header + composer so content scrolls underneath them.
  *
- * Deliberately *not* `inverted`: on iOS 26 the flipped scroll view renders
- * its first batch of cells blurred once it sits under floating chrome. So
- * the list pins itself to the bottom instead — it opens at the newest
- * message, follows new ones while you're at the bottom, keeps your place
- * when older pages are prepended, and re-pins when the keyboard resizes it.
- * (On iOS the keyboard doesn't resize it: ConversationView lifts the whole
- * list with the composer, and `topSlack` keeps its top reachable meanwhile.)
+ * The scroll view is flipped (offset 0 is the bottom), so every "top" and
+ * "bottom" handed to it is swapped: paddingTop/contentInset.top sit at the
+ * bottom of the screen and paddingBottom/contentInset.bottom at the top.
  */
 export function MessageList({
   channel,
@@ -52,7 +52,7 @@ export function MessageList({
   topSlack = 0,
 }: {
   channel: string;
-  onImagePress: (url: string) => void;
+  onImagePress: ImagePressHandler;
   topInset: number;
   bottomInset: number;
   /**
@@ -70,10 +70,12 @@ export function MessageList({
   const version = store.version;
   const msgs = useMemo(() => s.history[channel] || [], [channel, s.history, version]);
 
-  // Display rows, oldest → newest.
+  // Display rows, built oldest → newest, then reversed for the inverted list
+  // (row 0 sits at the bottom).
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = [];
     const real = msgs;
+    if (s.historyHasMore[channel]) out.push({ kind: "loading", id: "loading-older" });
     for (let i = 0; i < real.length; i++) {
       const m = real[i];
       const prev = real[i - 1];
@@ -89,130 +91,60 @@ export function MessageList({
       const joinsNext = !nextStamp && !!next && sameRun(m, next);
       out.push({ kind: "msg", id: m.id, m, first: !joinsPrev, last: !joinsNext });
     }
-    if (s.historyHasMore[channel]) out.unshift({ kind: "loading", id: "loading-older" });
-    return out;
+    return out.reverse();
   }, [msgs, channel, s.historyHasMore, version]);
 
-  // ---- bottom pinning ----
-  // Offsets are computed from our own content/viewport measurements rather
-  // than scrollToEnd(), whose cached metrics lag behind keyboard resizes.
-  const atBottom = useRef(true);
-  // Stay pinned through follow-up layouts while one of our own animated pins
-  // is mid-flight (after a send: the optimistic bubble, delivery footnote;
-  // on open: cells replacing their estimated heights). Otherwise a scroll
-  // event from that animation reads "not at the bottom" as content grows and
-  // the list stops following. A drag hands control back to the user.
-  const forcePinUntil = useRef(0);
-  const scrollY = useRef(0);
-  const contentH = useRef(0);
-  const viewH = useRef(0);
-  // Mirrors atBottom for rendering: position-holding is only wanted while
-  // reading history — at the bottom it would fight the pinning.
-  const [pinned, setPinned] = useState(true);
   const window = useWindowDimensions();
   const [listW, setListW] = useState(0);
   // Row padding (12 + 12) plus the 64pt gutter on the far side of a bubble.
   const maxBubbleWidth = (listW || window.width) - 88;
-  const [ready, setReady] = useState(false);
-  const pin = useCallback((animated: boolean) => {
-    const offset = Math.max(0, contentH.current - viewH.current);
-    if (animated) forcePinUntil.current = Math.max(forcePinUntil.current, Date.now() + 400);
-    listRef.current?.scrollToOffset({ offset, animated });
-  }, []);
-  // Switching threads starts pinned again.
-  useEffect(() => {
-    atBottom.current = true;
-    setPinned(true);
-    setReady(false);
-  }, [channel]);
-  // Sending always jumps to the newest message, even from deep in history
-  // (as in Messages); incoming messages only follow when already at the bottom.
+
+  // Sending always returns to the newest message, even from deep in history
+  // (as in Messages). Incoming messages follow on their own while you're at
+  // the bottom (maintainVisibleContentPosition's autoscroll below).
   const lastMsg = msgs[msgs.length - 1];
   const lastSeenId = useRef<string | undefined>(lastMsg?.id);
   useEffect(() => {
     const id = lastMsg?.id;
     if (id === lastSeenId.current) return;
     lastSeenId.current = id;
-    if (ready && lastMsg && s.me && lastMsg.user_id === s.me.id) {
-      atBottom.current = true;
-      forcePinUntil.current = Date.now() + 1500;
-      setPinned(true);
-      pin(true);
+    if (lastMsg && s.me && lastMsg.user_id === s.me.id) {
+      listRef.current?.scrollToOffset({ offset: 0, animated: true });
     }
-  }, [lastMsg, ready, s.me, pin]);
+  }, [lastMsg, s.me]);
 
-  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-    scrollY.current = contentOffset.y;
-    const bottom =
-      Date.now() < forcePinUntil.current ||
-      contentOffset.y + layoutMeasurement.height >= contentSize.height - 80;
-    atBottom.current = bottom;
-    setPinned((p) => (p === bottom ? p : bottom));
-  }, []);
-  // The composer's height feeds bottomInset; while it animates (voice-message
-  // morph, multiline growth) the list must follow frame by frame, not start
-  // a fresh animated scroll on every frame.
-  const pinnedInset = useRef(bottomInset);
-  const onContentSizeChange = useCallback(
-    (_w: number, h: number) => {
-      contentH.current = h;
-      const insetMoved = pinnedInset.current !== bottomInset;
-      pinnedInset.current = bottomInset;
-      if (!ready) {
-        pin(false);
-        // Reveal after the first pin so the oldest rows never flash.
-        requestAnimationFrame(() => {
-          pin(false);
-          setReady(true);
-        });
-      } else if (atBottom.current || Date.now() < forcePinUntil.current) {
-        pin(!insetMoved);
-      }
-    },
-    [ready, pin, bottomInset]
-  );
-  const onScrollBeginDrag = useCallback(() => {
-    forcePinUntil.current = 0;
-  }, []);
-
-  // Older history pages in at the top edge — but only once the list has
-  // pinned itself to the newest message. It first lays out at offset 0, so
-  // the top edge is "reached" before the pin lands; paging in history then
-  // grows the content under the pin, which has to chase it (and could lose).
-  const loadOlder = useCallback(() => {
+  // Older history pages in at the top edge (the list's end).
+  const onEndReached = useCallback(() => {
     if (s.historyHasMore[channel] && !s.historyLoading[channel]) {
       void store.loadOlder(channel);
     }
   }, [channel, s.historyHasMore, s.historyLoading, store]);
-  const onStartReached = useCallback(() => {
-    if (ready) loadOlder();
-  }, [ready, loadOlder]);
-  // A thread shorter than the screen sits at its top edge from the start.
-  useEffect(() => {
-    if (ready && contentH.current <= viewH.current) loadOlder();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready]);
-  // The keyboard went down while the list sat in the slack above its first
+
+  // The keyboard went down while the list sat in the slack above its oldest
   // row: settle back onto the content instead of leaving a blank gap.
+  const metrics = useRef({ y: 0, content: 0, view: 0 });
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    metrics.current = {
+      y: contentOffset.y,
+      content: contentSize.height,
+      view: layoutMeasurement.height,
+    };
+  }, []);
   const prevSlack = useRef(topSlack);
   useEffect(() => {
-    if (topSlack < prevSlack.current && scrollY.current < -topSlack) {
-      listRef.current?.scrollToOffset({ offset: -topSlack, animated: true });
+    const { y, content, view } = metrics.current;
+    const max = Math.max(0, content - view) + topSlack;
+    if (topSlack < prevSlack.current && y > max) {
+      listRef.current?.scrollToOffset({ offset: max, animated: true });
     }
     prevSlack.current = topSlack;
   }, [topSlack]);
-  const onLayout = useCallback(
-    (e: LayoutChangeEvent) => {
-      const { height: h, width: w } = e.nativeEvent.layout;
-      setListW((prev) => (prev === w ? prev : w));
-      const changed = viewH.current !== 0 && h !== viewH.current;
-      viewH.current = h;
-      // Keyboard / composer growth shrinks the viewport — stay on the newest.
-      if (changed && atBottom.current) pin(false);
-    },
-    [pin]
-  );
+
+  const onLayout = useCallback((e: LayoutChangeEvent) => {
+    const w = e.nativeEvent.layout.width;
+    setListW((prev) => (prev === w ? prev : w));
+  }, []);
 
   const jumpTo = useCallback(
     (id: string) => {
@@ -225,57 +157,73 @@ export function MessageList({
   );
 
   return (
-    <FlatList
-      ref={listRef}
-      data={rows}
-      style={{ opacity: ready ? 1 : 0 }}
-      keyExtractor={(r) => r.id}
-      renderItem={({ item }) => {
-        if (item.kind === "stamp") {
-          return <Text style={styles.stamp}>{item.label}</Text>;
-        }
-        if (item.kind === "loading") {
+    <NoScrollEdgeEffects>
+      <FlatList
+        ref={listRef}
+        inverted
+        data={rows}
+        keyExtractor={(r) => r.id}
+        renderItem={({ item }) => {
+          if (item.kind === "stamp") {
+            return <Text style={styles.stamp}>{item.label}</Text>;
+          }
+          if (item.kind === "loading") {
+            return (
+              <View style={styles.loadingRow}>
+                <ActivityIndicator size="small" color={colors.muted} />
+              </View>
+            );
+          }
           return (
-            <View style={styles.loadingRow}>
-              <ActivityIndicator size="small" color={colors.muted} />
-            </View>
+            <Bubble
+              m={item.m}
+              first={item.first}
+              last={item.last}
+              allMsgs={msgs}
+              maxWidth={maxBubbleWidth}
+              onImagePress={onImagePress}
+              onJumpTo={jumpTo}
+            />
           );
-        }
-        return (
-          <Bubble
-            m={item.m}
-            first={item.first}
-            last={item.last}
-            allMsgs={msgs}
-            maxWidth={maxBubbleWidth}
-            onImagePress={onImagePress}
-            onJumpTo={jumpTo}
-          />
-        );
-      }}
-      initialNumToRender={Math.min(rows.length, 60)}
-      onStartReached={onStartReached}
-      onStartReachedThreshold={0.4}
-      maintainVisibleContentPosition={pinned ? undefined : { minIndexForVisible: 1 }}
-      onScroll={onScroll}
-      onScrollBeginDrag={onScrollBeginDrag}
-      scrollEventThrottle={32}
-      onContentSizeChange={onContentSizeChange}
-      onLayout={onLayout}
-      contentContainerStyle={{ paddingTop: topInset + 6, paddingBottom: bottomInset + 6 }}
-      contentInset={{ top: topSlack }}
-      scrollIndicatorInsets={{ top: topInset + topSlack, bottom: bottomInset }}
-      keyboardDismissMode="interactive"
-      keyboardShouldPersistTaps="handled"
-      onScrollToIndexFailed={({ index }) => {
-        // Item not yet laid out — retry after a beat.
-        setTimeout(
-          () => listRef.current?.scrollToIndex({ index, viewPosition: 0.5, animated: false }),
-          220
-        );
-      }}
-      accessibilityLabel="Messages"
-    />
+        }}
+        onEndReached={onEndReached}
+        onEndReachedThreshold={0.5}
+        // Reading history while a message arrives keeps the view still; at the
+        // bottom (within 80pt) it scrolls on to show the new message.
+        maintainVisibleContentPosition={{
+          minIndexForVisible: 0,
+          autoscrollToTopThreshold: 80,
+        }}
+        onScroll={onScroll}
+        scrollEventThrottle={32}
+        onLayout={onLayout}
+        // Flipped: top = screen bottom (composer), bottom = screen top (header).
+        contentContainerStyle={{
+          paddingTop: bottomInset + 6,
+          paddingBottom: topInset + 6,
+        }}
+        contentInset={{ bottom: topSlack }}
+        scrollIndicatorInsets={{
+          top: bottomInset,
+          bottom: topInset + topSlack,
+        }}
+        keyboardDismissMode="interactive"
+        keyboardShouldPersistTaps="handled"
+        onScrollToIndexFailed={({ index }) => {
+          // Item not yet laid out — retry after a beat.
+          setTimeout(
+            () =>
+              listRef.current?.scrollToIndex({
+                index,
+                viewPosition: 0.5,
+                animated: false,
+              }),
+            220,
+          );
+        }}
+        accessibilityLabel="Messages"
+      />
+    </NoScrollEdgeEffects>
   );
 }
 
@@ -319,7 +267,12 @@ export function Topbar({
     <View style={styles.topbar} pointerEvents="box-none">
       <View style={styles.side}>
         {showBack && (
-          <GlassIconButton icon="chevron-back" label="Back" onPress={() => onBack?.()} iconSize={24} />
+          <GlassIconButton
+            icon="chevron-back"
+            label="Back"
+            onPress={() => onBack?.()}
+            iconSize={24}
+          />
         )}
       </View>
       <Pressable

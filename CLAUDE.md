@@ -241,17 +241,22 @@ Android from one codebase, plus `expo start --web`.
   fires the outermost action), `SwipeRow`,
   `ConversationView`, `MessageList`, `Bubble`, `Composer` (+ `DictationBar`),
   `Avatar`, `Icon`, `Sheet`, `ActionSheet`, `attachments`, `ImageViewer`,
-  `Toasts`.
+  `Toasts`. On iOS, images open in the native viewer from `modules/native-menu`
+  instead; `ImageViewer` is the Android/web fallback.
 - `modules/native-menu/` — local Expo module (Swift): the UIKit context-menu
-  view and glass menu button behind `NativeMenu` on iOS.
+  view and glass menu button behind `NativeMenu` on iOS, and the UIKit image
+  viewer behind `previewImage`.
 
 Platform styling is deliberate: **liquid glass on iOS 26+** and **flat
 Material styling on Android** — same layout and the same sage palette. All
 floating chrome goes through `src/components/Glass.tsx`: `GlassSurface` /
 `GlassIconButton` render `expo-glass-effect` `GlassView` on iOS 26+, a
-translucent paper chip on older iOS, and an elevated surface on Android;
-`EdgeFade` is the scroll-edge fade (a native `experimental_backgroundImage`
-gradient) that lets content dissolve under floating bars. The design is
+translucent paper chip on older iOS, and an elevated surface on Android.
+Glass stays light — matching the system (even Apple's Photos keeps light
+glass over a near-black photo); the material itself keeps content legible.
+The scroll-edge treatment is `EdgeBlur` (a `CABackdropLayer` + private
+`variableBlur` CAFilter — private API, see `mobile/AGENTS.md`) on iOS 26+ and
+`EdgeFade` (a gradient) elsewhere. The design is
 iOS-native: the DM list has glass account/compose buttons, a large title,
 search, and pinned threads as a large-avatar grid; the conversation runs edge
 to edge under a glass header capsule (avatar · name · presence) and a floating
@@ -591,9 +596,14 @@ Real-world gotchas hit while bringing the RN app up on simulators/emulators:
   host list rows or bubbles in SwiftUI — per-row hosting views re-render on
   every scroll frame (see `mobile/AGENTS.md`).
 - **Keyboard on iOS** — `react-native-keyboard-controller` (provider mounted
-  on iOS only) moves the composer and message list with the keyboard frame
-  by frame and lets a downward drag on the list or the composer dismiss it
-  interactively, as in Messages. Android keeps `KeyboardAvoidingView`.
+  on iOS only) moves the composer and message list with the keyboard (final
+  height set in the keyboard's own animation block; drags follow the finger).
+  A downward drag on the list or the composer dismisses the keyboard
+  interactively, as in Messages. Back waits for the keyboard to start hiding
+  before it pops (see `mobile/AGENTS.md`). Android keeps `KeyboardAvoidingView`.
+- **Message list** — an inverted FlatList; iOS 26 scroll-edge effects are
+  hidden per scroll view with `NoScrollEdgeEffects`
+  (`src/components/ScrollEdge.tsx`), see `mobile/AGENTS.md`.
 
 ## Architecture notes specific to the Go port
 

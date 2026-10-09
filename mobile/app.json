@@ -13,7 +13,8 @@
       "infoPlist": {
         "UIBackgroundModes": [
           "audio"
-        ]
+        ],
+        "UIViewControllerBasedStatusBarAppearance": true
       }
     },
     "android": {

@@ -29,3 +29,10 @@ export type NativeMenuButtonProps = ViewProps & {
   label?: string;
   onPressAction?: (e: ActionEvent) => void;
 };
+
+export type EdgeBlurProps = ViewProps & {
+  /** The edge that is blurred most; "top" (default) or "bottom". */
+  edge?: "top" | "bottom";
+  /** Peak blur radius at the edge. */
+  maxRadius?: number;
+};

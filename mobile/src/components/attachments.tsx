@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  findNodeHandle,
   Image,
   Linking,
   Pressable,
@@ -26,6 +27,12 @@ import { enablePlayback } from "../audio";
 const MAX_W = 260;
 
 /**
+ * Opens an image attachment full screen. `from` is the tapped view (its React
+ * tag — the iOS preview zooms out of it) and the attachment's file name.
+ */
+export type ImagePressHandler = (url: string, from?: { tag: number | null; name: string }) => void;
+
+/**
  * Attachment rendering — image with reserved box + fullscreen viewer,
  * inline video player, voice-message waveform player, named audio-file
  * card, or a file card. Mirrors the web
@@ -38,12 +45,12 @@ export function AttachmentView({
 }: {
   a: Attachment;
   mine: boolean;
-  onImagePress: (url: string) => void;
+  onImagePress: ImagePressHandler;
 }) {
   const kind = attachmentKind(a);
   switch (kind) {
     case "image":
-      return <ImageAttachment a={a} onPress={() => onImagePress(a.url)} />;
+      return <ImageAttachment a={a} onPress={(tag) => onImagePress(a.url, { tag, name: a.name })} />;
     case "video":
       return <VideoAttachment a={a} />;
     case "audio":
@@ -63,8 +70,9 @@ function useAttachmentUrl(path: string): string {
 }
 
 /** Image with a reserved box while loading (dimensions from the server). */
-function ImageAttachment({ a, onPress }: { a: Attachment; onPress: () => void }) {
+function ImageAttachment({ a, onPress }: { a: Attachment; onPress: (tag: number | null) => void }) {
   const uri = useAttachmentUrl(a.url);
+  const box = useRef<View>(null);
   const [state, setState] = useState<"loading" | "ok" | "err">("loading");
   const w = a.width | 0;
   const h = a.height | 0;
@@ -74,7 +82,8 @@ function ImageAttachment({ a, onPress }: { a: Attachment; onPress: () => void })
   const dh = known ? Math.max(1, Math.round(h * scale)) : 200;
   return (
     <Pressable
-      onPress={onPress}
+      ref={box}
+      onPress={() => onPress(findNodeHandle(box.current))}
       style={[styles.imgWrap, { width: dw, height: dh }]}
       accessibilityLabel={`Image ${a.name}`}
     >

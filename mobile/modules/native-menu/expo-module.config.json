@@ -1,6 +1,6 @@
 {
   "platforms": ["apple"],
   "apple": {
-    "modules": ["NativeMenuModule"]
+    "modules": ["NativeMenuModule", "ImagePreviewModule", "EdgeBlurModule"]
   }
 }

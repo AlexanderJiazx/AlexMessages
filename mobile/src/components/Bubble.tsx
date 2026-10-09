@@ -21,7 +21,7 @@ import {
 import { toast, useChatState, useSession } from "../session";
 import { colors, type } from "../theme";
 import { Icon } from "./Icon";
-import { AttachmentView } from "./attachments";
+import { AttachmentView, type ImagePressHandler } from "./attachments";
 import { LongPressMenu, type MenuAction } from "./NativeMenu";
 
 const R = 20;
@@ -48,7 +48,7 @@ export function Bubble({
   allMsgs: ChatMessage[];
   /** Widest a bubble may be (the row width less the far-side gutter). */
   maxWidth: number;
-  onImagePress: (url: string) => void;
+  onImagePress: ImagePressHandler;
   onJumpTo: (id: string) => void;
 }) {
   const s = useChatState();

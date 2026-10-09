@@ -11,6 +11,7 @@ import {
   View,
 } from "react-native";
 import Animated, {
+  Easing,
   FadeIn,
   FadeOut,
   useAnimatedStyle,
@@ -58,6 +59,8 @@ export const COMPOSER_INPUT_ID = "composer-input";
  */
 export const VOICE_LIFT = PILL_VOICE - PILL_MIN;
 const SLOT = 44;
+/** The composer row's padding above and below its glass. */
+export const COMPOSER_PAD = 6;
 const GAP = 8;
 /** Glass shapes closer than this melt together (the "+" being absorbed). */
 const MERGE = 6;
@@ -81,8 +84,17 @@ const REC_EXIT_MS = 120;
 export function Composer({
   peerName,
   voiceTall,
+  sideInset = 12,
+  kbUpInset,
+  kbWide,
 }: {
   peerName: string;
+  /** Gap between the glass and the screen's left and right edges. */
+  sideInset?: number;
+  /** Side margin while the keyboard is up (the glass-to-keyboard gap). */
+  kbUpInset?: number;
+  /** 0 → resting sideInset, 1 → kbUpInset; driven by the keyboard handler. */
+  kbWide?: SharedValue<number>;
   /** Morph progress (0 idle → 1 recorder height), shared with the host. */
   voiceTall?: SharedValue<number>;
 }) {
@@ -197,10 +209,19 @@ export function Composer({
     }
   }, [voice, slot, tall, idleFade]);
 
-  const wrapStyle = useAnimatedStyle(() => ({
-    // While recording the pill also reaches a little past the margins.
-    paddingHorizontal: 12 - 4 * tall.value * (1 - slot.value),
-  }));
+  const wrapStyle = useAnimatedStyle(
+    () => ({
+      // While recording the pill also reaches a little past the margins.
+      // When the keyboard lifts the dock (Messages), the side margins
+      // shrink to the gap above the keyboard — one visual margin on all
+      // four sides of the glass.
+      paddingHorizontal:
+        (sideInset +
+          ((kbUpInset ?? sideInset) - sideInset) * (kbWide === undefined ? 0 : kbWide.value)) -
+        4 * tall.value * (1 - slot.value),
+    }),
+    [sideInset, kbUpInset],
+  );
   const slotStyle = useAnimatedStyle(() => ({
     width: SLOT * slot.value,
     marginRight: GAP * slot.value,
@@ -252,7 +273,11 @@ export function Composer({
                 >
                   <GlassSurface interactive style={styles.circle}>
                     {voice === "review" ? (
-                      <Animated.View key="x" entering={FadeIn.delay(REC_EXIT_MS + 60).duration(160)} exiting={FadeOut.duration(100)}>
+                      <Animated.View
+                        key="x"
+                        entering={FadeIn.delay(REC_EXIT_MS + 60).duration(160)}
+                        exiting={FadeOut.duration(100)}
+                      >
                         <Glyph sf="xmark" ion="close" size={17} color={colors.ink2} />
                       </Animated.View>
                     ) : (
@@ -440,8 +465,8 @@ const styles = StyleSheet.create({
   wrap: {
     flexDirection: "row",
     alignItems: "flex-end",
-    paddingTop: 6,
-    paddingBottom: 6,
+    paddingTop: COMPOSER_PAD,
+    paddingBottom: COMPOSER_PAD,
   },
   slot: {
     height: SLOT,
