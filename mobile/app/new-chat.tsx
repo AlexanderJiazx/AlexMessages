@@ -10,7 +10,7 @@ import {
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import type { PublicUser } from "@alexmessages/shared";
+import { isMatrixID, type PublicUser } from "@alexmessages/shared";
 import { useChatState, useSession } from "../src/session";
 import { colors, type } from "../src/theme";
 import { Avatar } from "../src/components/Avatar";
@@ -33,7 +33,9 @@ export default function NewChat() {
 
   const openByName = useCallback(
     async (raw: string) => {
-      const uname = raw.trim().replace(/^@/, "");
+      const trimmed = raw.trim();
+      // A full Matrix ID keeps its leading "@"; a plain "@name" is a local user.
+      const uname = isMatrixID(trimmed) ? trimmed : trimmed.replace(/^@/, "");
       if (!uname || busy) return;
       setBusy(true);
       setError(null);
@@ -111,6 +113,21 @@ export default function NewChat() {
       </View>
       {error && <Text style={styles.error}>{error}</Text>}
 
+      {isMatrixID(username.trim()) && (
+        <Pressable
+          style={({ pressed }) => [styles.mxOffer, pressed && styles.pressed]}
+          onPress={() => void openByName(username)}
+          disabled={busy}
+          accessibilityRole="button"
+          accessibilityLabel={`Message ${username.trim()} on Matrix`}
+        >
+          <Icon name="paper-plane-outline" size={17} color={colors.sageDeep} />
+          <Text style={styles.mxOfferText} numberOfLines={1}>
+            Message {username.trim()} on Matrix
+          </Text>
+        </Pressable>
+      )}
+
       {people.length > 0 && (
         <>
           <Text style={styles.sectionLabel}>{q ? "Matches" : "People"}</Text>
@@ -144,9 +161,12 @@ function PersonRow({ u, last, onPress }: { u: PublicUser; last: boolean; onPress
     >
       <Avatar user={u} size={40} />
       <View style={[styles.personBody, !last && styles.personSep]}>
-        <Text style={styles.personName} numberOfLines={1}>
-          {u.display_name || u.username}
-        </Text>
+        <View style={styles.personNameRow}>
+          <Text style={styles.personName} numberOfLines={1}>
+            {u.display_name || u.username}
+          </Text>
+          {u.matrix_id && <Text style={styles.mxChip}>Matrix</Text>}
+        </View>
         <Text style={styles.personHandle} numberOfLines={1}>
           @{u.username}
         </Text>
@@ -250,10 +270,45 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.separator,
   },
+  personNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
   personName: {
     ...type.body,
     fontWeight: "500",
     color: colors.ink,
+    flexShrink: 1,
+  },
+  mxChip: {
+    fontSize: 10,
+    fontWeight: "600",
+    letterSpacing: 0.5,
+    color: colors.sageDeep,
+    backgroundColor: colors.sageTint,
+    paddingHorizontal: 7,
+    paddingVertical: 1.5,
+    borderRadius: 999,
+    overflow: "hidden",
+    textTransform: "uppercase",
+  },
+  mxOffer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 16,
+    marginTop: 12,
+    paddingHorizontal: 14,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: colors.sageTint,
+  },
+  mxOfferText: {
+    ...type.body,
+    color: colors.sageDeep,
+    fontWeight: "500",
+    flexShrink: 1,
   },
   personHandle: {
     ...type.footnote,

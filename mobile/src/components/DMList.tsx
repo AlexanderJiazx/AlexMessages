@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import {
   fmtListTime,
+  isRemoteUser,
   lastMessagePreviewFor,
   nameFor,
 } from "@alexmessages/shared";
@@ -18,6 +19,7 @@ import { useChatState, useSession } from "../session";
 import { colors, glassSupported, radius, type } from "../theme";
 import { Avatar } from "./Avatar";
 import { Icon } from "./Icon";
+import { MatrixBadge } from "./MatrixBadge";
 import { LongPressMenu, type MenuAction } from "./NativeMenu";
 import { EdgeFade, GlassIconButton, GlassSurface } from "./Glass";
 import { closeOpenSwipeRow, SwipeRow, type SwipeAction } from "./SwipeRow";
@@ -301,13 +303,17 @@ function DmRow({
           </View>
           <View>
             <Avatar user={store.userFor(peerId)} size={52} />
-            {online && <View style={styles.onlineBadge} />}
+            {/* Presence is meaningless for bridged users — no dot. */}
+            {online && !isRemoteUser(store.userFor(peerId)) && (
+              <View style={styles.onlineBadge} />
+            )}
           </View>
           <View style={[styles.rowBody, !last && styles.rowSeparator]}>
             <View style={styles.rowTop}>
               <Text style={styles.rowName} numberOfLines={1}>
                 {name}
               </Text>
+              <MatrixBadge user={store.userFor(peerId)} />
               <Text style={[styles.rowTime, unread && styles.rowTimeUnread]}>{when}</Text>
               <Icon name="chevron-forward" size={14} color={colors.faint} />
             </View>

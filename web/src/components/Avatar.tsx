@@ -1,4 +1,5 @@
 import { colorFor, initialsFor, nameFor, shade } from "@shared/format";
+import { isRemoteUser } from "@shared/matrix";
 import { store } from "../client";
 import { useStoreVersion } from "../hooks";
 
@@ -35,7 +36,10 @@ export function Avatar({
       ) : (
         <span>{initialsFor(s.users, uid)}</span>
       )}
-      {showStatus && <span className={online ? "stat" : "stat offline"} />}
+      {/* Presence is meaningless for bridged users — no dot. */}
+      {showStatus && !isRemoteUser(u) && (
+        <span className={online ? "stat" : "stat offline"} />
+      )}
     </div>
   );
 }

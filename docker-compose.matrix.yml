@@ -1,0 +1,50 @@
+# Manual round-trip check for the Matrix appservice bridge.
+#
+# Spins up a throwaway Synapse homeserver on :8008; the Alex Messages server
+# runs on the host pointed at it (Docker reaches back via host.docker.internal,
+# which is mapped for Linux hosts below).
+#
+#   1. Generate the registration against the host app URL (fresh tokens are
+#      printed to stderr — export them for step 4; never commit this file):
+#        go run ./cmd/matrix-registration \
+#          --url http://host.docker.internal:8765 --server-name localhost \
+#          > registration.yaml
+#
+#   2. First run only — generate Synapse's config:
+#        docker compose -f docker-compose.matrix.yml run --rm synapse generate
+#
+#   3. Point Synapse at the registration file (one-time append):
+#        printf '\napp_service_config_files:\n  - /data/registration.yaml\n' \
+#          >> docker-data/synapse/homeserver.yaml
+#
+#   4. Start the app bridged (tokens from step 1), then Synapse:
+#        MATRIX_HOMESERVER_URL=http://localhost:8008 \
+#        MATRIX_SERVER_NAME=localhost \
+#        MATRIX_AS_TOKEN=<as_token> MATRIX_HS_TOKEN=<hs_token> \
+#          go run ./cmd/server &
+#        docker compose -f docker-compose.matrix.yml up
+#
+#   5. Register a Matrix user and chat both ways:
+#        docker compose -f docker-compose.matrix.yml exec synapse \
+#          register_new_matrix_user -c /data/homeserver.yaml \
+#            -u carol -p pass http://localhost:8008
+#      then open a DM to @carol:localhost in Alex Messages.
+
+services:
+  synapse:
+    image: matrixdotorg/synapse:latest
+    environment:
+      SYNAPSE_SERVER_NAME: localhost
+      SYNAPSE_REPORT_STATS: "no"
+      SYNAPSE_REGISTRATION_SHARED_SECRET: "local-dev-secret"
+      SYNAPSE_ENABLE_REGISTRATION: "true"
+      SYNAPSE_ENABLE_REGISTRATION_WITHOUT_VERIFICATION: "true"
+    ports:
+      - "8008:8008"
+    volumes:
+      - ./docker-data/synapse:/data
+      - ./registration.yaml:/data/registration.yaml:ro
+    extra_hosts:
+      # Lets the container reach the app running on the host (Linux; no-op on
+      # Docker Desktop where host.docker.internal already resolves).
+      - "host.docker.internal:host-gateway"

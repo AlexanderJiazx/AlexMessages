@@ -305,6 +305,62 @@ touches Expo APIs; the platform has changed.
   containers → Gemini. 60 s upstream timeout. Golden/unit-tested in
   `transcribe_test.go`.
 
+## Matrix bridge (internal/matrix)
+
+Optional **Matrix Application Service** — the `server` binary can bridge Alex
+Messages DMs with users on a remote homeserver (Synapse, Conduit/conduwuit).
+It is fully inert unless `MATRIX_HOMESERVER_URL`, `MATRIX_SERVER_NAME`,
+`MATRIX_AS_TOKEN` and `MATRIX_HS_TOKEN` are all set (all-or-none; partial
+config is a fatal startup error). When disabled no routes, columns or code
+paths change behavior.
+
+- **Puppets, not federation.** Each local user gets a ghost account
+  `@<MATRIX_USER_PREFIX><username>:<server>` (default prefix `am_`) on the
+  remote HS via `POST /register`; outbound sends use `?user_id=` masquerading.
+  Remote Matrix users get local rows with `users.matrix_id` set, a
+  `localpart:server` username (the colon can't collide with local names —
+  `ValidUsername` rejects it), a non-scrypt `!matrix-remote` password hash
+  that can never authenticate, and `status='approved'` so they flow through
+  DM machinery while staying out of the admin approval queue. Login rejects
+  `matrix_id` rows outright.
+- **Rooms.** A DM `dm:<min>:<max>` maps 1:1 to a Matrix room
+  (`matrix_rooms` table). First message `createRoom`s as the puppet with
+  `is_direct` + `invite`; an inbound `m.room.member` invite addressed to a
+  puppet auto-joins it after verifying the room is a genuine 1:1 (a group
+  invite is declined: puppet joins, reads `/members`, leaves). `matrix_txns`
+  logs applied transaction ids for audit only — homeservers reuse low ids
+  after a restart, so idempotency lives per-event (`matrix_event_id`, room
+  mapping, read watermark).
+- **AS API** (`routes.go`, mounted on the user app): `PUT
+  /_matrix/app/v1/transactions/{txnId}` plus legacy unprefixed
+  `/transactions`/`/users`/`/rooms`; `hs_token` checked via `?access_token=`
+  or `Authorization: Bearer` with a constant-time compare.
+- **Inbound** (`inbound.go`): `m.room.message` (`m.text`/`m.image`/`m.video`/
+  `m.audio`/`m.file` — media downloaded via MSC3916 `/_matrix/client/v1/
+  media/download` with a legacy `/_matrix/media/v3` fallback into
+  `data/uploads/`), `m.replace` edits → `message_edited`, `m.receipt`
+  ephemeral events → `dm_read`, `m.room.member` invites/joins. Rows go through the same
+  `internal/dmpost` persist+broadcast+push path the WS `message` handler
+  uses (extracted to avoid a `matrix` → `webapp` import cycle).
+- **Outbound** (`bridge.go`): send/edit/read → `sendEvent`/`receipt` on a
+  serialized worker with `withRetry` backoff (6 tries, 1 s→30 s, 5xx/429
+  only); failures emit `debuglog` and never block local delivery.
+  Attachments upload via `/_matrix/media/upload`; an attachment named
+  `voice-message.<ext>` maps to `m.audio` + MSC3245 voice flag, and
+  voice-flagged inbound audio stores under the same basename so both sides
+  show the voice UI.
+- **Starting a chat**: `GET /api/users/lookup?username=@user:server` resolves
+  the remote profile (displayname + avatar copied locally), creates the
+  remote row + DM. All three clients offer "Message @user:server on Matrix"
+  when a full MXID is typed (`shared/src/matrix.ts`), and show a "Matrix"
+  badge next to remote users (`matrix_id` on `PublicUser`, `*string` so it
+  serializes `null`, never omitted).
+- **`cmd/matrix-registration`** prints the appservice `registration.yaml`
+  (`--url`, `--server-name`, generates as/hs tokens to stderr — export the
+  same `MATRIX_AS_TOKEN`/`MATRIX_HS_TOKEN` on the server; never commit the
+  file). `docker-compose.matrix.yml` + the header comment in it run a
+  throwaway Synapse for a manual round-trip.
+
 ## Alex Meet (cmd/meet, internal/meet)
 
 The former 1:1 "AlexMessage Call" was replaced wholesale by **Alex Meet**, a
@@ -680,7 +736,7 @@ binaries racing the same ALTER.
 
 Lives under `data/` (gitignored), created on first run:
 - `data/alexmessage.db` — SQLite (users, sessions, messages, attachments, contacts,
-  calls, push_subscriptions, dm_state).
+  calls, push_subscriptions, dm_state, matrix_rooms, matrix_txns).
 - `data/uploads/<user_id>/<token>_<filename>` — per-user uploads; account deletion
   removes the directory.
 - `data/avatars/<user_id>_<token>.<ext>` — profile photos; replaced on change,

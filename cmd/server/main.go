@@ -14,6 +14,7 @@ import (
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
 	"alexmessage/internal/httpx"
+	"alexmessage/internal/matrix"
 	"alexmessage/internal/push"
 	"alexmessage/internal/webapp"
 )
@@ -31,6 +32,11 @@ func main() {
 		log.Fatalf("vapid bootstrap: %v", err)
 	}
 	db.StartBackgroundMaintenance()
+
+	// Matrix appservice bridge: no-op unless the MATRIX_* env vars are set.
+	if _, err := matrix.Start(); err != nil {
+		log.Fatalf("matrix bridge: %v", err)
+	}
 
 	addr := envOr("HOST", "0.0.0.0") + ":" + envOr("PORT", "8765")
 	if err := httpx.Serve("alex-messages", addr, webapp.NewEngine()); err != nil {

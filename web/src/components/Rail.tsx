@@ -3,6 +3,7 @@ import { nameFor, lastMessagePreviewFor } from "@shared/format";
 import { store } from "../client";
 import { useChatState } from "../hooks";
 import { Avatar } from "./Avatar";
+import { MatrixBadge } from "./MatrixBadge";
 import { Icon } from "./icons";
 
 /** Left rail: "Messages" title, compose button, pinned + normal DM list,
@@ -107,7 +108,10 @@ function DmRow({
       >
         <Avatar uid={item.peerId} />
         <div className="who">
-          <b>{nameFor(s.users, item.peerId)}</b>
+          <span className="who-top">
+            <b>{nameFor(s.users, item.peerId)}</b>
+            <MatrixBadge user={s.users[item.peerId]} />
+          </span>
           <span className="sub">{preview}</span>
         </div>
         <span

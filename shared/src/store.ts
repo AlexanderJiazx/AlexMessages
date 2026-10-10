@@ -16,6 +16,7 @@
 import { ApiClient } from "./api";
 import { ChatSocket } from "./socket";
 import { dmChannelFor, dmPeerOf, isDM, parseDMChannel } from "./dm";
+import { isMatrixID } from "./matrix";
 import { dmStateFromPayload } from "./api";
 import type {
   Attachment,
@@ -782,7 +783,11 @@ export class ChatStore {
   }
 
   async lookupAndOpen(username: string): Promise<{ ok: true } | { ok: false; error: string }> {
-    const uname = username.trim().replace(/^@/, "");
+    const raw = username.trim();
+    // A full Matrix ID (@name:server) goes to the bridge verbatim; a plain
+    // (or @-prefixed) handle still resolves as a local username.
+    const isMX = isMatrixID(raw);
+    const uname = isMX ? raw : raw.replace(/^@/, "");
     if (!uname) return { ok: false, error: "Enter a username." };
     try {
       const { user } = await this.api.lookupUser(uname);
@@ -790,7 +795,12 @@ export class ChatStore {
       this.openDM(user.id);
       return { ok: true };
     } catch (e) {
-      const err = e as { status?: number };
+      const err = e as { status?: number; detail?: string };
+      if (isMX) {
+        // Bridge errors carry a useful detail string ("Matrix bridging is not
+        // enabled", "not a Matrix user id", ...) — surface it directly.
+        return { ok: false, error: err.detail || "Lookup failed. Try again." };
+      }
       if (err.status === 404) return { ok: false, error: "No user with that username." };
       if (err.status === 400) return { ok: false, error: "That's your own username." };
       return { ok: false, error: "Lookup failed. Try again." };

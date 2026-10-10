@@ -9,6 +9,7 @@
 export * from "./types";
 export * from "./dm";
 export * from "./format";
+export * from "./matrix";
 export * from "./api";
 export * from "./socket";
 export * from "./store";

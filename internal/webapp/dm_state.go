@@ -6,8 +6,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"alexmessage/internal/db"
+	"alexmessage/internal/dmpost"
 	"alexmessage/internal/httpx"
-	"alexmessage/internal/runtime"
+	"alexmessage/internal/matrix"
 )
 
 // registerDMStateRoutes wires the per-user DM-state endpoints (routes/dm_state.py).
@@ -82,10 +83,11 @@ func handleMarkRead(c *gin.Context) {
 	}
 	// Read receipt: tell both participants (the peer shows the "Read" remark;
 	// the reader's other tabs clear their unread state).
-	runtime.Broadcast(
-		gin.H{"type": "dm_read", "channel": channel, "user_id": user.ID, "last_read_at": cutoff},
-		runtime.RecipientsForChannel(channel),
-	)
+	dmpost.BroadcastRead(user.ID, channel, cutoff)
+	// Relay an m.read receipt to Matrix when the peer is a bridged remote user.
+	if bridge := matrix.Active(); bridge != nil {
+		bridge.OnLocalRead(user.ID, channel)
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "last_read_at": cutoff})
 }
 
