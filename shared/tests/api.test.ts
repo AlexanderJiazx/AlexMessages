@@ -1,11 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiClient, ApiError, dmStateFromPayload } from "../src/api";
+import { ApiClient, ApiError, adminPanelUrl, dmStateFromPayload } from "../src/api";
 
 function mockFetch(impl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   return vi.fn(impl as typeof fetch);
 }
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe("review regressions", () => {
+  it("resolves the production admin host and local admin port", () => {
+    expect(adminPanelUrl("https://messages.alexanderjia.com")).toBe("https://admin.alexanderjia.com/");
+    expect(adminPanelUrl("http://localhost:8765")).toBe("http://localhost:8001/");
+    expect(adminPanelUrl("http://10.0.2.2:8765/")).toBe("http://10.0.2.2:8001/");
+  });
+  it("authenticates native media without exposing the token in the URL", () => {
+    const api=new ApiClient({baseUrl:"https://messages.example",token:"secret"});
+    expect(api.mediaSource("/uploads/1/file.png")).toEqual({uri:"https://messages.example/uploads/1/file.png",headers:{Authorization:"Bearer secret"}});
+    expect(api.mediaSource("https://outside.example/image.png").headers).toEqual({});
+  });
+});
 
 describe("ApiClient", () => {
   it("sends Authorization header when a token is set", async () => {

@@ -18,6 +18,7 @@ import {
   type RecordingOptions,
 } from "expo-audio";
 import { useEffect, useRef, useState } from "react";
+import { isCallLive } from "./media";
 
 const RECORDING_OPTIONS: RecordingOptions = {
   ...RecordingPresets.HIGH_QUALITY,
@@ -59,8 +60,10 @@ const PLAYBACK_MODE = {
   shouldPlayInBackground: false,
 } as const;
 
-/** Puts the audio session in playback mode (audible on silent, loudspeaker). */
+/** Puts the audio session in playback mode (audible on silent, loudspeaker).
+ *  Never during a call: the playback category has no microphone. */
 export async function enablePlayback(): Promise<void> {
+  if (isCallLive()) return;
   try {
     await setAudioModeAsync(PLAYBACK_MODE);
   } catch {

@@ -53,14 +53,7 @@ func handleHistory(c *gin.Context) {
 		}
 	}
 
-	var afterTS *int64
-	state, _ := db.GetDMState(user.ID, channel)
-	if state.ClearedAt != 0 {
-		cleared := state.ClearedAt
-		afterTS = &cleared
-	}
-
-	messages, err := db.FetchChannelWindow(channel, limit, before, afterTS)
+	messages, err := db.FetchDMWindow(user.ID, channel, limit, before, c.Query("before_id"))
 	if err != nil {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return

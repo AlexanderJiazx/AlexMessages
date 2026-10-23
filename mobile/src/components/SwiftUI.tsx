@@ -1,7 +1,8 @@
-// Android/web stub for @expo/ui/swift-ui. @expo/ui is excluded from the
-// Android build (it drags in the whole Jetpack Compose stack) and every call
-// site is gated behind Platform.OS === "ios" && glassSupported, so these are
-// never rendered here — they exist only so the module resolves.
+// Android/web stub for @expo/ui/swift-ui: SwiftUI exists only on iOS, and
+// every call site is gated behind Platform.OS === "ios" && glassSupported,
+// so these are never rendered here — they exist only so the module resolves.
+// (@expo/ui itself stays linked on Android: expo-router's Android Stack
+// toolbar loads @expo/ui/jetpack-compose when expo-router is imported.)
 import React from "react";
 
 const Stub: React.ComponentType<Record<string, unknown>> = () => null;

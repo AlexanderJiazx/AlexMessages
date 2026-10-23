@@ -14,6 +14,7 @@ import {
   PushPromptModal,
 } from "../components/Modals";
 import { Toasts, Lightbox } from "../components/Overlays";
+import { CallView } from "../components/CallView";
 import { reconcilePushOnLoad, registerServiceWorker } from "../push";
 
 /** The signed-in app shell: rail + center pane + every overlay. */
@@ -84,6 +85,7 @@ export function ChatScreen() {
       <ProfileSheet uid={profileUid} onClose={() => setProfileUid(null)} />
       <NewDmModal on={newDmOpen} onClose={() => setNewDmOpen(false)} />
       <PushPromptModal on={pushPrompt} onClose={() => setPushPrompt(false)} />
+      <CallView />
     </>
   );
 }

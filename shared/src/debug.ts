@@ -42,11 +42,19 @@ export class DebugReporter {
   }
 
   flush = (): void => {
+	if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     if (!this.queue.length) return;
     const events = this.queue.splice(0, 50);
     this.opts.api.debugReport(this.session, events);
   };
+
+  /** Drop buffered events before a different account uses this client. */
+  reset(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.queue = [];
+  }
 
   log(level: string, event: string, message?: string, context?: unknown): void {
     this.queue.push({

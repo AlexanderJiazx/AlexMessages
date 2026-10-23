@@ -42,11 +42,20 @@ test.describe("voice dictation", () => {
   });
 
   test("stop → transcribe fills the composer with the transcript", async ({ page }) => {
+    // Hold the stub's reply until "Transcribing…" has been seen: an instant
+    // reply can replace it before the assertion polls.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route("**/api/transcribe", async (route) => {
+      await held;
+      await route.fallback();
+    });
     await page.getByRole("button", { name: "Dictate" }).click();
     await expect(page.getByRole("group", { name: "Voice dictation" })).toBeVisible();
     await page.waitForTimeout(1200); // record a beat so the clip isn't empty
     await page.getByRole("button", { name: "Stop and transcribe" }).click();
     await expect(page.getByText("Transcribing…")).toBeVisible();
+    release();
     await expect(page.getByPlaceholder("Message Bob")).toHaveValue(STUB_TEXT);
   });
 

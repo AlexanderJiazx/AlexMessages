@@ -16,7 +16,10 @@ app/                    Expo Router routes
   conversation.tsx      a single DM thread (pushed route on phones)
   settings.tsx          tabbed settings modal (Profile/Account/Notifications/Data/Admin)
   new-chat.tsx          start-a-DM modal
-  profile.tsx           read-only peer profile modal
+  profile.tsx           read-only peer profile modal (Message, Voice Call,
+                        Video Call, Add Contact/Remove)
+  call.tsx              the call screen — a full-screen modal that CallHost
+                        opens when a call starts
 src/
   session.tsx           Session context — one ApiClient + one ChatStore for the
                         app; bearer token in expo-secure-store (AsyncStorage on
@@ -26,6 +29,23 @@ src/
                         back to the conversation — the managed-Expo analogue of
                         the legacy Android MessagingService
   audio.ts              useVoiceRecorder (expo-audio) for dictation + voice notes
+  media.ts              in-app media vs. calls: a call stops, then blocks, voice
+                        messages, videos, and recording until it ends
+  call/
+    CallHost.tsx        calls layer around the root Stack: opens /call, plays
+                        the call sounds, floats a return-to-call tile (on iOS
+                        in a FullWindowOverlay while a modal sheet is open, so
+                        it stays above the sheet)
+    CallScreen.tsx      ringing (Decline / Accept) and in-call controls
+                        (speaker, camera, mute, end, camera flip)
+    platform.native.ts  react-native-webrtc behind the shared CallPlatform
+                        (platform.ts: Expo-web stub, no calls)
+    CallVideo.native.tsx  RTCView for one call stream
+    callAudio.native.ts react-native-incall-manager: ringtone, ringback,
+                        in-call audio routing, speaker toggle
+    system.ios.ts       iOS: calls in the system call UI (modules/system-calls)
+    system.android.ts   Android: the ring service (modules/call-ringer)
+                        (system.ts: Expo-web stub)
   theme.ts              shared "paper + sage" tokens, the 720 wide breakpoint,
                         glassSupported (iOS ≥ 26)
   components/
@@ -38,10 +58,24 @@ src/
     DictationBar.tsx    ChatGPT-style dictation bar (waveform/timer/stop/send-audio/send)
     ActionSheet.tsx     iOS ActionSheetIOS / Android bottom-sheet Modal (any
                         option count — Alert.alert caps at 3 on Android)
+    NativeMenu.tsx      menus: UIKit context menus + glass menu button on iOS;
+                        ActionSheet, or a Material dropdown (the call button),
+                        on Android
+    SwiftUI.tsx, JetpackCompose.tsx  platform-split @expo/ui primitives
+                        (real on iOS / Android respectively, stubs elsewhere)
     Sheet.tsx           shared bottom-sheet card pattern
     attachments.tsx     image/video/audio/GIF/file rendering
     ImageViewer.tsx     fullscreen image viewer
+    CallEntry.tsx       finished-call card in the thread ("Call again")
     Avatar.tsx, Icon.tsx, Toasts.tsx
+assets/icons/           Android vector drawables (the call dropdown's icons)
+modules/                local Expo modules
+  native-menu/          iOS (Swift): UIKit context menus, glass menu button,
+                        image viewer, edge blur
+  system-calls/         iOS (Swift): CallKit, or LiveCommunicationKit in
+                        mainland China
+  call-ringer/          Android (Kotlin): the ring service, so calls ring
+                        while the app is closed
 e2e/                    Maestro YAML flows + subflows/login.yaml
 ```
 
@@ -52,7 +86,8 @@ Deliberately different per platform while sharing layout and palette:
 - **iOS** — liquid-glass treatment via `expo-glass-effect` `GlassView` where
   supported (iOS 26+), with a graceful blur/tint fallback below.
 - **Android** — flat, modern Material surfaces; bottom-sheet `Modal`s replace
-  the platform `Alert` for action menus.
+  the platform `Alert` for action menus, and the DM header's call button
+  opens a Material dropdown anchored to it.
 - **Wide layouts** (iPad, tablets, `expo start --web`) — `chat` switches to a
   two-pane rail + conversation view above the `720` breakpoint.
 
@@ -76,6 +111,57 @@ npm run web          # react-native-web build in the browser
 
 For a device build against a local backend, start the Go server on `:8765`
 first (`ADMIN_PASSWORD=… PORT=8765 go run ./cmd/server` from the repo root).
+
+## Calls
+
+Voice and video calls in a DM run on iOS and Android; `npm run web` has no
+calls. They use two native modules, `react-native-webrtc` and
+`react-native-incall-manager`, plus native config from `app.json` (camera and
+microphone permission text, and the two call sounds in `assets/sounds/`
+copied into the app by the `expo-asset` plugin). After changing any of that,
+regenerate the native projects and rebuild:
+
+```bash
+npx expo prebuild    # ios/ and android/ are generated (gitignored)
+npm run ios          # or: npm run android
+```
+
+If `pod install` fails inside prebuild with a Unicode encoding error, run it
+again with a UTF-8 locale: `cd ios && LANG=en_US.UTF-8 pod install`.
+
+On iOS, calls ring and run in the system call UI (`modules/system-calls`):
+CallKit, or LiveCommunicationKit (iOS 17.4+) when the iPhone's region is
+mainland China, where the App Store doesn't allow CallKit. There is no VoIP
+push (it needs a paid Apple Developer account), so an iPhone hears of a call
+only while the app runs: in practice, while the app is open.
+
+On Android, calls also ring while the app is closed (`modules/call-ringer`).
+A foreground service keeps a small socket to the server (`/ws?mode=calls`)
+and rings with a call notification (Decline and Answer, and a full-screen
+call screen over the lock screen). While it runs, a silent "Ready for calls"
+notification stays in the notification shade. Settings → Notifications →
+**Ring when the app is closed** (default on) turns it off. Signing out stops
+the service, and so does an app start that ends on the login screen (no
+stored token, or the startup `GET /api/me` fails; any failure of that request,
+a network error included, signs the user out). The service needs
+notifications to be allowed; when notifications, full-screen calls, or the
+battery-optimization exemption are off, the same page shows a button that
+opens the matching system setting.
+
+Both are local Expo modules: after pulling a change to either one, run
+`npx expo prebuild` and rebuild the app.
+
+Testing calls: calls in the iOS Simulator ring in the app's own call screen,
+never in CallKit or LiveCommunicationKit (the Simulator has no system call
+UI), so test those on a real iPhone; launch the app with the argument
+`-AppleLocale en_CN` to get LiveCommunicationKit outside China. The iOS
+Simulator has no camera (its self view stays black),
+it sends silence instead of microphone sound (the peer receives the audio
+packets, but every sample is zero), and a VPN app on the Mac that takes the
+default route stops the Simulator's call media (calls end as "Couldn't
+connect"). With the VPN off, the Simulator receives the peer's video and
+audio; check an iPhone's own voice on a real iPhone. The Android emulator's
+virtual camera works, and its calls connect.
 
 ## Test
 

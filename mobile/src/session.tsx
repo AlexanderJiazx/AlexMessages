@@ -5,7 +5,12 @@
  * server URL and bearer token are known. Native differences from the web:
  *  - auth is a bearer token in SecureStore (no cookies),
  *  - notifications are local OS notifications via the store's onNotify hook,
- *  - AppState (not visibilitychange) drives store.setForeground.
+ *  - AppState (not visibilitychange) drives store.setForeground,
+ *  - calls run on react-native-webrtc (src/call/platform.native.ts) and go
+ *    through the phone's call handling (src/call/system*.ts): CallKit or
+ *    LiveCommunicationKit on iOS; on Android the ring service, which this
+ *    file starts after sign-in and stops at logout ("Ring when the app is
+ *    closed" in Settings).
  */
 import React, {
   createContext,
@@ -24,11 +29,15 @@ import Constants from "expo-constants";
 import {
   ApiClient,
   ChatStore,
+  DebugReporter,
   type ChatState,
   type NotifyEvent,
   type ToastEvent,
 } from "@alexmessages/shared";
-import { presentMessageNotification } from "./notify";
+import { ensureNotificationPermission, presentMessageNotification } from "./notify";
+import { callPlatform } from "./call/platform";
+import { attachSystemCalls, notifyIncomingCall, notifyMissedCall } from "./call/system";
+import { CallRinger, hasRingService } from "../modules/call-ringer";
 
 /** Upload part reader for Expo's fetch (see `ApiClientOptions.readFile`). */
 const readLocalFile =
@@ -58,6 +67,9 @@ interface Session {
   ): Promise<{ ok: true } | { ok: false; error: string }>;
   logout(): Promise<void>;
   setServerUrl(url: string): Promise<void>;
+  /** Android: calls ring while the app is closed (the ring service). */
+  ringWhenClosed: boolean;
+  setRingWhenClosed(on: boolean): void;
 }
 
 const SessionCtx = createContext<Session | null>(null);
@@ -88,6 +100,9 @@ const prefStorage = {
   },
 };
 
+/** Off only once the user turns it off (Settings → Notifications). */
+const RING_PREF = "ring_when_closed";
+
 async function hydratePrefs(): Promise<void> {
   if (prefsHydrated) return;
   prefsHydrated = true;
@@ -113,10 +128,9 @@ function normalizeServerUrl(raw: string): string {
   return url;
 }
 
-function wsUrlFor(baseUrl: string, token: string | null): string {
+function wsUrlFor(baseUrl: string): string {
   const u = new URL(`${baseUrl}/ws`);
   u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-  if (token) u.searchParams.set("token", token);
   return u.toString();
 }
 
@@ -138,19 +152,25 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const apiRef = useRef(new ApiClient({ baseUrl: DEFAULT_SERVER, readFile: readLocalFile }));
   const logoutRef = useRef<() => Promise<void>>(async () => {});
+  const debugRef = useRef<DebugReporter | null>(null);
+  if (!debugRef.current) debugRef.current = new DebugReporter({ api: apiRef.current });
   const storeRef = useRef<ChatStore | null>(null);
   if (!storeRef.current) {
     storeRef.current = new ChatStore({
       api: apiRef.current,
-      wsUrl: () => wsUrlFor(apiRef.current.baseUrl, apiRef.current.token),
+      wsUrl: () => wsUrlFor(apiRef.current.baseUrl),
       get token() {
         return apiRef.current.token;
       },
       storage: prefStorage,
+      debug: (level, event, message, context) => debugRef.current?.log(level, event, message, context),
       onToast: (t) => toast(t.text, t.isErr),
       onNotify: (n: NotifyEvent) => {
-        void presentMessageNotification(n);
+        if (n.kind === "call") notifyIncomingCall(n);
+        else if (n.kind === "missed_call") notifyMissedCall(n);
+        else void presentMessageNotification(n);
       },
+      callPlatform,
       onUnauthorized: () => {
         void logoutRef.current();
       },
@@ -159,13 +179,42 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const store = storeRef.current;
   const api = apiRef.current;
 
+  const [ringWhenClosed, setRingPref] = useState(true);
+  /** Starts or stops the Android ring service to match the session, the
+   *  setting, and the notification permission: without notifications no
+   *  call can ring, and a running service would only keep callers ringing. */
+  const syncRingService = useCallback(
+    (on: boolean) => {
+      if (!hasRingService) return;
+      const token = api.token;
+      if (token && on && CallRinger.notificationsAllowed()) {
+        CallRinger.start(wsUrlFor(api.baseUrl), token).catch(() => {});
+      } else {
+        void CallRinger.stop();
+      }
+    },
+    [api]
+  );
+
+  // A new provider builds a new store, so this one must stop for good. On
+  // Android the ring service keeps the process alive after the app's
+  // screen is destroyed (swiped away); without this the old store's socket
+  // would keep running next to the new one. (Declared before the calls
+  // bridge, so the bridge still sees the reset end a live call.)
+  useEffect(() => () => store.reset(), [store]);
+
+  // The calls bridge follows this store for its whole life.
+  useEffect(() => attachSystemCalls(store), [store]);
+
   logoutRef.current = async () => {
     try {
       await api.logout();
     } catch {
       /* best effort */
     }
+    syncRingService(false);
     store.reset();
+    debugRef.current?.reset();
     api.setToken(null);
     await kv.del(TOKEN_KEY);
     setPhase("login");
@@ -177,6 +226,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     (async () => {
       await hydratePrefs();
+      const ring = prefStorage.getItem(RING_PREF) !== "0";
+      if (!cancelled) setRingPref(ring);
       // iOS Keychain items survive uninstall; AsyncStorage does not. A missing
       // sentinel means a fresh install — drop any inherited secrets.
       if ((await AsyncStorage.getItem("installed")) == null) {
@@ -188,7 +239,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       api.baseUrl = base;
       if (!cancelled) setServerUrlState(base);
       const token = await kv.get(TOKEN_KEY);
+      // Every path to the login screen stops the ring service: it keeps its
+      // own copy of the session, and would otherwise ring calls that the
+      // signed-out app can't answer.
       if (!token) {
+        syncRingService(false);
         if (!cancelled) setPhase("login");
         return;
       }
@@ -196,6 +251,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       try {
         await api.getMe();
       } catch {
+        syncRingService(false);
         await kv.del(TOKEN_KEY);
         api.setToken(null);
         if (!cancelled) setPhase("login");
@@ -204,6 +260,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       if (cancelled) return;
       store.connect();
       setPhase("ready");
+      if (hasRingService && ring) {
+        // Calls ring through notifications. Asks while Android still shows
+        // the prompt (it stops after the user denies it twice); after that,
+        // Settings → Notifications sends the user to the system settings.
+        void ensureNotificationPermission().finally(() => syncRingService(ring));
+      } else {
+        syncRingService(ring);
+      }
     })();
     return () => {
       cancelled = true;
@@ -221,6 +285,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     return () => sub.remove();
   }, [store]);
 
+  // Back on screen: notifications may have been allowed or turned off in the
+  // system settings, or Android may have stopped the ring service.
+  useEffect(() => {
+    if (!hasRingService || phase !== "ready") return;
+    const sub = AppState.addEventListener("change", (s) => {
+      if (s === "active") syncRingService(ringWhenClosed);
+    });
+    return () => sub.remove();
+  }, [phase, ringWhenClosed, syncRingService]);
+
   const login = useCallback(
     async (username: string, password: string): Promise<string | null> => {
       try {
@@ -231,6 +305,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         await kv.set(TOKEN_KEY, token);
         store.connect();
         setPhase("ready");
+        if (hasRingService && ringWhenClosed) {
+          // The ring service rings through notifications (Android 13+ asks).
+          void ensureNotificationPermission().finally(() => syncRingService(true));
+        }
         return null;
       } catch (e) {
         const status = (e as { status?: number }).status;
@@ -239,7 +317,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         return "Couldn't reach the server.";
       }
     },
-    [api, store]
+    [api, store, ringWhenClosed, syncRingService]
   );
 
   const register = useCallback(
@@ -268,6 +346,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     [api]
   );
 
+  const setRingWhenClosed = useCallback(
+    (on: boolean) => {
+      prefStorage.setItem(RING_PREF, on ? "1" : "0");
+      setRingPref(on);
+      syncRingService(on);
+    },
+    [syncRingService]
+  );
+
   const value: Session = {
     phase,
     api,
@@ -277,6 +364,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     register,
     logout: () => logoutRef.current(),
     setServerUrl,
+    ringWhenClosed,
+    setRingWhenClosed,
   };
   return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;
 }

@@ -5,11 +5,15 @@
 package runtime
 
 import (
+	"errors"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 
+	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
 )
 
@@ -25,19 +29,43 @@ const (
 // Client wraps one live WebSocket connection. Gorilla connections are not safe
 // for concurrent writes, so every send is serialized through mu.
 type Client struct {
-	Conn   *websocket.Conn
-	UserID int
+	Conn         *websocket.Conn
+	UserID       int
+	SessionToken string
 
 	mu      sync.Mutex // serializes writes to Conn
 	chmu    sync.Mutex
 	channel string
+	// hidden is set while the client reports its screen is not showing the
+	// app; clients that never report count as visible.
+	hidden atomic.Bool
 }
+
+// SetVisible records whether the client's screen is showing the app.
+func (c *Client) SetVisible(visible bool) { c.hidden.Store(!visible) }
+
+// Visible reports the client's last reported visibility.
+func (c *Client) Visible() bool { return !c.hidden.Load() }
 
 // Send writes a JSON payload to the client, serialized against other writers.
 func (c *Client) Send(payload any) error {
+	return c.send(payload, true)
+}
+
+func (c *Client) send(payload any, checkSession bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.Conn.WriteJSON(payload)
+	if checkSession && c.SessionToken != "" && auth.ResolveSession(c.SessionToken, "user") == nil {
+		_ = c.Conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "Session revoked"), time.Now().Add(time.Second))
+		_ = c.Conn.Close()
+		return errors.New("session revoked")
+	}
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	err := c.Conn.WriteJSON(payload)
+	if err != nil {
+		_ = c.Conn.Close()
+	}
+	return err
 }
 
 // SetChannel records the client's current channel (bookkeeping only; routing
@@ -55,10 +83,18 @@ type Presence struct {
 	byUser  map[int]map[*Client]struct{}
 }
 
-// presence is the process-wide singleton.
-var presence = &Presence{
-	sockets: map[*Client]struct{}{},
-	byUser:  map[int]map[*Client]struct{}{},
+// presence is the process-wide singleton: the /ws sockets, which count as
+// being online.
+var presence = NewPresence()
+
+// NewPresence returns an empty socket registry. Besides the singleton, the
+// webapp keeps one for its call listener sockets, which don't count as being
+// online.
+func NewPresence() *Presence {
+	return &Presence{
+		sockets: map[*Client]struct{}{},
+		byUser:  map[int]map[*Client]struct{}{},
+	}
 }
 
 // PresenceTracker exposes the singleton.
@@ -140,11 +176,44 @@ func SendJSON(c *Client, payload any) {
 
 // Broadcast sends a payload to each recipient, dropping any that fail.
 func Broadcast(payload any, recipients []*Client) {
+	recipients = authenticatedClients(recipients)
+	var wg sync.WaitGroup
 	for _, c := range recipients {
-		if err := c.Send(payload); err != nil {
-			presence.Remove(c)
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+			if err := c.send(payload, false); err != nil {
+				presence.Remove(c)
+			}
+		}(c)
+	}
+	wg.Wait()
+}
+
+func authenticatedClients(clients []*Client) []*Client {
+	tokens := []string{}
+	seen := map[string]bool{}
+	for _, c := range clients {
+		if c.SessionToken != "" && !seen[c.SessionToken] {
+			seen[c.SessionToken] = true
+			tokens = append(tokens, c.SessionToken)
 		}
 	}
+	active, err := db.ActiveSessionTokens(tokens)
+	if err != nil {
+		return nil
+	}
+	out := []*Client{}
+	for _, c := range clients {
+		if c.SessionToken == "" || active[c.SessionToken] {
+			out = append(out, c)
+			continue
+		}
+		_ = c.Conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "Session revoked"), time.Now().Add(time.Second))
+		_ = c.Conn.Close()
+		presence.Remove(c)
+	}
+	return out
 }
 
 // ---------- public user views ----------
@@ -206,49 +275,47 @@ func VisibleUserIDs(viewerID int) (map[int]struct{}, error) {
 // BroadcastProfileUpdate sends a profile_update only to sockets that can
 // already see this user.
 func BroadcastProfileUpdate(profile PublicUser) {
-	uid := profile.ID
-	payload := map[string]any{"type": "profile_update", "profile": profile}
-	for _, c := range presence.AllSockets() {
-		viewer := c.UserID
-		if uid != viewer {
-			visible, err := VisibleUserIDs(viewer)
-			if err != nil {
-				continue
-			}
-			if _, ok := visible[uid]; !ok {
-				continue
-			}
-		}
-		if err := c.Send(payload); err != nil {
-			presence.Remove(c)
+	sockets := presence.AllSockets()
+	viewers := presence.OnlineUserIDs()
+	visible, err := db.VisibilityForUsers(viewers)
+	if err != nil {
+		return
+	}
+	recipients := []*Client{}
+	for _, c := range sockets {
+		if _, ok := visible[c.UserID][profile.ID]; ok {
+			recipients = append(recipients, c)
 		}
 	}
+	Broadcast(map[string]any{"type": "profile_update", "profile": profile}, recipients)
 }
 
-// BroadcastPresence sends each socket only the online users it may know about,
-// so the full online roster never leaks.
+// BroadcastPresence shares visibility work across tabs and does not let a
+// blocked TCP connection postpone delivery to healthy recipients.
 func BroadcastPresence() {
-	onlineList := presence.OnlineUserIDs()
-	online := make(map[int]struct{}, len(onlineList))
-	for _, id := range onlineList {
-		online[id] = struct{}{}
+	sockets := authenticatedClients(presence.AllSockets())
+	online := presence.OnlineUserIDs()
+	visible, err := db.VisibilityForUsers(online)
+	if err != nil {
+		return
 	}
-	for _, c := range presence.AllSockets() {
-		visible, err := VisibleUserIDs(c.UserID)
-		if err != nil {
-			continue
-		}
-		filtered := make([]int, 0)
-		for id := range online {
-			if _, ok := visible[id]; ok {
+	var wg sync.WaitGroup
+	for _, c := range sockets {
+		filtered := []int{}
+		for _, id := range online {
+			if _, ok := visible[c.UserID][id]; ok {
 				filtered = append(filtered, id)
 			}
 		}
-		sort.Ints(filtered)
-		if err := c.Send(map[string]any{"type": "presence", "online": filtered}); err != nil {
-			presence.Remove(c)
-		}
+		wg.Add(1)
+		go func(c *Client, ids []int) {
+			defer wg.Done()
+			if err := c.send(map[string]any{"type": "presence", "online": ids}, false); err != nil {
+				presence.Remove(c)
+			}
+		}(c, filtered)
 	}
+	wg.Wait()
 }
 
 // RecipientsForChannel returns the sockets a DM channel's messages go to: the

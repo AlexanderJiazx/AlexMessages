@@ -30,17 +30,17 @@ export default function ChatHome() {
     [wide, store, router]
   );
 
-  // Notification taps → open that conversation.
-  useEffect(
-    () =>
-      onOpenChannelRequest((channel) => {
-        store.openChannelExternal(channel);
-        if (!wide) {
-          router.push({ pathname: "/conversation", params: { channel } });
-        }
-      }),
-    [store, router, wide]
-  );
+  // Notification taps → open that conversation (a tap that started the
+  // app waits in notify.ts until the session is ready).
+  useEffect(() => {
+    if (phase !== "ready") return;
+    return onOpenChannelRequest((channel) => {
+      store.openChannelExternal(channel);
+      if (!wide) {
+        router.push({ pathname: "/conversation", params: { channel } });
+      }
+    });
+  }, [phase, store, router, wide]);
 
   const onNewDm = useCallback(
     () => router.push({ pathname: "/new-chat", params: { wide: wide ? "1" : "0" } }),

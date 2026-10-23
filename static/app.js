@@ -677,7 +677,7 @@
     const prevScrollHeight = stream.scrollHeight;
     const prevScrollTop = stream.scrollTop;
     try {
-      const url = `/api/history/${encodeURIComponent(channel)}?before=${encodeURIComponent(oldest)}&limit=${state.pageSize}`;
+      const url = `/api/history/${encodeURIComponent(channel)}?before_id=${encodeURIComponent(arr[0].id)}&limit=${state.pageSize}`;
       const r = await fetch(url, { credentials: "same-origin" });
       if (!r.ok) throw new Error();
       const j = await r.json();
@@ -1997,7 +1997,9 @@
         // Optimistic bubble already evicted (rare) — fall through to append.
       }
       let presenceChanged = false;
-      if (msg.user_id != null && !state.online.has(msg.user_id)) {
+      // A call entry is written by the server for the caller, possibly after
+      // their socket closed, so it says nothing about their presence.
+      if (msg.type !== "call" && msg.user_id != null && !state.online.has(msg.user_id)) {
         state.online.add(msg.user_id);
         presenceChanged = true;
       }

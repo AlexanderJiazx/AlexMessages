@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -45,12 +44,15 @@ func NewEngine() *gin.Engine {
 		c.File(filepath.Join(db.BaseDir, "static", "sw.js"))
 	})
 
-	// Per-user upload dirs sit under data/uploads/<uid>/...; mount the root.
-	mountStatic(r, "/uploads", db.UploadRoot)
+	// Uploads require authentication and DM membership; they are never static.
 	// Profile photos live flat under data/avatars/.
 	mountStatic(r, "/avatars", db.AvatarRoot)
 	if dir := filepath.Join(db.BaseDir, "fonts"); isDir(dir) {
 		mountStatic(r, "/fonts", dir)
+	}
+	// Call ringtone and ringback.
+	if dir := filepath.Join(db.BaseDir, "sound"); isDir(dir) {
+		mountStatic(r, "/sound", dir)
 	}
 	if dir := filepath.Join(db.BaseDir, "static"); isDir(dir) {
 		mountStatic(r, "/static", dir)
@@ -98,38 +100,15 @@ func requireUser(c *gin.Context) (*db.User, bool) {
 // requestSessionToken extracts the session token from the cookie, an
 // Authorization: Bearer header, or a ?token= query param (the last is how the
 // native client authenticates the WebSocket upgrade, which can't set headers
-// on every platform).
+// on every platform). Query tokens are never accepted by REST or upload routes.
 func requestSessionToken(c *gin.Context) string {
-	if tok := httpx.Cookie(c, auth.UserCookie); tok != "" {
-		return tok
-	}
-	if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimSpace(h[len("Bearer "):])
-	}
-	return c.Query("token")
+	return httpx.SessionToken(c, c.Request.URL.Path == "/ws")
 }
 
 // ---------- static helpers ----------
 
-// noListFS wraps an http.FileSystem to 404 directory requests, matching
-// FastAPI's StaticFiles (which never serves directory listings).
-type noListFS struct{ fs http.FileSystem }
-
-func (n noListFS) Open(name string) (http.File, error) {
-	f, err := n.fs.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	stat, err := f.Stat()
-	if err == nil && stat.IsDir() {
-		_ = f.Close()
-		return nil, os.ErrNotExist
-	}
-	return f, nil
-}
-
 func mountStatic(r *gin.Engine, prefix, dir string) {
-	r.StaticFS(prefix, noListFS{http.Dir(dir)})
+	r.StaticFS(prefix, httpx.NoListFS{FS: http.Dir(dir)})
 }
 
 func isDir(p string) bool {

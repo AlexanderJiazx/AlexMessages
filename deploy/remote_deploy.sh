@@ -38,6 +38,12 @@ fi
 echo ">> Backing up current binaries"
 rm -rf bin.prev
 if [[ -d bin ]]; then cp -a bin bin.prev; fi
+rm -rf web/dist.prev
+if [[ -d web/dist ]]; then cp -a web/dist web/dist.prev; fi
+restore_web() {
+  rm -rf web/dist
+  if [[ -d web/dist.prev ]]; then mv web/dist.prev web/dist; fi
+}
 
 echo ">> Stopping: ${UNITS[*]}"
 sudo -n systemctl stop "${UNITS[@]}"
@@ -48,6 +54,7 @@ on_exit() {
   if [[ "$started" != "1" ]]; then
     echo "::warning::Deploy aborted before start — restarting the previous release"
     if [[ -d bin.prev ]]; then rm -rf bin; mv bin.prev bin; fi
+    restore_web
     sudo -n systemctl start "${UNITS[@]}" || true
   fi
 }
@@ -69,7 +76,19 @@ if [[ -f data/alexmessage.db ]]; then
 fi
 
 echo ">> Extracting release"
-tar xzf release.tgz
+# Extract first, then replace the whole React build, including hashed assets.
+release_stage="$(mktemp -d "$APP_DIR/.release.XXXXXX")"
+tar xzf release.tgz -C "$release_stage"
+if [[ ! -f "$release_stage/web/dist/index.html" ]]; then
+  echo "::error::release is missing web/dist/index.html" >&2
+  rm -rf "$release_stage"
+  exit 1
+fi
+rm -rf web/dist
+mkdir -p web
+mv "$release_stage/web/dist" web/dist
+cp -a "$release_stage/." .
+rm -rf "$release_stage"
 rm -f release.tgz
 
 echo ">> Starting: ${UNITS[*]}"
@@ -81,6 +100,7 @@ rollback() {
   if [[ -d bin.prev ]]; then
     rm -rf bin
     mv bin.prev bin
+    restore_web
     sudo -n systemctl restart "${UNITS[@]}" || true
   fi
 }
@@ -93,7 +113,7 @@ healthy=1
 for p in $HEALTH_PORTS; do
   # Any HTTP status means the listener is up (/api/me answers 401 when
   # unauthenticated); only a connection failure (000) counts as down.
-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$p/api/me" || echo 000)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$p/api/me")" || code=000
   if [[ "$code" == "000" ]]; then
     echo "::error::port $p did not respond" >&2
     healthy=0
@@ -107,5 +127,5 @@ if [[ "$healthy" != "1" ]]; then
   exit 1
 fi
 
-rm -rf bin.prev
+rm -rf bin.prev web/dist.prev
 echo ">> Deploy OK"

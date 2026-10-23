@@ -4,6 +4,7 @@ import {
   findNodeHandle,
   Image,
   Linking,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -21,8 +22,11 @@ import {
 } from "@alexmessages/shared";
 import { colors, radius } from "../theme";
 import { Icon } from "./Icon";
-import { useSession } from "../session";
+import { toast, useChatState, useSession } from "../session";
+import { File, Paths } from "expo-file-system";
+import * as Sharing from "expo-sharing";
 import { enablePlayback } from "../audio";
+import { CALL_BLOCKS_MEDIA, isCallLive, registerMedia } from "../media";
 
 const MAX_W = 260;
 
@@ -71,7 +75,7 @@ function useAttachmentUrl(path: string): string {
 
 /** Image with a reserved box while loading (dimensions from the server). */
 function ImageAttachment({ a, onPress }: { a: Attachment; onPress: (tag: number | null) => void }) {
-  const uri = useAttachmentUrl(a.url);
+  const { api } = useSession();
   const box = useRef<View>(null);
   const [state, setState] = useState<"loading" | "ok" | "err">("loading");
   const w = a.width | 0;
@@ -99,7 +103,7 @@ function ImageAttachment({ a, onPress }: { a: Attachment; onPress: (tag: number 
         </View>
       ) : (
         <Image
-          source={{ uri }}
+          source={api.mediaSource(a.url)}
           style={{ width: dw, height: dh }}
           resizeMode="cover"
           onLoad={() => setState("ok")}
@@ -110,12 +114,23 @@ function ImageAttachment({ a, onPress }: { a: Attachment; onPress: (tag: number 
   );
 }
 
-/** Inline video player via expo-video. */
+/** Inline video player via expo-video. Off while a call is live (see src/media.ts). */
 function VideoAttachment({ a }: { a: Attachment }) {
-  const uri = useAttachmentUrl(a.url);
-  const player = useVideoPlayer(uri, (p) => {
+  const { api } = useSession();
+  const call = useChatState().call;
+  const inCall = !!call && call.phase !== "ended";
+  const player = useVideoPlayer(api.mediaSource(a.url), (p) => {
     p.loop = false;
   });
+  useEffect(
+    () =>
+      registerMedia(() => {
+        if (!player.playing) return false;
+        player.pause();
+        return true;
+      }),
+    [player],
+  );
   const w = a.width | 0;
   const h = a.height | 0;
   const scale = w > 0 && h > 0 ? Math.min(1, MAX_W / w, 280 / h) : 1;
@@ -127,9 +142,21 @@ function VideoAttachment({ a }: { a: Attachment }) {
         player={player}
         style={{ width: dw, height: dh, borderRadius: radius.s }}
         contentFit="contain"
-        nativeControls
+        nativeControls={!inCall}
         accessibilityLabel={`Video ${a.name}`}
       />
+      {inCall && (
+        <Pressable
+          style={[StyleSheet.absoluteFill, styles.videoBlocked, { height: dh }]}
+          onPress={() => toast(CALL_BLOCKS_MEDIA)}
+          accessibilityRole="button"
+          accessibilityLabel={`Play video ${a.name}`}
+        >
+          <View style={styles.videoBlockedIcon}>
+            <Icon name="play" size={22} color={colors.surface} />
+          </View>
+        </Pressable>
+      )}
       <Text style={styles.mediaName} numberOfLines={1}>
         {a.name}
       </Text>
@@ -142,7 +169,8 @@ let currentPlayer: AudioPlayer | null = null;
 
 /** Shared play/pause for the in-bubble players. */
 function usePlayback(uri: string) {
-  const player = useAudioPlayer(uri);
+  const { api } = useSession();
+  const player = useAudioPlayer(api.mediaSource(uri));
   const status = useAudioPlayerStatus(player);
 
   useEffect(() => {
@@ -159,9 +187,24 @@ function usePlayback(uri: string) {
     [player],
   );
 
+  // A call stops it (see src/media.ts).
+  useEffect(
+    () =>
+      registerMedia(() => {
+        if (!player.playing) return false;
+        player.pause();
+        return true;
+      }),
+    [player],
+  );
+
   const toggle = useCallback(async () => {
     if (status.playing) {
       player.pause();
+      return;
+    }
+    if (isCallLive()) {
+      toast(CALL_BLOCKS_MEDIA);
       return;
     }
     // Recording leaves the session in a mode the silent switch mutes.
@@ -180,15 +223,15 @@ const VOICE_BARS = 30;
 const peakCache = new Map<string, Promise<{ peaks: number[]; duration: number } | null>>();
 
 /** Real envelope for WAV clips (web + iOS recordings); null otherwise. */
-function loadPeaks(uri: string, name: string) {
+function loadPeaks(uri: string, name: string, headers: Record<string, string>) {
   if (!/\.wav$/i.test(name)) return Promise.resolve(null);
-  let p = peakCache.get(uri);
+  let p = peakCache.get(uri + (headers.Authorization || ""));
   if (!p) {
-    p = fetch(uri)
+    p = fetch(uri, { headers })
       .then((r) => (r.ok ? r.arrayBuffer() : null))
       .then((buf) => (buf ? wavPeaks(buf, VOICE_BARS) : null))
       .catch(() => null);
-    peakCache.set(uri, p);
+    peakCache.set(uri + (headers.Authorization || ""), p);
   }
   return p;
 }
@@ -213,13 +256,14 @@ function fmtClock(sec: number): string {
 function VoiceAttachment({ a, mine }: { a: Attachment; mine: boolean }) {
   const uri = useAttachmentUrl(a.url);
   const { player, status, toggle } = usePlayback(uri);
+  const { api } = useSession();
   const [peaks, setPeaks] = useState(() => placeholderPeaks(a.url));
   const [decodedDur, setDecodedDur] = useState(0);
   const [waveW, setWaveW] = useState(0);
 
   useEffect(() => {
     let live = true;
-    void loadPeaks(uri, a.name).then((d) => {
+    void loadPeaks(uri, a.name, api.mediaSource(a.url).headers).then((d) => {
       if (!live || !d) return;
       setPeaks(d.peaks);
       setDecodedDur(d.duration);
@@ -316,10 +360,20 @@ function AudioFileAttachment({ a, mine }: { a: Attachment; mine: boolean }) {
 /** Generic file — opens via the system browser/handler. */
 function FileAttachment({ a, mine }: { a: Attachment; mine: boolean }) {
   const uri = useAttachmentUrl(a.url);
+  const { api } = useSession();
+  const openFile = async () => {
+    try {
+      if (Platform.OS === "web") { await Linking.openURL(uri); return; }
+      const source = api.mediaSource(a.url);
+      const dest = new File(Paths.cache, a.name.replace(/[\\/:]/g, "_") || "attachment");
+      const file = await File.downloadFileAsync(source.uri, dest, {headers: source.headers, idempotent: true});
+      await Sharing.shareAsync(file.uri, {mimeType: a.mime});
+    } catch { toast("Couldn't open the file", true); }
+  };
   return (
     <Pressable
       style={[styles.file, mine && styles.fileMine]}
-      onPress={() => void Linking.openURL(uri).catch(() => {})}
+      onPress={() => void openFile()}
       accessibilityLabel={`Open file ${a.name}`}
     >
       <View style={[styles.fileIco, mine && styles.fileIcoMine]}>
@@ -360,6 +414,19 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: colors.muted,
     maxWidth: MAX_W,
+  },
+  videoBlocked: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  videoBlockedIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    paddingLeft: 3,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(27,36,31,0.55)",
   },
   voice: {
     flexDirection: "row",

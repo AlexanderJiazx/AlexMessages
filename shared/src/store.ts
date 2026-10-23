@@ -14,12 +14,15 @@
  */
 
 import { ApiClient } from "./api";
+import { CallManager, type CallPlatform, type CallSession } from "./call";
 import { ChatSocket } from "./socket";
 import { dmChannelFor, dmPeerOf, isDM, parseDMChannel } from "./dm";
 import { dmStateFromPayload } from "./api";
+import { callMissedBy } from "./format";
 import type {
   Attachment,
   BroadcastMessage,
+  CallMedia,
   ClientMessage,
   DmState,
   DmThreadRef,
@@ -65,6 +68,8 @@ export interface ChatState {
   pushSubscribed: boolean;
   /** True once the first init frame has been applied. */
   ready: boolean;
+  /** This device's call — live, or just ended (see CallManager). */
+  call: CallSession | null;
 }
 
 const initialState = (): ChatState => ({
@@ -88,6 +93,7 @@ const initialState = (): ChatState => ({
   maxUpload: 20 * 1024 * 1024,
   pushSubscribed: false,
   ready: false,
+  call: null,
 });
 
 export interface ToastEvent {
@@ -99,6 +105,9 @@ export interface NotifyEvent {
   channel: string;
   title: string;
   body: string;
+  /** "call": a call is ringing while the app is in the background;
+   *  "missed_call": the message that logs a call this user missed. */
+  kind?: "message" | "call" | "missed_call";
 }
 
 export interface ChatStoreOptions {
@@ -120,6 +129,8 @@ export interface ChatStoreOptions {
   debug?: (level: string, event: string, message: string, context?: unknown) => void;
   /** Called when the session is rejected (WS close 4401 / 401 on /api/me). */
   onUnauthorized?: () => void;
+  /** WebRTC for calls; null/absent = this client can't place or take calls. */
+  callPlatform?: CallPlatform | null;
 }
 
 /** Minimal storage contract so the store runs without window.localStorage. */
@@ -142,13 +153,34 @@ export class ChatStore {
   private opts: ChatStoreOptions;
   private socket: ChatSocket | null = null;
   private listeners = new Set<Listener>();
-  private pending: Record<string, { channel: string; timer: ReturnType<typeof setTimeout> | null }> = {};
+  private pending: Record<string, { channel: string; timer: ReturnType<typeof setTimeout> | null; message: ChatMessage; edit?: string }> = {};
   /** Whether the app surface is currently visible (drives read-marking). */
   private foreground = true;
+  /** This device's side of DM calls; its session is mirrored in state.call. */
+  readonly calls: CallManager;
 
   constructor(opts: ChatStoreOptions) {
     this.opts = opts;
     this.api = opts.api;
+    this.calls = new CallManager({
+      platform: opts.callPlatform ?? null,
+      send: (m) => this.send(m),
+      me: () => this.state.me,
+      changed: (session) => {
+        this.state.call = session;
+        this.emit();
+      },
+      toast: (text, isErr) => this.toast(text, isErr),
+      debug: (level, event, message, context) => this.debug(level, event, message, context),
+      foreground: () => this.foreground,
+      notifyIncoming: (session) =>
+        this.opts.onNotify?.({
+          channel: session.channel,
+          title: session.peer.display_name || session.peer.username,
+          body: session.media === "video" ? "Incoming video call" : "Incoming voice call",
+          kind: "call",
+        }),
+    });
   }
 
   // ---------- plumbing ----------
@@ -173,6 +205,8 @@ export class ChatStore {
 
   /** Platform tells the store whether the UI is in the foreground. */
   setForeground(visible: boolean): void {
+    // The server rings a hidden device through Web Push as well.
+    if (visible !== this.foreground) this.send({ type: "visibility", visible });
     this.foreground = visible;
     if (visible && this.state.activeChannel && isDM(this.state.activeChannel) && this.isUnread(this.state.activeChannel)) {
       void this.markRead(this.state.activeChannel, { silent: true });
@@ -194,6 +228,8 @@ export class ChatStore {
           this.state.connState = "online";
           this.emit();
         } else if (status === "connecting") {
+          // The socket just closed; a call's signals wait for the resume.
+          this.calls.linkDown();
           if (this.state.connState !== "reconnecting") {
             this.state.connState = "connecting";
             this.emit();
@@ -217,7 +253,10 @@ export class ChatStore {
   }
 
   private send(payload: ClientMessage): void {
-    this.debug("debug", "ws_send", payload.type, "channel" in payload ? { channel: payload.channel } : undefined);
+    // Call signals (ICE candidates by the dozen) would flood the debug console.
+    if (payload.type !== "call_signal") {
+      this.debug("debug", "ws_send", payload.type, "channel" in payload ? { channel: payload.channel } : undefined);
+    }
     this.socket?.send(payload);
   }
 
@@ -297,15 +336,20 @@ export class ChatStore {
     const st = this.dmStateFor(channel);
     let lastOwn: ChatMessage | null = null;
     for (let i = arr.length - 1; i >= 0; i--) {
-      if (arr[i].type === "system") continue;
+      // Call entries carry no delivery state.
+      if (arr[i].type === "system" || arr[i].type === "call") continue;
       lastOwn = arr[i].user_id === this.state.me.id ? arr[i] : null;
       break;
     }
     if (!lastOwn || lastOwn._status === "failed") return null;
-    if (st.peerLastReadAt && (lastOwn.created_at || 0) <= st.peerLastReadAt) {
+    if (lastOwn._status === "sending") return {messageId: lastOwn.id, label: "Sending…"};
+    const read = lastOwn.position != null && st.peerLastReadPosition != null
+      ? lastOwn.position <= st.peerLastReadPosition
+      : !!st.peerLastReadAt && (lastOwn.created_at || 0) <= st.peerLastReadAt;
+    if (read) {
       return { messageId: lastOwn.id, label: "Read" };
     }
-    return { messageId: lastOwn.id, label: lastOwn._status === "sending" ? "Sending…" : "Delivered" };
+    return { messageId: lastOwn.id, label: "Delivered" };
   }
 
   // ---------- event reduction ----------
@@ -329,10 +373,20 @@ export class ChatStore {
         this.applyProfileUpdate(data.profile);
         break;
       case "dm_read":
-        this.applyDmRead(data.channel, data.user_id, data.last_read_at);
+        this.applyDmRead(data.channel, data.user_id, data.last_read_at, data.last_read_position);
         break;
       case "dm_opened":
         this.applyDmOpened(data);
+        break;
+      case "call_outgoing":
+      case "call_incoming":
+      case "call_ringing":
+      case "call_accepted":
+      case "call_signal":
+      case "call_resumed":
+      case "call_ended":
+      case "call_error":
+        this.calls.handle(data);
         break;
       case "pong":
         break;
@@ -348,7 +402,15 @@ export class ChatStore {
     s.contacts = new Set(data.contacts || []);
     s.dmThreads = data.dm_threads || [];
     s.online = new Set(data.online || []);
-    s.history = (data.history || {}) as Record<string, ChatMessage[]>;
+    const previousChannel = s.activeChannel;
+    s.history = Object.fromEntries(Object.entries(data.history || {}).map(([ch, messages]) => [ch, this.mergePending(ch, messages)]));
+    for (const pending of Object.values(this.pending)) {
+      if (!s.history[pending.channel]) s.history[pending.channel] = this.mergePending(pending.channel, []);
+      if (!s.dmThreads.some((t) => t.channel === pending.channel)) {
+        const peer = this.peerOf(pending.channel);
+        if (peer != null) s.dmThreads.push({channel: pending.channel, peer_id: peer});
+      }
+    }
     s.historyHasMore = data.history_has_more || {};
     s.historyLoading = {};
     s.pageSize = data.page_size || PAGE_SIZE_DEFAULT;
@@ -358,7 +420,7 @@ export class ChatStore {
       s.dmState[ch] = dmStateFromPayload(st);
     }
     const saved = this.readLastChannel();
-    s.activeChannel = this.channelExists(saved) ? saved : null;
+    s.activeChannel = this.channelExists(previousChannel) ? previousChannel : this.channelExists(saved) ? saved : null;
     s.ready = true;
     this.debug("info", "init", "Session initialized", {
       users: (data.users || []).length,
@@ -382,6 +444,36 @@ export class ChatStore {
         void this.markRead(s.activeChannel, { silent: true });
       }
     }
+    // Every socket starts out "visible" on the server.
+    if (!this.foreground) this.send({ type: "visibility", visible: false });
+    this.calls.linkReady();
+  }
+
+  /** Keep failed/sending messages across server snapshots, reconciling saved nonces. */
+  private mergePending(channel: string, incoming: HistoryMessage[]): ChatMessage[] {
+    const messages = incoming.slice() as ChatMessage[];
+    for (const [cid, p] of Object.entries(this.pending)) {
+      if (p.channel !== channel) continue;
+      const index = messages.findIndex((m) => m.client_id === cid && m.user_id === this.state.me?.id);
+      if (index >= 0) {
+        this.reconcilePending(cid, messages[index]);
+        messages[index] = p.message;
+      } else messages.push(p.message);
+    }
+    return messages;
+  }
+
+  private reconcilePending(cid: string, message: HistoryMessage): void {
+    const p = this.pending[cid];
+    if (!p) return;
+    if (p.timer) clearTimeout(p.timer);
+    delete this.pending[cid];
+    Object.assign(p.message, message, {_status: "delivered"});
+    if (p.edit && p.edit !== message.text) {
+      p.message.text = p.edit;
+      p.message.edited_at = Math.floor(Date.now() / 1000);
+      this.send({type: "edit", id: message.id, text: p.edit});
+    }
   }
 
   private applyMessage(channel: string, msg: BroadcastMessage): void {
@@ -394,25 +486,26 @@ export class ChatStore {
     if (msg.client_id && this.pending[msg.client_id] && s.me && msg.user_id === s.me.id) {
       const cid = msg.client_id;
       const p = this.pending[cid];
-      if (p?.timer) clearTimeout(p.timer);
-      delete this.pending[cid];
+      const local = p.message;
+      this.reconcilePending(cid, msg);
       const arr = s.history[channel] || [];
-      const local = arr.find((x) => x.client_id === cid);
-      if (local) {
-        local.id = msg.id;
-        local.created_at = msg.created_at;
-        local.edited_at = msg.edited_at ?? null;
-        local._status = "delivered";
-        this.emit();
-        return;
+      if (!arr.includes(local)) {
+        const existing = arr.findIndex((m) => m.id === msg.id);
+        if (existing >= 0) arr[existing] = local;
+        else arr.push(local);
+        s.history[channel] = arr;
       }
-      // Optimistic bubble already evicted — fall through to append.
+      this.emit();
+      return;
     }
 
-    if (msg.user_id != null && !s.online.has(msg.user_id)) {
+    // A message proves its author's socket is up — except a call entry, which
+    // the server writes for the caller, possibly after their socket closed.
+    if (msg.type !== "call" && msg.user_id != null && !s.online.has(msg.user_id)) {
       s.online.add(msg.user_id);
     }
     const arr = (s.history[channel] = s.history[channel] || []);
+    if (arr.some((m) => m.id === msg.id)) return;
     arr.push(msg as ChatMessage);
     while (arr.length > HISTORY_CAP) arr.shift();
 
@@ -422,7 +515,9 @@ export class ChatStore {
     }
 
     let notify: NotifyEvent | null = null;
-    if (isDM(channel) && msg.user_id != null && s.me && msg.user_id !== s.me.id) {
+    // An answered or declined call is no news to the callee (as on the server).
+    const quietCall = msg.type === "call" && !callMissedBy(msg.call, s.me?.id);
+    if (!quietCall && isDM(channel) && msg.user_id != null && s.me && msg.user_id !== s.me.id) {
       const st = this.dmStateFor(channel);
       if (channel === s.activeChannel && this.foreground) {
         // Actively reading — mark read instead of incrementing unread.
@@ -436,6 +531,7 @@ export class ChatStore {
         s.dmState[channel] = { ...st, unreadCount: (st.unreadCount || 0) + 1 };
         notify = {
           channel,
+          kind: msg.type === "call" ? "missed_call" : "message",
           title: msg.author?.display_name || "New message",
           body: msg.text
             ? msg.text.replace(/\s+/g, " ").slice(0, 120)
@@ -468,19 +564,19 @@ export class ChatStore {
     this.emit();
   }
 
-  private applyDmRead(channel: string, userId: number, lastReadAt: number): void {
+  private applyDmRead(channel: string, userId: number, lastReadAt: number, position?: number): void {
     const st = this.dmStateFor(channel);
     if (this.state.me && userId === this.state.me.id) {
       this.state.dmState[channel] = { ...st, lastReadAt: lastReadAt || st.lastReadAt, unreadCount: 0 };
     } else {
-      this.state.dmState[channel] = { ...st, peerLastReadAt: lastReadAt || 0 };
+      this.state.dmState[channel] = { ...st, peerLastReadAt: lastReadAt || 0, peerLastReadPosition: position };
     }
     this.emit();
   }
 
   private applyDmOpened(data: Extract<ServerEvent, { type: "dm_opened" }>): void {
     const s = this.state;
-    s.history[data.channel] = (data.history || []) as ChatMessage[];
+    s.history[data.channel] = this.mergePending(data.channel, data.history || []);
     s.historyHasMore[data.channel] = !!data.has_more;
     if (!s.dmThreads.find((t) => t.channel === data.channel)) {
       s.dmThreads.push({ channel: data.channel, peer_id: data.peer_id });
@@ -596,7 +692,7 @@ export class ChatStore {
       attachments: optimistic.attachments,
       client_id: cid,
     });
-    this.pending[cid] = { channel, timer: setTimeout(() => this.markSendFailed(channel, cid), SEND_TIMEOUT_MS) };
+    this.pending[cid] = { channel, message: optimistic, timer: setTimeout(() => this.markSendFailed(channel, cid), SEND_TIMEOUT_MS) };
     s.pendingAtt = [];
     s.replyTo = null;
     this.emit();
@@ -604,13 +700,13 @@ export class ChatStore {
   }
 
   private findOptimistic(channel: string, cid: string): ChatMessage | undefined {
-    return (this.state.history[channel] || []).find((m) => m.client_id === cid);
+    return (this.state.history[channel] || []).find((m) => m.client_id === cid) ?? this.pending[cid]?.message;
   }
 
   private markSendFailed(channel: string, cid: string): void {
     const p = this.pending[cid];
     if (p?.timer) clearTimeout(p.timer);
-    if (this.pending[cid]) this.pending[cid] = { channel, timer: null };
+    if (p) p.timer = null;
     const m = this.findOptimistic(channel, cid);
     if (!m) return;
     m._status = "failed";
@@ -633,7 +729,8 @@ export class ChatStore {
       attachments: m.attachments,
       client_id: cid,
     });
-    this.pending[cid] = { channel, timer: setTimeout(() => this.markSendFailed(channel, cid), SEND_TIMEOUT_MS) };
+    if (p?.timer) clearTimeout(p.timer);
+    this.pending[cid] = { ...p, channel, message: m, timer: setTimeout(() => this.markSendFailed(channel, cid), SEND_TIMEOUT_MS) };
     this.emit();
   }
 
@@ -641,7 +738,9 @@ export class ChatStore {
   editMessage(m: ChatMessage, text: string): void {
     const trimmed = text.trim();
     if (!trimmed || trimmed === m.text) return;
-    this.send({ type: "edit", id: m.id, text: trimmed });
+    const pending = m.client_id ? this.pending[m.client_id] : undefined;
+    if (pending) pending.edit = trimmed;
+    else this.send({ type: "edit", id: m.id, text: trimmed });
     m.text = trimmed;
     m.edited_at = Math.floor(Date.now() / 1000);
     this.emit();
@@ -652,12 +751,13 @@ export class ChatStore {
     const s = this.state;
     if (!channel || s.historyLoading[channel] || !s.historyHasMore[channel]) return;
     const arr = s.history[channel] || [];
-    const oldest = arr.length ? arr[0].created_at : null;
+    const first = arr.find((m) => m._status !== "sending" && m._status !== "failed");
+    const oldest = first?.created_at ?? null;
     if (oldest == null) return;
     s.historyLoading[channel] = true;
     this.emit();
     try {
-      const j = await this.api.history(channel, oldest, s.pageSize);
+      const j = await this.api.history(channel, oldest, s.pageSize, first?.id);
       const older = (j.messages || []) as ChatMessage[];
       if (!older.length) {
         s.historyHasMore[channel] = false;
@@ -832,12 +932,19 @@ export class ChatStore {
     this.switchChannel(channel);
   }
 
+  /** Calls a DM peer (see CallManager.start). */
+  startCall(peerId: number, media: CallMedia): void {
+    const peer = this.userFor(peerId);
+    if (peer) void this.calls.start(peer, media);
+  }
+
   /** Full reset — used on logout. */
   reset(): void {
     for (const p of Object.values(this.pending)) {
       if (p.timer) clearTimeout(p.timer);
     }
     this.pending = {};
+    this.calls.destroy();
     this.disconnect();
     this.state = initialState();
     this.emit();

@@ -14,8 +14,8 @@ export default function DataPage() {
     setBusy(true);
     try {
       const data = await api.exportData();
-      const path = `${FileSystem.Paths.cache}alex-messages-export.json`;
-      const file = new FileSystem.File(path);
+      const file = new FileSystem.File(FileSystem.Paths.cache, "alex-messages-export.json");
+      file.create({ overwrite: true });
       file.write(JSON.stringify(data, null, 2));
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(file.uri, { mimeType: "application/json", dialogTitle: "Export my data" });

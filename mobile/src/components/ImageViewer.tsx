@@ -20,7 +20,7 @@ export function ImageViewer({
         <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Close" />
         {url && (
           <Image
-            source={{ uri: url.startsWith("http") ? url : api.url(url) }}
+            source={api.mediaSource(url)}
             style={styles.img}
             contentFit="contain"
             accessibilityLabel="Full size image"

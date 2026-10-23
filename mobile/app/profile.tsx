@@ -21,6 +21,9 @@ export default function ProfileScreen() {
   const online = valid && s.online.has(uid);
   const isContact = valid && s.contacts.has(uid);
   const isSelf = s.me?.id === uid;
+  const canCall = store.calls.supported && !!u;
+  // One call at a time: the call buttons wait until the current call ends.
+  const inCall = !!s.call && s.call.phase !== "ended";
 
   const { width } = useWindowDimensions();
   const wide = width >= WIDE_BREAKPOINT;
@@ -56,6 +59,26 @@ export default function ProfileScreen() {
         {!isSelf && valid && (
           <View style={styles.actions}>
             <Action icon="chatbubble" label="Message" onPress={message} />
+            {/* The call screen opens over this card, and ending the call
+                comes back to it. */}
+            {canCall && (
+              <>
+                <Action
+                  icon="call"
+                  label="Voice Call"
+                  a11y={`Voice call ${u.display_name || u.username}`}
+                  disabled={inCall}
+                  onPress={() => store.startCall(uid, "audio")}
+                />
+                <Action
+                  icon="videocam"
+                  label="Video Call"
+                  a11y={`Video call ${u.display_name || u.username}`}
+                  disabled={inCall}
+                  onPress={() => store.startCall(uid, "video")}
+                />
+              </>
+            )}
             <Action
               icon={isContact ? "person-remove" : "person-add"}
               label={isContact ? "Remove" : "Add Contact"}
@@ -83,19 +106,23 @@ function Action({
   icon,
   label,
   a11y,
+  disabled,
   onPress,
 }: {
   icon: IconName;
   label: string;
   a11y?: string;
+  disabled?: boolean;
   onPress: () => void;
 }) {
   return (
     <Pressable
-      style={({ pressed }) => [styles.action, pressed && { opacity: 0.7 }]}
+      style={({ pressed }) => [styles.action, pressed && { opacity: 0.7 }, disabled && styles.actionOff]}
       onPress={onPress}
+      disabled={disabled}
       accessibilityRole="button"
       accessibilityLabel={a11y || label}
+      accessibilityState={{ disabled: !!disabled }}
     >
       <Icon name={icon} size={22} color={colors.sage} />
       <Text style={styles.actionLabel}>{label}</Text>
@@ -169,6 +196,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderRadius: 14,
     backgroundColor: colors.surface,
+  },
+  actionOff: {
+    opacity: 0.4,
   },
   actionLabel: {
     ...type.caption,

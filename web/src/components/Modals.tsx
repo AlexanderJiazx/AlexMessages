@@ -137,6 +137,8 @@ export function DeleteAccountModal({ on, onClose }: { on: boolean; onClose: () =
     }
     try {
       await api.deleteAccount(pw);
+      // Only once the account is gone, so a mistyped password keeps the call.
+      store.calls.hangUp();
       window.location.href = "/login";
     } catch (e) {
       setErr((e as { detail?: string }).detail || "Couldn't delete account.");
@@ -208,6 +210,14 @@ export function ProfileSheet({
   const u = uid != null ? s.users[uid] : null;
   const online = uid != null && s.online.has(uid);
   const isContact = uid != null && s.contacts.has(uid);
+  const canCall = uid != null && !!u && uid !== s.me?.id && store.calls.supported;
+  const inCall = !!s.call && s.call.phase !== "ended";
+  // Like Message, a call closes the sheet: the call view takes over.
+  const call = (media: "audio" | "video") => {
+    if (uid == null) return;
+    onClose();
+    store.startCall(uid, media);
+  };
 
   return (
     <Modal on={uid != null} onClose={onClose}>
@@ -232,9 +242,10 @@ export function ProfileSheet({
               {u?.bio || "No bio yet."}
             </div>
           </div>
-          <div className="btn-row">
+          {/* The mobile contact card's row: equal tiles, one line at any width. */}
+          <div className="profile-actions">
             <button
-              className="btn primary"
+              className="profile-action"
               onClick={() => {
                 if (uid != null) {
                   onClose();
@@ -242,11 +253,30 @@ export function ProfileSheet({
                 }
               }}
             >
-              <Icon name="mail" size={13} sw={1.8} /> Message
+              <Icon name="mail" size={18} sw={1.8} />
+              Message
             </button>
+            {canCall && (
+              <>
+                <button className="profile-action" disabled={inCall} onClick={() => call("audio")}>
+                  <Icon name="phone" size={18} sw={1.8} />
+                  Voice call
+                </button>
+                <button className="profile-action" disabled={inCall} onClick={() => call("video")}>
+                  <Icon name="video" size={18} sw={1.8} />
+                  Video call
+                </button>
+              </>
+            )}
             {uid != null && (
-              <button className="btn" onClick={() => void store.toggleContact(uid)}>
-                {isContact ? "Remove from contacts" : "Add to contacts"}
+              <button
+                className="profile-action"
+                aria-label={isContact ? "Remove from contacts" : "Add to contacts"}
+                title={isContact ? "Remove from contacts" : "Add to contacts"}
+                onClick={() => void store.toggleContact(uid)}
+              >
+                <Icon name={isContact ? "userMinus" : "userPlus"} size={18} sw={1.8} />
+                {isContact ? "Remove" : "Add contact"}
               </button>
             )}
           </div>

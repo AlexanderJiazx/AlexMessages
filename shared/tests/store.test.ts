@@ -90,6 +90,72 @@ function connectAndInit(store: ChatStore, sockets: MockSocket[], init?: ServerEv
   sockets[0].event(init ?? initFrame());
 }
 
+describe("review regressions", () => {
+  it("retains failed text and attachments when reconnect init has no thread", () => {
+    vi.useFakeTimers();
+    const { store, sockets } = makeHarness();
+    connectAndInit(store, sockets);
+    store.switchChannel("dm:1:2");
+    const attachment = {name:"file.txt",url:"/uploads/1/file.txt",mime:"text/plain",size:3,width:0,height:0};
+    const sent = store.sendMessage("keep this", [attachment])!;
+    vi.advanceTimersByTime(SEND_TIMEOUT_MS + 1);
+    store.handleEvent(initFrame({dm_threads:[],history:{}}));
+    const messages = store.state.history["dm:1:2"];
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({text:"keep this",_status:"failed",attachments:[attachment]});
+    expect(store.state.dmThreads[0].channel).toBe("dm:1:2");
+    store.retrySend(sent.clientId);
+    expect(JSON.parse(sockets[0].sent[sockets[0].sent.length-1])).toMatchObject({type:"message",client_id:sent.clientId,text:"keep this"});
+    store.reset();
+    vi.useRealTimers();
+  });
+
+  it("sends an optimistic edit only after the server assigns a message id", () => {
+    vi.useFakeTimers();
+    const {store,sockets} = makeHarness();
+    connectAndInit(store,sockets);store.switchChannel("dm:1:2");
+    const sent=store.sendMessage("original")!;
+    const local=store.state.history["dm:1:2"][0];
+    store.editMessage(local,"edited before echo");
+    expect(sockets[0].sent.map((x)=>JSON.parse(x)).filter((x)=>x.type==="edit")).toHaveLength(0);
+    store.handleEvent({type:"message",channel:"dm:1:2",message:{...local,id:"server-id",client_id:sent.clientId,text:"original",position:1001,created_at:100,edited_at:null}});
+    expect(local).toMatchObject({id:"server-id",text:"edited before echo",_status:"delivered"});
+    expect(JSON.parse(sockets[0].sent[sockets[0].sent.length-1])).toMatchObject({type:"edit",id:"server-id",text:"edited before echo"});
+    store.reset();vi.useRealTimers();
+  });
+
+  it("reconciles a saved nonce from init without duplicating the pending bubble", () => {
+    vi.useFakeTimers();
+    const {store,sockets}=makeHarness();connectAndInit(store,sockets);store.switchChannel("dm:1:2");
+    const sent=store.sendMessage("saved while disconnected")!;
+    const saved={...store.state.history["dm:1:2"][0],id:"persisted",created_at:100,position:2001,client_id:sent.clientId};
+    store.handleEvent(initFrame({history:{"dm:1:2":[saved]}}));
+    expect(store.state.history["dm:1:2"]).toHaveLength(1);
+    expect(store.state.history["dm:1:2"][0]._status).toBe("delivered");
+    vi.advanceTimersByTime(SEND_TIMEOUT_MS+1);
+    expect(store.state.history["dm:1:2"][0]._status).toBe("delivered");
+    store.handleEvent({type:"message",channel:"dm:1:2",message:saved});
+    expect(store.state.history["dm:1:2"]).toHaveLength(1);
+    store.reset();vi.useRealTimers();
+  });
+
+  it("does not mark a later same-second message as read", () => {
+    const {store,sockets}=makeHarness();connectAndInit(store,sockets);store.switchChannel("dm:1:2");
+    store.handleEvent({type:"message",channel:"dm:1:2",message:{id:"second",channel:"dm:1:2",type:"message",user_id:1,text:"later",reply_to:null,attachments:[],created_at:100,position:1002,edited_at:null}});
+    store.handleEvent({type:"dm_read",channel:"dm:1:2",user_id:2,last_read_at:100,last_read_position:1001});
+    expect(store.deliveryStatus("dm:1:2")?.label).toBe("Delivered");
+    store.handleEvent({type:"dm_read",channel:"dm:1:2",user_id:2,last_read_at:100,last_read_position:1002});
+    expect(store.deliveryStatus("dm:1:2")?.label).toBe("Read");store.reset();
+  });
+
+  it("paginates with the persisted message id when timestamps tie", async () => {
+    const {store,sockets,api}=makeHarness();
+    const history=vi.spyOn(api,"history").mockResolvedValue({channel:"dm:1:2",messages:[],has_more:false});
+    connectAndInit(store,sockets,initFrame({history:{"dm:1:2":[{id:"cursor",channel:"dm:1:2",type:"message",user_id:2,text:"oldest",reply_to:null,attachments:[],created_at:100,edited_at:null}]},history_has_more:{"dm:1:2":true}}));
+    await store.loadOlder("dm:1:2");expect(history).toHaveBeenCalledWith("dm:1:2",100,50,"cursor");store.reset();
+  });
+});
+
 describe("ChatStore init", () => {
   beforeEach(() => vi.useRealTimers());
 
@@ -212,6 +278,68 @@ describe("incoming messages", () => {
     sockets[0].event({ type: "message", channel: "dm:1:2", message: mkMsg("m3", 2, "ping") });
     expect(seen).toHaveLength(1);
     expect(seen[0].channel).toBe("dm:1:2");
+    expect((seen[0] as { kind?: string }).kind).toBe("message");
+  });
+
+  it("tags a missed call's notification and skips an answered call's", () => {
+    const { store, sockets } = makeHarness();
+    const seen: { channel: string; kind?: string }[] = [];
+    (store as unknown as { opts: { onNotify: (n: { channel: string }) => void } }).opts.onNotify = (
+      n,
+    ) => seen.push(n);
+    connectAndInit(store, sockets);
+    store.setForeground(false);
+    const callMsg = (id: string, status: string) => ({
+      ...mkMsg(id, 2, status === "completed" ? "Voice call · 0:05" : "Missed voice call"),
+      type: "call",
+      call: {
+        id: 1,
+        media: "audio" as const,
+        status,
+        caller_id: 2,
+        callee_id: 1,
+        started_at: 1000,
+        answered_at: status === "completed" ? 1001 : null,
+        ended_at: 1006,
+        duration: status === "completed" ? 5 : 0,
+      },
+    });
+    sockets[0].event({ type: "message", channel: "dm:1:2", message: callMsg("c1", "completed") });
+    sockets[0].event({ type: "message", channel: "dm:1:2", message: callMsg("c2", "no_answer") });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].kind).toBe("missed_call");
+  });
+
+  it("a call entry leaves its offline caller offline", () => {
+    const { store, sockets } = makeHarness();
+    connectAndInit(store, sockets);
+    expect(store.state.online.has(2)).toBe(true);
+    // Bob's socket dropped; the server ends his call 30 s later and writes
+    // the entry in his name.
+    sockets[0].event({ type: "presence", online: [] });
+    sockets[0].event({
+      type: "message",
+      channel: "dm:1:2",
+      message: {
+        ...mkMsg("c1", 2, "Voice call · 0:05"),
+        type: "call",
+        call: {
+          id: 1,
+          media: "audio",
+          status: "completed",
+          caller_id: 2,
+          callee_id: 1,
+          started_at: 1000,
+          answered_at: 1001,
+          ended_at: 1006,
+          duration: 5,
+        },
+      },
+    });
+    expect(store.state.online.has(2)).toBe(false);
+    // A message Bob sent himself still proves he is back.
+    sockets[0].event({ type: "message", channel: "dm:1:2", message: mkMsg("m1", 2, "back") });
+    expect(store.state.online.has(2)).toBe(true);
   });
 });
 

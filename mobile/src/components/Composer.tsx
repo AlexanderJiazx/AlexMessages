@@ -25,8 +25,6 @@ import { GlassContainer } from "expo-glass-effect";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import * as Haptics from "expo-haptics";
-// Deep import (see Icon.tsx) — avoids bundling every vector-icon font.
-import MaterialCommunityIcons from "@expo/vector-icons/build/MaterialCommunityIcons";
 import { Host, Image as SFImage } from "./SwiftUI";
 import { fmtSize, nameFor, type Attachment } from "@alexmessages/shared";
 import { toast, useChatState, useSession } from "../session";
@@ -35,6 +33,7 @@ import { Icon } from "./Icon";
 import { Glyph, VoicePanel, type VoicePanelHandle, type VoicePhase } from "./DictationBar";
 import { GlassSurface } from "./Glass";
 import { GlassMenuButton, type MenuAction } from "./NativeMenu";
+import { CALL_BLOCKS_MEDIA, isCallLive } from "../media";
 
 const PILL_MIN = 44;
 const PILL_VOICE = 64;
@@ -239,6 +238,11 @@ export function Composer({
   }));
 
   const startVoice = () => {
+    // The call has the microphone (see src/media.ts).
+    if (isCallLive()) {
+      toast(CALL_BLOCKS_MEDIA);
+      return;
+    }
     Keyboard.dismiss();
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     setVoice("recording");
@@ -407,12 +411,18 @@ export function Composer({
   );
 }
 
+/** The drawn voice glyph: its height, and its bar heights as fractions of it. */
+const WAVE_GLYPH_H = 17;
+const WAVE_GLYPH = [0.4, 0.72, 1, 0.72, 0.4];
+
 /**
  * Voice-message glyph: the SF Symbol `waveform` on iOS 26 (rendered by
- * SwiftUI, non-interactive so the RN Pressable keeps the touch), Material's
- * waveform elsewhere. `ignoreSafeArea`: the Host's UIHostingController
- * otherwise applies the keyboard safe area, which pushes the glyph to the
- * top of the pill whenever the keyboard is up.
+ * SwiftUI, non-interactive so the RN Pressable keeps the touch). Elsewhere
+ * it is drawn as the same rounded bars as the app's own waveforms (the
+ * recorder, voice messages): the icon fonts only have a spiky seismograph
+ * waveform or square-ended bars. `ignoreSafeArea`: the Host's
+ * UIHostingController otherwise applies the keyboard safe area, which pushes
+ * the glyph to the top of the pill whenever the keyboard is up.
  */
 function WaveformIcon() {
   if (glassSupported) {
@@ -422,7 +432,13 @@ function WaveformIcon() {
       </Host>
     );
   }
-  return <MaterialCommunityIcons name="waveform" size={22} color={colors.muted} />;
+  return (
+    <View style={styles.waveGlyph}>
+      {WAVE_GLYPH.map((h, i) => (
+        <View key={i} style={[styles.waveGlyphBar, { height: Math.round(h * WAVE_GLYPH_H) }]} />
+      ))}
+    </View>
+  );
 }
 
 /** Staged attachment — image thumbnail or a compact file chip, with an ✕. */
@@ -530,6 +546,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginRight: 2,
+  },
+  waveGlyph: {
+    height: WAVE_GLYPH_H,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2.5,
+  },
+  waveGlyphBar: {
+    width: 2,
+    borderRadius: 1,
+    backgroundColor: colors.muted,
   },
   replyBar: {
     flexDirection: "row",

@@ -72,7 +72,7 @@ export class ApiClient {
     return this.baseUrl + path;
   }
 
-  private headers(extra?: Record<string, string>): Record<string, string> {
+  headers(extra?: Record<string, string>): Record<string, string> {
     const h: Record<string, string> = { ...(extra || {}) };
     if (this.token) h["Authorization"] = `Bearer ${this.token}`;
     return h;
@@ -97,6 +97,14 @@ export class ApiClient {
       throw new ApiError(res.status, detail);
     }
     return body as T;
+  }
+
+  /** Native media requests carry bearer auth without putting it in URLs. */
+  mediaSource(path: string): { uri: string; headers: Record<string, string> } {
+    const uri = /^https?:\/\//i.test(path) ? path : this.url(path);
+    const sameOrigin = (path.startsWith("/") && !path.startsWith("//")) ||
+      (!!this.baseUrl && new URL(uri).origin === new URL(this.baseUrl).origin);
+    return { uri, headers: sameOrigin ? this.headers() : {} };
   }
 
   private post<T>(path: string, body?: unknown): Promise<T> {
@@ -153,7 +161,7 @@ export class ApiClient {
     return this.json("/api/me/avatar", { method: "DELETE" });
   }
 
-  changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
+  changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean; session_token: string }> {
     return this.post("/api/me/password", {
       current_password: currentPassword,
       new_password: newPassword,
@@ -199,9 +207,10 @@ export class ApiClient {
     return this.json("/api/upload", { method: "POST", body: fd });
   }
 
-  history(channel: string, before?: number, limit?: number): Promise<HistoryResponse> {
+  history(channel: string, before?: number, limit?: number, beforeId?: string): Promise<HistoryResponse> {
     const qs = new URLSearchParams();
-    if (before != null) qs.set("before", String(before));
+    if (beforeId) qs.set("before_id", beforeId);
+    else if (before != null) qs.set("before", String(before));
     if (limit != null) qs.set("limit", String(limit));
     const suffix = qs.size ? `?${qs.toString()}` : "";
     return this.json(`/api/history/${encodeURIComponent(channel)}${suffix}`);
@@ -291,6 +300,7 @@ export function dmStateFromPayload(s: Partial<DmStatePayload> | undefined, fallb
     clearedAt: s?.cleared_at ?? f.clearedAt,
     unreadCount: s?.unread_count ?? f.unreadCount,
     peerLastReadAt: s?.peer_last_read_at ?? f.peerLastReadAt,
+    ...(s?.peer_last_read_position != null ? {peerLastReadPosition: s.peer_last_read_position} : f.peerLastReadPosition != null ? {peerLastReadPosition: f.peerLastReadPosition} : {}),
   };
 }
 
@@ -309,4 +319,17 @@ function appendFile(
     const name = file instanceof File ? file.name : "file";
     fd.append("file", file, name);
   }
+}
+
+/** Production uses a separate admin virtual host; development uses port 8001. */
+export function adminPanelUrl(serverUrl: string): string {
+  const url = new URL(serverUrl);
+  if (url.hostname === "messages.alexanderjia.com") {
+    return "https://admin.alexanderjia.com/";
+  }
+  url.port = "8001";
+  url.pathname = "/";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }

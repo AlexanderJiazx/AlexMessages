@@ -20,7 +20,8 @@ export const EdgeBlur = Stub as unknown as React.ComponentType<EdgeBlurProps>;
 export function previewImage(
   _url: string,
   _sourceTag: number | null,
-  _name?: string
+  _name?: string,
+  _headers?: Record<string, string>
 ): Promise<void> {
   return Promise.reject(new Error("previewImage is iOS-only"));
 }

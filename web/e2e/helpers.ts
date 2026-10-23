@@ -37,8 +37,8 @@ export async function openDM(page: Page, peerName: string) {
 }
 
 /** Sign in as a user in a fresh browser context (for realtime two-party tests). */
-export async function loginAs(browser: Browser, username: string) {
-  const ctx = await browser.newContext({ permissions: ["microphone"] });
+export async function loginAs(browser: Browser, username: string, permissions = ["microphone"]) {
+  const ctx = await browser.newContext({ permissions });
   const page = await ctx.newPage();
   await login(page, username);
   await dismissPushPrompt(page);

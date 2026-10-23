@@ -21,7 +21,8 @@ func DeleteExpiredSessions() (int64, error) {
 var maintenanceOnce sync.Once
 
 // StartBackgroundMaintenance launches a single goroutine that periodically
-// prunes expired sessions and caps the debug ring buffer. It is safe to call
+// deletes unreferenced uploads older than 24 hours (PruneUnusedUploads),
+// prunes expired sessions, and caps the debug ring buffer. It is safe to call
 // from every binary's main: only the first call starts the loop.
 func StartBackgroundMaintenance() {
 	maintenanceOnce.Do(func() {
@@ -38,6 +39,9 @@ func StartBackgroundMaintenance() {
 }
 
 func runMaintenance() {
+	if err := PruneUnusedUploads(time.Now()); err != nil {
+		fmt.Fprintf(os.Stderr, "[maintenance] upload prune: %v\n", err)
+	}
 	if _, err := DeleteExpiredSessions(); err != nil {
 		fmt.Fprintf(os.Stderr, "[maintenance] session prune: %v\n", err)
 	}

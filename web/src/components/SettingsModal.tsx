@@ -1,3 +1,4 @@
+import { adminPanelUrl } from "@shared/api";
 import { useEffect, useRef, useState } from "react";
 import { fmtAccountDate } from "@shared/format";
 import { api, store, toast } from "../client";
@@ -294,6 +295,9 @@ function AccountTab({ onOpenDelete }: { onOpenDelete: () => void }) {
   }
 
   async function logout() {
+    // Hang up first, while the session can still tell the server: the peer
+    // sees the call end at once, and leaving the page asks nothing.
+    store.calls.hangUp();
     try {
       await api.logout();
     } catch {
@@ -471,8 +475,7 @@ function DataTab() {
 // ---------- Admin tab ----------
 
 function AdminTab() {
-  const port = "8001"; // admin server default (dev mapping from the legacy client)
-  const url = `${location.protocol}//${location.hostname}:${port}/`;
+  const url = adminPanelUrl(location.origin);
   return (
     <>
       <h2 className="settings-h">Admin</h2>

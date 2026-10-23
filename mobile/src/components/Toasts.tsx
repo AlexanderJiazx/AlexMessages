@@ -9,8 +9,9 @@ interface Toast {
   isErr: boolean;
 }
 
-/** Pill toasts bottom-center — same cadence as the web client's toast stack. */
-export function Toasts() {
+/** Pill toasts bottom-center — same cadence as the web client's toast stack.
+ *  `bottom`: distance from the screen's bottom edge (clear of the controls). */
+export function Toasts({ bottom = 120 }: { bottom?: number }) {
   const [items, setItems] = useState<Toast[]>([]);
   const nextId = useRef(1);
 
@@ -26,7 +27,7 @@ export function Toasts() {
 
   if (!items.length) return null;
   return (
-    <View style={styles.wrap} pointerEvents="none">
+    <View style={[styles.wrap, { bottom }]} pointerEvents="none">
       {items.map((t) => (
         <ToastPill key={t.id} toast={t} />
       ))}
@@ -52,7 +53,6 @@ function ToastPill({ toast }: { toast: Toast }) {
 const styles = StyleSheet.create({
   wrap: {
     position: "absolute",
-    bottom: 120,
     left: 0,
     right: 0,
     alignItems: "center",

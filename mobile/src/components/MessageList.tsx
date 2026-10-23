@@ -11,18 +11,25 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
+import { useRouter } from "expo-router";
 import { fmtStampLabel, type ChatMessage } from "@alexmessages/shared";
 import { useChatState, useSession } from "../session";
 import { colors, type } from "../theme";
 import { Bubble } from "./Bubble";
+import { CallEntry } from "./CallEntry";
 import type { ImagePressHandler } from "./attachments";
 import { Avatar } from "./Avatar";
 import { Icon } from "./Icon";
 import { GlassIconButton, GlassSurface } from "./Glass";
+import { GlassMenuButton } from "./NativeMenu";
 import { NoScrollEdgeEffects } from "./ScrollEdge";
+import { CALL_GREEN } from "../call/CallScreen";
 
 /** Consecutive messages from one sender within this window form a group. */
 const GROUP_GAP_S = 5 * 60;
+/** Leading icons of the call button's Android dropdown. */
+const VIDEO_CALL_ICON = require("../../assets/icons/videocam-outline.xml");
+const VOICE_CALL_ICON = require("../../assets/icons/call-outline.xml");
 /** A centered timestamp is shown when the conversation pauses this long. */
 const STAMP_GAP_S = 60 * 60;
 
@@ -174,6 +181,7 @@ export function MessageList({
               </View>
             );
           }
+          if (item.m.type === "call") return <CallEntry m={item.m} />;
           return (
             <Bubble
               m={item.m}
@@ -227,10 +235,13 @@ export function MessageList({
   );
 }
 
+const joinsRuns = (m: ChatMessage) => m.type !== "system" && m.type !== "call";
+
+/** Whether b joins a's bubble run. System lines and call entries stand alone. */
 function sameRun(a: ChatMessage, b: ChatMessage): boolean {
   return (
-    a.type !== "system" &&
-    b.type !== "system" &&
+    joinsRuns(a) &&
+    joinsRuns(b) &&
     a.user_id === b.user_id &&
     !b.reply_to &&
     (b.created_at || 0) - (a.created_at || 0) < GROUP_GAP_S
@@ -242,8 +253,10 @@ function dayOf(m: ChatMessage): string {
 }
 
 /**
- * Floating conversation header: glass back button + a glass capsule with the
- * peer's avatar, name and presence (tap → profile). Sits over the stream.
+ * Floating conversation header: glass back button, a glass capsule with the
+ * peer's avatar, name and presence (tap → profile), and the call button — a
+ * menu of Video Call and Voice Call, or, while a call is live, a green
+ * button back to the call screen. Sits over the stream.
  */
 export function Topbar({
   channel,
@@ -258,10 +271,13 @@ export function Topbar({
 }) {
   const s = useChatState();
   const { store } = useSession();
+  const router = useRouter();
   const peerId = store.peerOf(channel);
   const peer = store.userFor(peerId);
   const online = peerId != null && s.online.has(peerId);
   const name = peer?.display_name || peer?.username || "…";
+  const inCall = !!s.call && s.call.phase !== "ended";
+  const canCall = store.calls.supported && peerId != null && !!peer;
 
   return (
     <View style={styles.topbar} pointerEvents="box-none">
@@ -294,7 +310,44 @@ export function Topbar({
           <Icon name="chevron-forward" size={13} color={colors.faint} />
         </GlassSurface>
       </Pressable>
-      <View style={styles.side} />
+      <View style={styles.side}>
+        {inCall ? (
+          <GlassIconButton
+            icon="call"
+            label="Return to call"
+            tint={CALL_GREEN}
+            color={colors.surface}
+            onPress={() => router.push("/call")}
+          />
+        ) : (
+          canCall && (
+            <GlassMenuButton
+              label="Call"
+              title={`Call ${name}`}
+              systemImage="video"
+              fallbackIcon="videocam-outline"
+              iconSize={17}
+              fallbackIconSize={22}
+              iconColor={colors.ink}
+              dropdown
+              actions={[
+                {
+                  label: "Video Call",
+                  systemImage: "video",
+                  androidIcon: VIDEO_CALL_ICON,
+                  onPress: () => store.startCall(peerId, "video"),
+                },
+                {
+                  label: "Voice Call",
+                  systemImage: "phone",
+                  androidIcon: VOICE_CALL_ICON,
+                  onPress: () => store.startCall(peerId, "audio"),
+                },
+              ]}
+            />
+          )
+        )}
+      </View>
     </View>
   );
 }

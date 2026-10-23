@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, type JSX } from "react";
 import { formatDate, isoDate } from "@shared/format";
 import { store } from "../client";
 import { useChatState } from "../hooks";
+import { CallEntry } from "./CallEntry";
 import { MessageBubble } from "./MessageBubble";
 import type { ChatMessage } from "@shared/store";
 
@@ -113,14 +114,18 @@ export function Stream({
       lastDate = d;
     }
     rows.push(
-      <MessageBubble
-        key={m.id + (m.edited_at ?? 0)}
-        m={m}
-        prev={prev}
-        allMsgs={msgs}
-        onOpenProfile={onOpenProfile}
-        onImageClick={onImageClick}
-      />,
+      m.type === "call" ? (
+        <CallEntry key={m.id} m={m} />
+      ) : (
+        <MessageBubble
+          key={m.id + (m.edited_at ?? 0)}
+          m={m}
+          prev={prev}
+          allMsgs={msgs}
+          onOpenProfile={onOpenProfile}
+          onImageClick={onImageClick}
+        />
+      ),
     );
     prev = m;
   }

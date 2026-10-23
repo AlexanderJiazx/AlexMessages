@@ -1,4 +1,5 @@
 import React from "react";
+import { adminPanelUrl } from "@alexmessages/shared";
 import * as WebBrowser from "expo-web-browser";
 import { useSession } from "../../src/session";
 import { colors } from "../../src/theme";
@@ -7,7 +8,7 @@ import { Group, Row, SettingsPage } from "../../src/components/SettingsList";
 
 export default function AdminPage() {
   const { serverUrl } = useSession();
-  const url = serverUrl.replace(/:(\d+)$/, ":8001");
+  const url = adminPanelUrl(serverUrl);
   return (
     <SettingsPage>
       <Group footer="You have administrator access. The control panel opens in the browser.">

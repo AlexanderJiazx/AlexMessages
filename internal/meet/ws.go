@@ -2,7 +2,6 @@ package meet
 
 import (
 	"encoding/json"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +16,7 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: httpx.WebSocketOrigin,
 }
 
 // handleWS is the meeting control plane. The client protocol:
@@ -39,13 +38,41 @@ var upgrader = websocket.Upgrader{
 // Anonymous connections are allowed (hello carries me: null): a guest can
 // join a room whose host enabled allow_guests by sending a guest_name.
 func handleWS(c *gin.Context) {
-	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
+	token := httpx.SessionToken(c, true)
+	user := auth.ResolveSession(token, "user")
 
 	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
 	}
 	defer ws.Close()
+	if token != "" && user == nil {
+		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "Session revoked"), time.Now().Add(time.Second))
+		return
+	}
+	ws.SetReadLimit(128 * 1024)
+	if user != nil {
+		stopped := make(chan struct{})
+		watcherDone := make(chan struct{})
+		defer func() { close(stopped); <-watcherDone }()
+		go func() {
+			defer close(watcherDone)
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopped:
+					return
+				case <-ticker.C:
+					if auth.ResolveSession(token, "user") == nil {
+						_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "Session revoked"), time.Now().Add(time.Second))
+						_ = ws.Close()
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	cn := &conn{ws: ws}
 	var me any
@@ -68,6 +95,10 @@ func handleWS(c *gin.Context) {
 			return
 		}
 		_ = ws.SetReadDeadline(time.Now().Add(pongWait))
+		if user != nil && auth.ResolveSession(token, "user") == nil {
+			_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "Session revoked"), time.Now().Add(time.Second))
+			return
+		}
 		var data map[string]any
 		if json.Unmarshal(raw, &data) != nil {
 			continue

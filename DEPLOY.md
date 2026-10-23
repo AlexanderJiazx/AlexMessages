@@ -18,12 +18,17 @@ HTTPS (terminate TLS at the reverse proxy).
 ## TL;DR for agents
 
 Production is a Raspberry Pi (`picloud`, linux/**arm64**) reached through an
-frp relay — see **Production** below. Pushing to `FreshRefactor` or `react`
-deploys automatically (GitHub Actions); to deploy by hand:
+frp relay — see **Production** below. Pushing to `main` or `react`
+runs tests. It also deploys when `DEPLOY_ENABLED=true` and the deployment
+credentials are configured. To deploy by hand after distributing updated
+mobile binaries:
 
 ```bash
 # 0. From the repo root. Verify before shipping.
 go build ./... && go vet ./... && go test ./...
+python3 deploy/remote_deploy_test.py
+(cd shared && npm ci && npm run typecheck && npm test)
+(cd web && npm ci && npm run build && npx playwright install chromium && npm run test:e2e)
 
 # 1. Cross-compile static linux/arm64 binaries.
 mkdir -p bin
@@ -32,11 +37,11 @@ for c in server admin meet; do
 done
 
 # 2. Bundle binaries + assets (NOT data/ — it lives on the server).
-tar czf release.tgz --exclude static/test-speech.wav bin/ static/ fonts/ sound/ \
+tar czf release.tgz --exclude static/test-speech.wav bin/ web/dist/ static/ fonts/ sound/ \
     index.html login.html admin.html meet.html meet_login.html
 
 # 3. Ship + restart through the relay (ssh -p 2222 alexander@35.226.215.209;
-#    `picloud` in ~/.ssh/config). The script backs up bin/ and the database,
+#    `picloud` in ~/.ssh/config). The script backs up bin/, web/dist/, and the database,
 #    restarts the units, health-checks them, and rolls back on failure.
 scp -P 2222 release.tgz alexander@35.226.215.209:/home/alexander/alexmessage/
 ssh -p 2222 alexander@35.226.215.209 \
@@ -77,9 +82,92 @@ First run prints the seed admin account to stderr (a random password if
 | `CALL_HOST` / `CALL_PORT`             | `127.0.0.1` / `8002`         | meet      |
 | `VAPID_SUBJECT`                       | `mailto:admin@…`             | server    |
 | `VOLC_RTC_APP_ID` / `VOLC_RTC_APP_KEY`| *(required; no default)*     | meet      |
+| `WS_ALLOWED_ORIGINS`                  | *(empty; same-origin only)* | server, meet |
+| `STUN_URLS`                           | Google's public STUN         | server    |
+| `TURN_URLS` / `TURN_SECRET`           | *(empty; no TURN)*           | server    |
+| `TURN_USERNAME` / `TURN_CREDENTIAL`   | *(empty)*                    | server    |
 
 The seed admin is created only if no admin exists yet; the bootstrap is
 idempotent and race-safe across the three processes.
+
+## DM calls: STUN and TURN
+
+DM voice and video calls send their media peer to peer (WebRTC). For every
+call the server hands both devices a list of ICE servers
+(`internal/webapp/ice.go`):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `STUN_URLS` | `stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302` | comma-separated `stun:` URLs |
+| `TURN_URLS` | *(empty: no TURN)* | comma-separated `turn:` / `turns:` URLs |
+| `TURN_SECRET` | *(empty)* | coturn's `static-auth-secret`: each call gets a time-limited credential (TURN REST API), minted per user |
+| `TURN_USERNAME` / `TURN_CREDENTIAL` | *(empty)* | static TURN credentials, used only when `TURN_SECRET` is unset |
+
+With STUN only, a call's media connects when at least one of the two devices
+can be reached directly, which covers most home Wi-Fi. It does **not**
+connect between two devices that are both behind symmetric NATs (common on
+mobile carriers and corporate networks): the call rings and is answered,
+then ends after 30 s, and both the call screen and the call card in the thread
+say "Couldn't connect". A TURN relay fixes that.
+
+Devices that run a VPN or proxy app which takes the default route (for
+example Quantumult X) need TURN **over TCP or TLS**: such an app often drops
+the UDP that peer-to-peer media uses, and the call then fails the same way
+even on one Wi-Fi network. Keep the `?transport=tcp` and `turns:` URLs in
+`TURN_URLS` below. A `turns:` listener on TCP 443 also gets through networks
+that allow nothing else. Seen in development: the iOS Simulator on a Mac
+running Quantumult X offered only the tunnel's address, its UDP was dropped,
+and its TCP to a TURN server on the LAN never connected. A TURN server on a
+public host reached through such a tunnel was not tested.
+
+TURN needs a host with a public IP address and open UDP ports. The Pi has no
+public address (the frp relay forwards only TCP 80, 443, and 2222), so the
+TURN server must run elsewhere. A minimal coturn configuration on a public
+host (replace `<turn-host>` and `<secret>`):
+
+```ini
+# /etc/turnserver.conf
+listening-port=3478
+tls-listening-port=5349      # turns: also needs cert= and pkey=
+realm=<turn-host>
+use-auth-secret
+static-auth-secret=<secret>
+min-port=49160
+max-port=49200
+no-multicast-peers
+# Never relay into private networks.
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+```
+
+Open TCP+UDP 3478, TCP 5349, and UDP 49160–49200 on that host. Then add to
+`/etc/alexmessage/alexmessage.env` on the Pi and restart the `alexmessage`
+unit:
+
+```bash
+TURN_URLS=turn:<turn-host>:3478?transport=udp,turn:<turn-host>:3478?transport=tcp,turns:<turn-host>:5349
+TURN_SECRET=<secret>
+```
+
+The secret belongs only in those two files — never in the repo.
+
+**Mobile builds:** calls in the mobile apps need **new native builds**
+(`react-native-webrtc`, `react-native-incall-manager`, and the local modules
+`mobile/modules/system-calls` (iOS) and `mobile/modules/call-ringer`
+(Android) are native code; `cd mobile && npx expo prebuild`, then build). Mobile builds made before
+calls existed ignore call events — a caller still sees "Ringing…" while such
+a build is connected, until the call times out as unanswered — and show
+finished calls as plain-text messages ("Missed video call").
+
+**Android ring service:** an Android phone with **Ring when the app is
+closed** on (the default) keeps a second WebSocket open to the server,
+`/ws?mode=calls` (the call listener), for as long as its user stays signed
+in. It uses the `/ws` path, so the nginx `/ws` location already proxies it:
+no new location is needed. The server pings it every 30 s, which keeps it
+inside nginx's default 60 s `proxy_read_timeout`; the app's own `/ws` socket
+gets a WebSocket ping every 25 s. Don't set `proxy_read_timeout` below about
+35 s on the `/ws` location.
 
 ## Production (Raspberry Pi behind an frp relay)
 
@@ -96,12 +184,21 @@ internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/f
 - **nginx on the Pi** terminates TLS (one vhost per domain in
   `/etc/nginx/sites-enabled/`) and reverse-proxies to the binaries. Vhosts must
   pass WebSocket upgrade headers for `/ws` and must **not buffer**
-  `text/event-stream` for the admin debug stream.
+  `text/event-stream` for the admin debug stream. Preserve the browser Host
+  and HTTPS scheme with `proxy_set_header Host $http_host;` and
+  `proxy_set_header X-Forwarded-Proto $scheme;`. The backends trust HTTPS
+  forwarding only from loopback. Extra origins must be exact entries in
+  `WS_ALLOWED_ORIGINS`. The mobile apps' sockets send an `Origin` built from
+  their server URL (React Native's WebSocket adds it on iOS and Android),
+  which passes the same-origin check only while nginx keeps the `Host`
+  header as above. A socket without an `Origin` header is accepted; only the
+  Android ring service's call listener (OkHttp) sends none.
 - **systemd units** (`/etc/systemd/system/`), all `User=alexander`,
   `WorkingDirectory=/home/alexander/alexmessage`, secrets in
   `EnvironmentFile=/etc/alexmessage/alexmessage.env` (`ADMIN_PASSWORD`,
   `VOLC_RTC_APP_ID`/`VOLC_RTC_APP_KEY`; add `OPENROUTER_API_KEY` there for
-  voice transcription):
+  voice transcription, and the `TURN_*` variables for call relays — see
+  **DM calls: STUN and TURN**):
 
   | Unit | Binary | Port | Domain |
   |------|--------|------|--------|
@@ -113,24 +210,30 @@ internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/f
   realtime on `16001`/`16002`; see `PiCloudMigration.md` in the app dir.)
 - **SSH**: `ssh -p 2222 alexander@35.226.215.209` (the relay forwards raw TCP;
   the host key is the Pi's own). `alexander` has passwordless sudo.
-- **Web client**: the release carries no `web/dist`, so the server serves the
-  legacy `static/` frontend. Shipping the React web app means building
-  `web/dist` and adding it to the bundle.
+- **Web client**: the `react` branch workflow builds and tests `web/dist`,
+  passes that build to the deploy job as `react-web-dist`, and includes it in
+  the release. The deploy script replaces the complete directory so stale
+  hashed assets cannot survive. Releases missing `web/dist/index.html` abort.
+- **Updated mobile clients are required for protected attachments**: publish
+  native builds containing the bearer media headers and the updated iOS
+  `ImagePreview` module before deploying the attachment authorization change.
+  Older mobile builds request media anonymously and will receive 401.
 
 ## Continuous deployment (GitHub Actions)
 
 `.github/workflows/deploy.yml`:
 
-- **Pull requests** into `FreshRefactor`/`react` run the tests only:
-  `go build`/`vet`/`test` plus the `shared/` typecheck + Vitest suite.
-- **Pushes** to `FreshRefactor` or `react` — including merging a PR — and
+- **Pull requests** into `main`/`react` run the tests only:
+  `go build`/`vet`/`test`, deployment rollback tests, the `shared/` typecheck +
+  Vitest suite, and a React web build plus Playwright browser tests.
+- **Pushes** to `main` or `react` — including merging a PR — and
   manual *Run workflow* runs then **deploy**: cross-compile the three
-  `linux/arm64` binaries, bundle them with `static/ fonts/ sound/` + the five
+  `linux/arm64` binaries, bundle them with `web/dist/ static/ fonts/ sound/` + the five
   HTML shells (**never `data/`**), `scp` the bundle to the Pi through the relay
   (port `2222`), and run `deploy/remote_deploy.sh` there. That script backs up
-  `bin/` and copies the database to `backups/` (keeping the newest 5) while the
+  `bin/` and `web/dist/`, and copies the database (with its `-wal` and `-shm` files) to `backups/` (keeping the newest 5) while the
   units are stopped, extracts the release, starts the units, health-checks
-  ports `6001 6002 6003`, and **rolls the binaries back** if any fails. A final
+  ports `6001 6002 6003`, and **restores the binaries and React build** if any fails. A final
   step checks `https://messages.alexanderjia.com/api/me` end to end (relay →
   nginx → app).
 

@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS contacts (
     FOREIGN KEY (contact_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- One row per finished DM call. Each row since DM calls shipped is paired with
+-- a type='call' message in the thread (message_id); rows from the retired
+-- standalone voice-call app have no message.
 CREATE TABLE IF NOT EXISTS calls (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     caller_id    INTEGER,            -- nullable so user deletion doesn't lose history
@@ -108,7 +111,10 @@ CREATE TABLE IF NOT EXISTS calls (
     started_at   INTEGER NOT NULL,   -- when the call was initiated
     answered_at  INTEGER,            -- when callee picked up; null if never answered
     ended_at     INTEGER NOT NULL,   -- when the call entry was finalized
-    status       TEXT    NOT NULL,   -- 'completed'|'missed'|'declined'|'cancelled'|'failed'
+    status       TEXT    NOT NULL,   -- 'completed'|'declined'|'failed'|'cancelled'|'no_answer'|'unavailable'|'busy' (legacy: 'missed')
+    channel      TEXT    NOT NULL DEFAULT '',        -- dm:<lo>:<hi>
+    media        TEXT    NOT NULL DEFAULT 'audio',   -- 'video'|'audio'
+    message_id   TEXT REFERENCES messages(id) ON DELETE CASCADE,
     FOREIGN KEY (caller_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (callee_id) REFERENCES users(id) ON DELETE SET NULL
 );
@@ -174,8 +180,14 @@ func InitDB() error {
 	if err := os.MkdirAll(AvatarRoot, 0o755); err != nil {
 		return err
 	}
-	// foreign_keys + busy_timeout are applied on every pooled connection.
-	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", DBPath)
+	// foreign_keys, busy_timeout and WAL journaling are applied on every
+	// pooled connection.
+	// _txlock=immediate makes every pool.Begin() a BEGIN IMMEDIATE, which
+	// takes the write lock up front and so waits out busy_timeout while
+	// another process writes. A deferred BEGIN starts as a read transaction,
+	// and SQLite fails its upgrade to a write at once ("database is locked")
+	// without consulting busy_timeout.
+	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate", DBPath)
 	p, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return err
@@ -191,13 +203,51 @@ func InitDB() error {
 		{"attachments", "width", "ALTER TABLE attachments ADD COLUMN width INTEGER NOT NULL DEFAULT 0"},
 		{"attachments", "height", "ALTER TABLE attachments ADD COLUMN height INTEGER NOT NULL DEFAULT 0"},
 		{"messages", "edited_at", "ALTER TABLE messages ADD COLUMN edited_at INTEGER"},
+		{"messages", "position", "ALTER TABLE messages ADD COLUMN position INTEGER NOT NULL DEFAULT 0"},
+		{"messages", "client_id", "ALTER TABLE messages ADD COLUMN client_id TEXT NOT NULL DEFAULT ''"},
+		{"dm_state", "last_read_position", "ALTER TABLE dm_state ADD COLUMN last_read_position INTEGER NOT NULL DEFAULT 0"},
+		{"dm_state", "cleared_position", "ALTER TABLE dm_state ADD COLUMN cleared_position INTEGER NOT NULL DEFAULT 0"},
+		{"calls", "channel", "ALTER TABLE calls ADD COLUMN channel TEXT NOT NULL DEFAULT ''"},
+		{"calls", "media", "ALTER TABLE calls ADD COLUMN media TEXT NOT NULL DEFAULT 'audio'"},
+		{"calls", "message_id", "ALTER TABLE calls ADD COLUMN message_id TEXT REFERENCES messages(id) ON DELETE CASCADE"},
 	}
 	for _, m := range migrations {
 		if err := ensureColumn(m.table, m.column, m.ddl); err != nil {
 			return err
 		}
 	}
-	return nil
+	// Preserve historical second-based cutoffs when migrating existing databases.
+	// Positions separate event ordering from display timestamps and fit in JS's
+	// exact integer range. The clock orders writes across processes; the trigger
+	// also assigns positions when a rolled-back binary uses the old INSERT.
+	tx, err := pool.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`
+ CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY);
+ UPDATE messages SET position = created_at * 1000000 + rowid WHERE position = 0 AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'message_positions_v1');
+ UPDATE dm_state SET
+ last_read_position = COALESCE((SELECT MAX(position) FROM messages WHERE channel = dm_state.channel AND created_at <= dm_state.last_read_at), 0),
+ cleared_position = COALESCE((SELECT MAX(position) FROM messages WHERE channel = dm_state.channel AND created_at <= dm_state.cleared_at), 0)
+ WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'message_positions_v1');
+ INSERT OR IGNORE INTO schema_migrations (name) VALUES ('message_positions_v1');
+ CREATE TABLE IF NOT EXISTS message_clock (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), position INTEGER NOT NULL);
+ INSERT OR IGNORE INTO message_clock (singleton, position) SELECT 1, COALESCE(MAX(position),0) FROM messages;
+ CREATE TRIGGER IF NOT EXISTS messages_legacy_position AFTER INSERT ON messages WHEN NEW.position = 0 BEGIN
+   UPDATE message_clock SET position = MAX(position+1, NEW.created_at * 1000000) WHERE singleton = 1;
+   UPDATE messages SET position = (SELECT position FROM message_clock WHERE singleton = 1) WHERE id = NEW.id;
+ END;
+ CREATE INDEX IF NOT EXISTS idx_attachments_path ON attachments(rel_path);
+ CREATE INDEX IF NOT EXISTS idx_calls_message ON calls(message_id);
+ CREATE INDEX IF NOT EXISTS idx_messages_position ON messages(position);
+ CREATE INDEX IF NOT EXISTS idx_messages_channel_position ON messages(channel, position);
+ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_nonce ON messages(user_id, channel, client_id) WHERE client_id <> '';
+ `); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func ensureColumn(table, column, ddl string) error {
@@ -339,10 +389,15 @@ func UpdateUserStatus(userID int, status string) error {
 		approvedAt = NowTS()
 	}
 	// COALESCE keeps the original approved_at when the new status isn't 'approved'.
-	_, err := pool.Exec(
-		"UPDATE users SET status = ?, approved_at = COALESCE(?, approved_at) WHERE id = ?",
-		status, approvedAt, userID,
+	res, err := pool.Exec(
+		"UPDATE users SET status = ?, approved_at = COALESCE(?, approved_at) WHERE id = ? AND (? = 'approved' OR is_admin = 0 OR status <> 'approved' OR (SELECT COUNT(*) FROM users WHERE is_admin = 1 AND status = 'approved') > 1)",
+		status, approvedAt, userID, status,
 	)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrLastAdministrator
+		}
+	}
 	return err
 }
 
@@ -378,19 +433,29 @@ func SetPassword(userID int, passwordHash string) error {
 }
 
 func SetAdmin(userID int, isAdmin bool) error {
-	_, err := pool.Exec("UPDATE users SET is_admin = ? WHERE id = ?", boolToInt(isAdmin), userID)
+	res, err := pool.Exec("UPDATE users SET is_admin = ? WHERE id = ? AND (? = 1 OR is_admin = 0 OR status <> 'approved' OR (SELECT COUNT(*) FROM users WHERE is_admin = 1 AND status = 'approved') > 1)", boolToInt(isAdmin), userID, boolToInt(isAdmin))
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrLastAdministrator
+		}
+	}
 	return err
 }
 
 func DeleteUser(userID int) error {
-	_, err := pool.Exec("DELETE FROM users WHERE id = ?", userID)
+	res, err := pool.Exec("DELETE FROM users WHERE id = ? AND (is_admin = 0 OR status <> 'approved' OR (SELECT COUNT(*) FROM users WHERE is_admin = 1 AND status = 'approved') > 1)", userID)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrLastAdministrator
+		}
+	}
 	return err
 }
 
-// CountAdmins returns the number of accounts with the admin flag set.
+// CountAdmins returns the number of administrators that can actually log in.
 func CountAdmins() (int, error) {
 	var n int
-	err := pool.QueryRow("SELECT COUNT(*) FROM users WHERE is_admin = 1").Scan(&n)
+	err := pool.QueryRow("SELECT COUNT(*) FROM users WHERE is_admin = 1 AND status = 'approved'").Scan(&n)
 	return n, err
 }
 
@@ -463,12 +528,19 @@ func InsertMessage(msgID, channel string, userID *int, text string, replyTo *str
 	if createdAt != nil {
 		ts = *createdAt
 	}
-	_, err := pool.Exec(
-		"INSERT INTO messages (id, channel, user_id, type, text, reply_to, created_at) "+
-			"VALUES (?, ?, ?, ?, ?, ?, ?)",
-		msgID, channel, nullableInt(userID), msgType, text, nullableStr(replyTo), ts,
-	)
-	return ts, err
+	tx, err := pool.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var position int64
+	if err := tx.QueryRow("UPDATE message_clock SET position = MAX(position+1, ?) WHERE singleton = 1 RETURNING position", ts*1000000).Scan(&position); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec("INSERT INTO messages (id, channel, user_id, type, text, reply_to, created_at, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", msgID, channel, nullableInt(userID), msgType, text, nullableStr(replyTo), ts, position); err != nil {
+		return 0, err
+	}
+	return ts, tx.Commit()
 }
 
 // MessageMeta is the slice of a message row the edit path needs to authorize
@@ -607,65 +679,6 @@ func DeleteUserAvatarFiles(userID int) {
 	}
 }
 
-// ---------- calls ----------
-
-// Call mirrors a row of the calls table, with a direction relative to a viewer.
-type Call struct {
-	ID         int    `json:"id"`
-	CallerID   *int   `json:"caller_id"`
-	CalleeID   *int   `json:"callee_id"`
-	StartedAt  int64  `json:"started_at"`
-	AnsweredAt *int64 `json:"answered_at"`
-	EndedAt    int64  `json:"ended_at"`
-	Status     string `json:"status"`
-	Direction  string `json:"direction"`
-}
-
-func InsertCall(callerID, calleeID *int, startedAt int64, answeredAt *int64, endedAt int64, status string) (int, error) {
-	res, err := pool.Exec(
-		"INSERT INTO calls (caller_id, callee_id, started_at, answered_at, ended_at, status) "+
-			"VALUES (?, ?, ?, ?, ?, ?)",
-		nullableInt(callerID), nullableInt(calleeID), startedAt, nullableInt64(answeredAt), endedAt, status,
-	)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
-	return int(id), err
-}
-
-// ListRecentCalls returns calls where the user is caller or callee, newest first.
-func ListRecentCalls(userID, limit int) ([]Call, error) {
-	rows, err := pool.Query(
-		"SELECT id, caller_id, callee_id, started_at, answered_at, ended_at, status FROM calls "+
-			"WHERE caller_id = ? OR callee_id = ? ORDER BY started_at DESC LIMIT ?",
-		userID, userID, limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Call{}
-	for rows.Next() {
-		var (
-			c                        Call
-			caller, callee, answered sql.NullInt64
-		)
-		if err := rows.Scan(&c.ID, &caller, &callee, &c.StartedAt, &answered, &c.EndedAt, &c.Status); err != nil {
-			return nil, err
-		}
-		c.CallerID = nullInt64ToPtr(caller)
-		c.CalleeID = nullInt64ToPtr(callee)
-		c.AnsweredAt = nullInt64ToPtrI64(answered)
-		c.Direction = "incoming"
-		if c.CallerID != nil && *c.CallerID == userID {
-			c.Direction = "outgoing"
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
-}
-
 // ---------- push subscriptions ----------
 
 // PushSubscription is a stored browser push endpoint with its encryption keys.
@@ -718,23 +731,25 @@ func ListPushSubscriptions(userID int) ([]PushSubscription, error) {
 
 // DMState carries the four per-user flags for a DM thread.
 type DMState struct {
-	Pinned      bool
-	LastReadAt  int64
-	ClearedAt   int64
-	ForceUnread bool
+	Pinned           bool
+	LastReadAt       int64
+	ClearedAt        int64
+	ForceUnread      bool
+	LastReadPosition int64
+	ClearedPosition  int64
 }
 
 // GetDMState returns the state row, or zero-value defaults when absent.
 func GetDMState(userID int, channel string) (DMState, error) {
 	row := pool.QueryRow(
-		"SELECT pinned, last_read_at, cleared_at, force_unread FROM dm_state WHERE user_id = ? AND channel = ?",
+		"SELECT pinned, last_read_at, cleared_at, force_unread, last_read_position, cleared_position FROM dm_state WHERE user_id = ? AND channel = ?",
 		userID, channel,
 	)
 	var (
 		st                  DMState
 		pinned, forceUnread int
 	)
-	err := row.Scan(&pinned, &st.LastReadAt, &st.ClearedAt, &forceUnread)
+	err := row.Scan(&pinned, &st.LastReadAt, &st.ClearedAt, &forceUnread, &st.LastReadPosition, &st.ClearedPosition)
 	if err == sql.ErrNoRows {
 		return DMState{}, nil
 	}
@@ -749,7 +764,7 @@ func GetDMState(userID int, channel string) (DMState, error) {
 // ListDMStates returns every DM-state row for a user, keyed by channel.
 func ListDMStates(userID int) (map[string]DMState, error) {
 	rows, err := pool.Query(
-		"SELECT channel, pinned, last_read_at, cleared_at, force_unread FROM dm_state WHERE user_id = ?",
+		"SELECT channel, pinned, last_read_at, cleared_at, force_unread, last_read_position, cleared_position FROM dm_state WHERE user_id = ?",
 		userID,
 	)
 	if err != nil {
@@ -763,7 +778,7 @@ func ListDMStates(userID int) (map[string]DMState, error) {
 			st                  DMState
 			pinned, forceUnread int
 		)
-		if err := rows.Scan(&ch, &pinned, &st.LastReadAt, &st.ClearedAt, &forceUnread); err != nil {
+		if err := rows.Scan(&ch, &pinned, &st.LastReadAt, &st.ClearedAt, &forceUnread, &st.LastReadPosition, &st.ClearedPosition); err != nil {
 			return nil, err
 		}
 		st.Pinned = pinned != 0
@@ -773,64 +788,25 @@ func ListDMStates(userID int) (map[string]DMState, error) {
 	return out, rows.Err()
 }
 
-// writeDMState upserts a full DM-state row.
-func writeDMState(userID int, channel string, st DMState) error {
-	_, err := pool.Exec(
-		"INSERT INTO dm_state (user_id, channel, pinned, last_read_at, cleared_at, force_unread) "+
-			"VALUES (?, ?, ?, ?, ?, ?) "+
-			"ON CONFLICT(user_id, channel) DO UPDATE SET "+
-			"pinned = excluded.pinned, "+
-			"last_read_at = excluded.last_read_at, "+
-			"cleared_at = excluded.cleared_at, "+
-			"force_unread = excluded.force_unread",
-		userID, channel, boolToInt(st.Pinned), st.LastReadAt, st.ClearedAt, boolToInt(st.ForceUnread),
-	)
+// Each mutation updates only its own columns in one atomic upsert.
+func SetDMPinned(userID int, channel string, pinned bool) error {
+	_, err := pool.Exec("INSERT INTO dm_state (user_id, channel, pinned) VALUES (?, ?, ?) ON CONFLICT(user_id, channel) DO UPDATE SET pinned = excluded.pinned", userID, channel, boolToInt(pinned))
 	return err
 }
 
-// SetDMPinned merges a new pinned flag into the (user, channel) row.
-func SetDMPinned(userID int, channel string, pinned bool) error {
-	st, err := GetDMState(userID, channel)
-	if err != nil {
-		return err
-	}
-	st.Pinned = pinned
-	return writeDMState(userID, channel, st)
-}
-
-// SetDMLastRead bumps last_read_at and clears any explicit-unread flag.
 func SetDMLastRead(userID int, channel string, ts int64) error {
-	st, err := GetDMState(userID, channel)
-	if err != nil {
-		return err
-	}
-	st.LastReadAt = ts
-	st.ForceUnread = false
-	return writeDMState(userID, channel, st)
+	_, err := pool.Exec("INSERT INTO dm_state (user_id, channel, last_read_at, last_read_position, force_unread) VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), 0) FROM messages WHERE channel = ? AND created_at <= ?), 0) ON CONFLICT(user_id, channel) DO UPDATE SET last_read_at = MAX(dm_state.last_read_at, excluded.last_read_at), last_read_position = MAX(dm_state.last_read_position, excluded.last_read_position), force_unread = 0", userID, channel, ts, channel, ts)
+	return err
 }
 
-// SetDMUnread forces an unread state — zero last_read_at and flag it sticky.
 func SetDMUnread(userID int, channel string) error {
-	st, err := GetDMState(userID, channel)
-	if err != nil {
-		return err
-	}
-	st.LastReadAt = 0
-	st.ForceUnread = true
-	return writeDMState(userID, channel, st)
+	_, err := pool.Exec("INSERT INTO dm_state (user_id, channel, last_read_at, force_unread) VALUES (?, ?, 0, 1) ON CONFLICT(user_id, channel) DO UPDATE SET last_read_at = 0, last_read_position = 0, force_unread = 1", userID, channel)
+	return err
 }
 
-// ClearDMForUser is the per-user delete: hide existing messages and reset flags.
 func ClearDMForUser(userID int, channel string, ts int64) error {
-	st, err := GetDMState(userID, channel)
-	if err != nil {
-		return err
-	}
-	st.ClearedAt = ts
-	st.LastReadAt = ts
-	st.ForceUnread = false
-	st.Pinned = false
-	return writeDMState(userID, channel, st)
+	_, err := pool.Exec("INSERT INTO dm_state (user_id, channel, cleared_at, last_read_at, cleared_position, last_read_position, pinned, force_unread) SELECT ?, ?, ?, ?, COALESCE(MAX(position),0), COALESCE(MAX(position),0), 0, 0 FROM messages WHERE channel = ? AND created_at <= ? ON CONFLICT(user_id, channel) DO UPDATE SET cleared_at = MAX(dm_state.cleared_at, excluded.cleared_at), last_read_at = MAX(dm_state.last_read_at, excluded.last_read_at), cleared_position = MAX(dm_state.cleared_position, excluded.cleared_position), last_read_position = MAX(dm_state.last_read_position, excluded.last_read_position), pinned = 0, force_unread = 0", userID, channel, ts, ts, channel, ts)
+	return err
 }
 
 // ChannelLatestMessageTS returns the newest message timestamp in a channel, or 0.
@@ -859,9 +835,9 @@ func CountUnread(userID int, channel string, lastReadAt, clearedAt int64) (int, 
 	}
 	var n int
 	err := pool.QueryRow(
-		"SELECT COUNT(*) FROM messages WHERE channel = ? AND created_at > ? "+
-			"AND user_id IS NOT NULL AND user_id <> ?",
-		channel, cutoff, userID,
+		"SELECT COUNT(*) FROM messages m WHERE channel = ? AND CASE WHEN EXISTS (SELECT 1 FROM dm_state WHERE user_id = ? AND channel = ?) THEN position > (SELECT MAX(last_read_position, cleared_position) FROM dm_state WHERE user_id = ? AND channel = ?) ELSE created_at > ? END "+
+			"AND user_id IS NOT NULL AND user_id <> ? AND "+quietCallFilter,
+		channel, userID, channel, userID, channel, cutoff, userID,
 	).Scan(&n)
 	return n, err
 }
@@ -881,6 +857,8 @@ type Attachment struct {
 // HistoryMessage is the message shape used by history/init payloads (no author).
 type HistoryMessage struct {
 	ID          string       `json:"id"`
+	Position    int64        `json:"position"`
+	ClientID    string       `json:"client_id,omitempty"`
 	Type        string       `json:"type"`
 	Channel     string       `json:"channel"`
 	UserID      *int         `json:"user_id"`
@@ -889,26 +867,42 @@ type HistoryMessage struct {
 	CreatedAt   int64        `json:"created_at"`
 	EditedAt    *int64       `json:"edited_at"`
 	Attachments []Attachment `json:"attachments"`
+	// Call is set on type="call" messages only.
+	Call *CallRecord `json:"call,omitempty"`
 }
 
 // FetchChannelWindow returns a chronological page of messages with attachments.
 // beforeTS (when non-nil) is exclusive (older than); afterTS (when non-nil) is
 // exclusive (newer than).
 func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]HistoryMessage, error) {
+	return FetchChannelWindowCursor(channel, limit, beforeTS, afterTS, "", nil)
+}
+
+func FetchChannelWindowCursor(channel string, limit int, beforeTS, afterTS *int64, beforeID string, afterPosition *int64) ([]HistoryMessage, error) {
 	where := []string{"channel = ?"}
 	args := []any{channel}
-	if beforeTS != nil {
+	if beforeID != "" {
+		where = append(where, "position < (SELECT position FROM messages WHERE channel = ? AND id = ?)")
+		args = append(args, channel, beforeID)
+	} else if beforeTS != nil {
 		where = append(where, "created_at < ?")
 		args = append(args, *beforeTS)
 	}
-	if afterTS != nil {
+	if afterPosition != nil {
+		where = append(where, "position > ?")
+		args = append(args, *afterPosition)
+	} else if afterTS != nil {
 		where = append(where, "created_at > ?")
 		args = append(args, *afterTS)
 	}
 	args = append(args, limit)
-	query := "SELECT id, channel, user_id, type, text, reply_to, created_at, edited_at FROM messages WHERE " +
-		strings.Join(where, " AND ") + " ORDER BY created_at DESC LIMIT ?"
+	query := "SELECT id, channel, user_id, type, text, reply_to, created_at, edited_at, position, client_id FROM messages WHERE " +
+		strings.Join(where, " AND ") + " ORDER BY position DESC LIMIT ?"
 
+	return fetchMessageRows(query, args...)
+}
+
+func fetchMessageRows(query string, args ...any) ([]HistoryMessage, error) {
 	rows, err := pool.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -919,6 +913,8 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 		replyTo                *string
 		createdAt              int64
 		editedAt               *int64
+		position               int64
+		clientID               string
 	}
 	var msgs []rawMsg
 	for rows.Next() {
@@ -928,7 +924,7 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 			replyTo  sql.NullString
 			editedAt sql.NullInt64
 		)
-		if err := rows.Scan(&m.id, &m.channel, &userID, &m.typ, &m.text, &replyTo, &m.createdAt, &editedAt); err != nil {
+		if err := rows.Scan(&m.id, &m.channel, &userID, &m.typ, &m.text, &replyTo, &m.createdAt, &editedAt, &m.position, &m.clientID); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -955,43 +951,38 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 		return []HistoryMessage{}, nil
 	}
 
-	// Fetch attachments for the page in one query.
-	ids := make([]any, len(msgs))
-	placeholders := make([]string, len(msgs))
-	for i, m := range msgs {
-		ids[i] = m.id
-		placeholders[i] = "?"
-	}
+	// Hydrate attachments in bounded batches, including large init/export reads.
 	byMsg := map[string][]Attachment{}
-	attRows, err := pool.Query(
-		"SELECT message_id, name, rel_path, size, mime, width, height FROM attachments WHERE message_id IN ("+
-			strings.Join(placeholders, ",")+")", ids...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	for attRows.Next() {
-		var (
-			msgID, name, relPath, mime string
-			size                       int64
-			width, height              int
-		)
-		if err := attRows.Scan(&msgID, &name, &relPath, &size, &mime, &width, &height); err != nil {
-			attRows.Close()
+	for start := 0; start < len(msgs); start += 500 {
+		end := start + 500
+		if end > len(msgs) {
+			end = len(msgs)
+		}
+		ids := make([]any, end-start)
+		marks := make([]string, end-start)
+		for i, m := range msgs[start:end] {
+			ids[i] = m.id
+			marks[i] = "?"
+		}
+		rows, err := pool.Query("SELECT message_id, name, rel_path, size, mime, width, height FROM attachments WHERE message_id IN ("+strings.Join(marks, ",")+")", ids...)
+		if err != nil {
 			return nil, err
 		}
-		byMsg[msgID] = append(byMsg[msgID], Attachment{
-			Name:   name,
-			URL:    "/uploads/" + relPath,
-			Size:   size,
-			Mime:   mime,
-			Width:  width,
-			Height: height,
-		})
-	}
-	attRows.Close()
-	if err := attRows.Err(); err != nil {
-		return nil, err
+		for rows.Next() {
+			var msgID, name, relPath, mime string
+			var size int64
+			var width, height int
+			if err := rows.Scan(&msgID, &name, &relPath, &size, &mime, &width, &height); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			byMsg[msgID] = append(byMsg[msgID], Attachment{Name: name, URL: "/uploads/" + relPath, Size: size, Mime: mime, Width: width, Height: height})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
 
 	out := make([]HistoryMessage, 0, len(msgs))
@@ -1002,6 +993,8 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 		}
 		out = append(out, HistoryMessage{
 			ID:          m.id,
+			Position:    m.position,
+			ClientID:    m.clientID,
 			Type:        m.typ,
 			Channel:     m.channel,
 			UserID:      m.userID,
@@ -1011,6 +1004,9 @@ func FetchChannelWindow(channel string, limit int, beforeTS, afterTS *int64) ([]
 			EditedAt:    m.editedAt,
 			Attachments: atts,
 		})
+	}
+	if err := hydrateCalls(out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -1084,10 +1080,9 @@ func Stats() (map[string]any, error) {
 
 // PurgeMessages wipes all message history (channels and DMs).
 func PurgeMessages() error {
-	if _, err := pool.Exec("DELETE FROM messages"); err != nil {
-		return err
-	}
-	_, err := pool.Exec("DELETE FROM attachments")
+	// Attachment rows cascade in this same statement. A second DELETE would
+	// remove attachments belonging to a message concurrently inserted afterward.
+	_, err := pool.Exec("DELETE FROM messages")
 	return err
 }
 

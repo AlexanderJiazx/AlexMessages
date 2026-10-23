@@ -9,6 +9,8 @@
 import { ApiClient } from "@shared/api";
 import { ChatStore, type ToastEvent, type NotifyEvent } from "@shared/store";
 import { DebugReporter } from "@shared/debug";
+import type { CallOutcome } from "@shared/call";
+import { webCallPlatform } from "./call-platform";
 
 export const api = new ApiClient({ baseUrl: "" });
 
@@ -51,11 +53,54 @@ export const store = new ChatStore({
     (Debug[lvl] || Debug.debug)(event, message, ctx);
   },
   onUnauthorized: () => {
+    // The session is already gone, so this only ends the call on this page
+    // (the socket closed with 4401 and sends nothing more); leaving the page
+    // then asks nothing.
+    store.calls.hangUp();
     window.location.href = "/login";
   },
+  callPlatform: webCallPlatform,
 });
 
-// Foreground tracking drives the "actively reading ⇒ mark read" rule.
+// Foreground tracking drives the "actively reading ⇒ mark read" rule, and
+// tells the server whether a call needs a push to reach this user.
+store.setForeground(document.visibilityState === "visible");
 document.addEventListener("visibilitychange", () => {
   store.setForeground(document.visibilityState === "visible");
 });
+
+// A call that rings while no screen of the callee shows it also rings as a
+// Web Push notification that stays until clicked (tag "call-<id>", see
+// callPushPayload in internal/webapp/calls.go). Close it once the call stops
+// ringing here because it was answered or declined, on this device or
+// another: the server's call_over push replaces it too, but only when the
+// push service delivers it. Any other end is a missed call (db.CallMissed):
+// the server's missed_call push replaces the notification under the same tag.
+const ANSWERED_OR_DECLINED: ReadonlySet<CallOutcome> = new Set<CallOutcome>([
+  "hung_up", // declined on this device
+  "declined",
+  "answered_elsewhere",
+  "completed",
+  "failed",
+]);
+let ringingCallId: string | null = null;
+store.subscribe(() => {
+  const call = store.state.call;
+  const ringing = call?.phase === "incoming" ? call.id : null;
+  if (ringingCallId && ringingCallId !== ringing && call?.id === ringingCallId) {
+    // Still live after ringing: answered on this device.
+    const answered = call.phase !== "ended";
+    if (answered || (call.outcome && ANSWERED_OR_DECLINED.has(call.outcome))) void closeCallNotification(ringingCallId);
+  }
+  ringingCallId = ringing;
+});
+
+async function closeCallNotification(callId: string): Promise<void> {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    for (const n of (await reg?.getNotifications({ tag: `call-${callId}` })) ?? []) n.close();
+  } catch {
+    /* no notification to close */
+  }
+}

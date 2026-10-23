@@ -15,9 +15,11 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
@@ -35,6 +37,12 @@ const (
 	pushTTLSeconds = 24 * 60 * 60
 	pushUrgency    = webpush.UrgencyNormal // DM "ping" is normal priority.
 )
+
+// pushHTTPClient sends every push. webpush-go's default client has no
+// timeout, so a push service that accepts the request and never answers
+// would hold the sending goroutine forever, and with it every push queued
+// behind it (a call's pushes go out one after another).
+var pushHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // In-memory base64url keys derived from the on-disk PEM. The public key is the
 // uncompressed EC point; the private key is the raw 32-byte scalar — the two
@@ -131,6 +139,7 @@ func sendOne(sub db.PushSubscription, data []byte) bool {
 		Endpoint: sub.Endpoint,
 		Keys:     webpush.Keys{P256dh: sub.P256dh, Auth: sub.Auth},
 	}, &webpush.Options{
+		HTTPClient:      pushHTTPClient,
 		Subscriber:      subscriber,
 		VAPIDPublicKey:  vapidPublicB64,
 		VAPIDPrivateKey: vapidPrivateB64,

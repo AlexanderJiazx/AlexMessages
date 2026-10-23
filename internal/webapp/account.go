@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -23,7 +24,7 @@ func registerAccountRoutes(r *gin.Engine) {
 
 // handleChangePassword verifies the current password, stores a new hash, and
 // rotates sessions: every other device is signed out, but this one stays in by
-// being issued a fresh session cookie.
+// retaining the authenticated cookie or bearer token.
 func handleChangePassword(c *gin.Context) {
 	user, ok := requireUser(c)
 	if !ok {
@@ -50,25 +51,19 @@ func handleChangePassword(c *gin.Context) {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if err := db.SetPassword(user.ID, hash); err != nil {
-		httpx.Error(c, http.StatusInternalServerError, "internal error")
-		return
-	}
-	// Invalidate every session (including this one), then re-issue for this
-	// device so the user isn't bounced to the login page.
-	_ = db.DeleteUserSessions(user.ID)
-	token, _, err := auth.IssueSession(user.ID, "user")
-	if err != nil {
+	token := requestSessionToken(c)
+	if err := db.ChangePasswordKeepingSession(user.ID, token, hash); err != nil {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return
 	}
 	httpx.SetSessionCookie(c, auth.UserCookie, token)
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "session_token": token})
 }
 
 // handleDeleteAccount removes the calling user's account after verifying their
 // password. The DB cascade drops messages/attachments/contacts; upload and
 // avatar files are removed from disk. The last administrator can't self-delete.
+// A call the user is on or ringing for ends first (endUserCall).
 func handleDeleteAccount(c *gin.Context) {
 	user, ok := requireUser(c)
 	if !ok {
@@ -85,8 +80,15 @@ func handleDeleteAccount(c *gin.Context) {
 			return
 		}
 	}
-	_ = db.DeleteUserSessions(user.ID)
-	_ = db.DeleteUser(user.ID)        // cascades messages/attachments/contacts via FK
+	endUserCall(user.ID)
+	if err := db.DeleteUser(user.ID); err != nil {
+		if errors.Is(err, db.ErrLastAdministrator) {
+			httpx.Error(c, http.StatusBadRequest, err.Error())
+		} else {
+			httpx.Error(c, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
 	db.DeleteUserUploads(user.ID)     // remove storage directory on disk
 	db.DeleteUserAvatarFiles(user.ID) // remove profile photo files on disk
 	httpx.ClearSessionCookie(c, auth.UserCookie)

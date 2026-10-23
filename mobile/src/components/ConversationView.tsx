@@ -100,7 +100,7 @@ export function ConversationView({
       // The keyboard slides away first (presenting in its place drops it
       // without its animation and jumps the thread down).
       afterKeyboardCloses(() =>
-        previewImage(full, from?.tag ?? null, from?.name).catch(() =>
+        previewImage(full, from?.tag ?? null, from?.name, api.mediaSource(url).headers).catch(() =>
           toast("Couldn't open the image", true)
         )
       );

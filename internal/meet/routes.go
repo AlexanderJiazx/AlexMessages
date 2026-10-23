@@ -115,7 +115,7 @@ func volcJoinPayload(roomID string, pid int) gin.H {
 // ---------- HTML routes ----------
 
 func (s *meetServer) handleRoot(c *gin.Context) {
-	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
+	user := cookieUser(c)
 	if user == nil {
 		c.Redirect(http.StatusFound, "/login")
 		return
@@ -124,7 +124,7 @@ func (s *meetServer) handleRoot(c *gin.Context) {
 }
 
 func (s *meetServer) handleMeetingPage(c *gin.Context) {
-	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
+	user := cookieUser(c)
 	if user == nil {
 		// Guests may load the page when the meeting allows them; everyone
 		// else is sent back to this meeting after signing in.
@@ -142,7 +142,7 @@ func (s *meetServer) handleMeetingPage(c *gin.Context) {
 }
 
 func (s *meetServer) handleLoginPage(c *gin.Context) {
-	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
+	user := cookieUser(c)
 	if user != nil {
 		c.Redirect(http.StatusFound, safeNext(c.Query("next")))
 		return
@@ -160,8 +160,22 @@ func safeNext(next string) string {
 
 // ---------- auth ----------
 
+// cookieUser resolves the am_session cookie, and clears a cookie that no
+// longer resolves (its session was revoked by a logout or a password change
+// elsewhere). The meeting page then opens its socket without the dead
+// credential, so a guest-enabled meeting reaches the guest gate; /ws answers a
+// revoked credential with 4401, which sends the page to /login.
+func cookieUser(c *gin.Context) *db.User {
+	token := httpx.Cookie(c, auth.UserCookie)
+	user := auth.ResolveSession(token, "user")
+	if user == nil && token != "" {
+		httpx.ClearSessionCookie(c, auth.UserCookie)
+	}
+	return user
+}
+
 func requireUser(c *gin.Context) (*db.User, bool) {
-	user := auth.ResolveSession(httpx.Cookie(c, auth.UserCookie), "user")
+	user := cookieUser(c)
 	if user == nil {
 		httpx.Error(c, http.StatusUnauthorized, "not authenticated")
 		return nil, false
@@ -289,23 +303,8 @@ func loadHTML(name string) string {
 	return string(b)
 }
 
-type noListFS struct{ fs http.FileSystem }
-
-func (n noListFS) Open(name string) (http.File, error) {
-	f, err := n.fs.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	stat, err := f.Stat()
-	if err == nil && stat.IsDir() {
-		_ = f.Close()
-		return nil, os.ErrNotExist
-	}
-	return f, nil
-}
-
 func mountStatic(r *gin.Engine, prefix, dir string) {
-	r.StaticFS(prefix, noListFS{http.Dir(dir)})
+	r.StaticFS(prefix, httpx.NoListFS{FS: http.Dir(dir)})
 }
 
 func isDir(p string) bool {

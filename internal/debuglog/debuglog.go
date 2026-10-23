@@ -23,6 +23,7 @@ import (
 
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
+	"alexmessage/internal/httpx"
 )
 
 // Ingestion limits.
@@ -147,11 +148,11 @@ func ReportHandler(app string) gin.HandlerFunc {
 		}
 		events = events[:granted]
 
-		// Identify the actor server-side from the session cookie; never trust a
-		// client-supplied user id. Guests (no cookie) report with a null user.
+		// Identify the actor from the cookie or bearer session; never trust a
+		// client-supplied user id. Guests report with a null user.
 		var userID *int
 		username := "guest"
-		if u := auth.ResolveSession(cookie(c, auth.UserCookie), "user"); u != nil {
+		if u := auth.ResolveSession(httpx.SessionToken(c, false), "user"); u != nil {
 			id := u.ID
 			userID = &id
 			username = u.Username
@@ -243,14 +244,6 @@ func clampContext(raw json.RawMessage) string {
 		return ""
 	}
 	return string(raw)
-}
-
-func cookie(c *gin.Context, name string) string {
-	v, err := c.Cookie(name)
-	if err != nil {
-		return ""
-	}
-	return v
 }
 
 // clientIP returns the connecting IP, preferring Gin's parsed value but falling

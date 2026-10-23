@@ -4,16 +4,18 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { Stack } from "expo-router";
-import { StatusBar } from "expo-status-bar";
 import { SessionProvider } from "../src/session";
 import { configureNotifications } from "../src/notify";
 import { ActionSheetHost } from "../src/components/ActionSheet";
+import { CallHost } from "../src/call/CallHost";
+import { CALL_BG } from "../src/call/CallScreen";
 import { colors } from "../src/theme";
 
 /**
  * Root layout: providers + the Stack. Routes: index (redirect), login,
- * chat (adaptive home), conversation (narrow pushed chat), and the
- * settings/new-chat/profile modal sheets.
+ * chat (adaptive home), conversation (narrow pushed chat), the
+ * settings/new-chat/profile modal sheets, and the full-screen call screen
+ * (opened and closed by CallHost).
  */
 export default function RootLayout() {
   useEffect(() => {
@@ -25,32 +27,51 @@ export default function RootLayout() {
       <KeyboardTracking>
         <SafeAreaProvider>
           <SessionProvider>
-            <StatusBar style="dark" />
-            <Stack
-              screenOptions={{
-                headerShown: false,
-                contentStyle: { backgroundColor: colors.bg },
-              }}
-            >
-              <Stack.Screen name="index" />
-              <Stack.Screen name="login" />
-              {/* We draw our own scroll-edge fades; UIKit's automatic effect
-                  misplaces itself on the inverted message list. */}
-              <Stack.Screen name="chat" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
-              <Stack.Screen name="conversation" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
-              <Stack.Screen
-                name="settings"
-                options={{ presentation: "modal" }}
-              />
-              <Stack.Screen
-                name="new-chat"
-                options={{ presentation: "modal" }}
-              />
-              <Stack.Screen
-                name="profile"
-                options={{ presentation: "modal" }}
-              />
-            </Stack>
+            <CallHost>
+              {/* The status bar belongs to the screens: Info.plist turns on
+                  view-controller-based status bar appearance (the image
+                  viewer hides it), which React Native's StatusBar module
+                  refuses. Every screen names its style, because once one
+                  does (the call screen's light one), Android gives the
+                  light style to every screen that doesn't. */}
+              <Stack
+                screenOptions={{
+                  headerShown: false,
+                  contentStyle: { backgroundColor: colors.bg },
+                  statusBarStyle: "dark",
+                }}
+              >
+                <Stack.Screen name="index" />
+                <Stack.Screen name="login" />
+                {/* We draw our own scroll-edge fades; UIKit's automatic effect
+                    misplaces itself on the inverted message list. */}
+                <Stack.Screen name="chat" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
+                <Stack.Screen name="conversation" options={{ scrollEdgeEffects: NO_EDGE_EFFECTS }} />
+                <Stack.Screen
+                  name="settings"
+                  options={{ presentation: "modal" }}
+                />
+                <Stack.Screen
+                  name="new-chat"
+                  options={{ presentation: "modal" }}
+                />
+                <Stack.Screen
+                  name="profile"
+                  options={{ presentation: "modal" }}
+                />
+                {/* Over everything, modals included; a call ends with a
+                    button, never a swipe. */}
+                <Stack.Screen
+                  name="call"
+                  options={{
+                    presentation: "fullScreenModal",
+                    gestureEnabled: false,
+                    statusBarStyle: "light",
+                    contentStyle: { backgroundColor: CALL_BG },
+                  }}
+                />
+              </Stack>
+            </CallHost>
             <ActionSheetHost />
           </SessionProvider>
         </SafeAreaProvider>

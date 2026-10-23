@@ -7,6 +7,7 @@ import { Host, Image as SFImage } from "./SwiftUI";
 import type { SFSymbol } from "sf-symbols-typescript";
 import { toast, useSession } from "../session";
 import { useVoiceRecorder } from "../audio";
+import { registerMedia } from "../media";
 import { colors, glassSupported, type } from "../theme";
 import { Icon, type IconName } from "./Icon";
 
@@ -66,6 +67,21 @@ export const VoicePanel = forwardRef<
     return () => void recRef.current.cancel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A call needs the microphone and the audio session: the clip is dropped
+  // (see src/media.ts).
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
+  useEffect(
+    () =>
+      registerMedia(() => {
+        player.pause();
+        void recRef.current.cancel();
+        onExitRef.current();
+        return true;
+      }),
+    [player],
+  );
 
   // Each metering sample becomes one waveform bar.
   useEffect(() => {

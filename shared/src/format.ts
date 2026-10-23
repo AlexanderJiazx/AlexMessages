@@ -8,7 +8,8 @@
  * the same color. Keep PEER_COLORS and hash() in sync across platforms.
  */
 
-import type { Attachment, HistoryMessage, PublicUser } from "./types";
+import type { CallOutcome, CallSession } from "./call";
+import type { Attachment, CallRecord, HistoryMessage, PublicUser } from "./types";
 
 /** Sage-family palette for generated avatars (matches web app.js). */
 export const PEER_COLORS = [
@@ -197,6 +198,10 @@ export function lastMessagePreviewFor(
   for (let i = arr.length - 1; i >= 0; i--) {
     const m = arr[i];
     if (m.type === "system") continue;
+    if (m.type === "call" && m.call) {
+      const t = callEntryText(m.call, meId);
+      return t.detail ? `${t.title} · ${t.detail}` : t.title;
+    }
     const prefix = meId != null && m.user_id === meId ? "You: " : "";
     if (m.text) return prefix + m.text.replace(/\s+/g, " ").slice(0, 80);
     if (m.attachments && m.attachments.length) {
@@ -273,4 +278,100 @@ function pushTextWithBreaks(chunk: string, out: BodySegment[]): void {
 export function firstUrl(text: string): string | null {
   const m = (text || "").match(/(https?:\/\/[^\s<]+)/);
   return m ? m[1] : null;
+}
+
+// ---------- calls ----------
+
+/** Outcomes the callee already knows about: never a missed call. */
+const KNOWN_CALL_OUTCOMES = new Set(["completed", "declined", "failed"]);
+
+/** Whether viewerId missed this call: they were called, and it was neither
+ *  answered nor declined (the server's unread rule, db.CallMissed). */
+export function callMissedBy(call: CallRecord | undefined, viewerId: number | null | undefined): boolean {
+  return !!call && viewerId != null && call.callee_id === viewerId && !KNOWN_CALL_OUTCOMES.has(call.status);
+}
+
+/** Seconds as m:ss, or h:mm:ss from an hour (db.FormatCallDuration). */
+export function fmtCallDuration(sec: number): string {
+  const total = Math.max(0, Math.floor(sec || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const ss = String(total % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
+/** A call entry as viewerId sees it: "Video call" · "4:32", "Voice call" ·
+ *  "No answer", or "Missed video call" (detail ""). */
+export interface CallEntryText {
+  title: string;
+  /** Duration or outcome; "" when the title says it all. */
+  detail: string;
+  /** viewerId missed the call (drawn as an alert). */
+  missed: boolean;
+  /** viewerId placed the call. */
+  outgoing: boolean;
+}
+
+export function callEntryText(call: CallRecord, viewerId: number | null | undefined): CallEntryText {
+  const kind = call.media === "video" ? "video call" : "voice call";
+  const outgoing = viewerId != null && call.caller_id === viewerId;
+  if (callMissedBy(call, viewerId)) return { title: "Missed " + kind, detail: "", missed: true, outgoing };
+  const details: Record<string, string> = {
+    completed: fmtCallDuration(call.duration),
+    declined: "Declined",
+    failed: "Couldn't connect",
+    cancelled: "Cancelled",
+    no_answer: "No answer",
+    busy: "Busy",
+    unavailable: "Unavailable",
+  };
+  return { title: kind[0].toUpperCase() + kind.slice(1), detail: details[call.status] ?? "", missed: false, outgoing };
+}
+
+/** The call screen's status line for a session, e.g. "Ringing…", "0:42". */
+export function callStatusText(session: CallSession, now: number = Date.now()): string {
+  switch (session.phase) {
+    case "outgoing":
+      return session.ringing ? "Ringing…" : "Calling…";
+    case "incoming":
+      return session.media === "video" ? "Incoming video call" : "Incoming voice call";
+    case "connecting":
+      return "Connecting…";
+    case "reconnecting":
+      return "Reconnecting…";
+    case "active":
+      return fmtCallDuration(((now - (session.answeredAt ?? now)) / 1000) | 0);
+    case "ended":
+      return callOutcomeText(session.outcome, session.direction);
+  }
+}
+
+/** Why a call ended, as its call screen says it. */
+export function callOutcomeText(outcome: CallOutcome | null, direction: "outgoing" | "incoming"): string {
+  switch (outcome) {
+    case "declined":
+      return "Declined";
+    case "busy":
+      return "Busy";
+    case "no_answer":
+      return "No answer";
+    case "unavailable":
+      return "Unavailable";
+    case "cancelled":
+      return direction === "incoming" ? "Missed call" : "Call ended";
+    case "answered_elsewhere":
+      return "Answered on another device";
+    case "busy_self":
+      return "You're on a call on another device";
+    case "invalid":
+      return "This person can't be called";
+    case "no_media":
+      return "Microphone unavailable";
+    case "failed":
+      return "Couldn't connect";
+    case "lost":
+      return "Connection lost";
+    default:
+      return "Call ended";
+  }
 }

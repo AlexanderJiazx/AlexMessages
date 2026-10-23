@@ -5,8 +5,11 @@
 //   1. Receive Web Push events and call `showNotification` for every one.
 //      The Push API contract for `userVisibleOnly: true` subscriptions
 //      REQUIRES this — if we ever skip it, the browser will eventually
-//      degrade or revoke the subscription, and Chrome will surface a
-//      generic "site updated in the background" notification instead.
+//      degrade or revoke the subscription (Safari revokes it after 3 such
+//      pushes, focused tab or not), and Chrome will surface a generic
+//      "site updated in the background" notification instead.
+//      The one exception is a "call_over" push in a Chromium-based browser
+//      while a tab of ours is visible and focused (see stopRinging).
 //
 //   2. Handle notification clicks by focusing an existing tab (and asking
 //      it to open the relevant DM) or by opening a new one.
@@ -52,11 +55,14 @@ function absolutize(maybePath) {
 self.addEventListener("push", (event) => {
   const data = safeParsePush(event);
   const title = data.title || "Alex Messages";
-  const body = data.body || "New message";
+  const body = data.body || (data.kind === "call_over" ? "Call ended" : "New message");
   const icon = absolutize(data.icon) || self.location.origin + ICON_FALLBACK;
   const badge = absolutize(data.badge) || self.location.origin + BADGE_FALLBACK;
   const url = data.url || "/";
   const channel = data.channel || "";
+  // Calls share one tag per call: "call" rings, then "missed_call" or
+  // "call_over" (answered or declined) replaces the ringing notification.
+  const isCall = data.kind === "call" || data.kind === "missed_call" || data.kind === "call_over";
 
   // Stash the channel id on the notification so notificationclick can route
   // straight into the right DM. Unique tag per push so macOS Chrome reliably
@@ -65,17 +71,25 @@ self.addEventListener("push", (event) => {
     body,
     icon,
     badge,
-    tag: `am-${Date.now()}`,
+    tag: isCall && data.tag ? data.tag : `am-${Date.now()}`,
     renotify: true,
+    // A ringing call stays on screen until it is answered or dismissed.
+    requireInteraction: !!data.require_interaction,
     data: { url, channel },
     timestamp: data.created_at ? data.created_at * 1000 : Date.now(),
   };
 
   console.log("[sw] push:", title, "—", body, channel ? `(channel ${channel})` : "");
 
+  if (data.kind === "call_over") {
+    event.waitUntil(stopRinging(title, options));
+    return;
+  }
+
   // Tell any open tabs that a push for this channel arrived. They use it to
   // refresh their unread state without waiting for the WebSocket round trip.
-  const notifyClients = self.clients.matchAll({ type: "window", includeUncontrolled: true })
+  // A call is not a message: open tabs learn about it over the socket.
+  const notifyClients = isCall ? Promise.resolve() : self.clients.matchAll({ type: "window", includeUncontrolled: true })
     .then((clients) => {
       for (const client of clients) {
         try {
@@ -90,6 +104,42 @@ self.addEventListener("push", (event) => {
     self.registration.showNotification(title, options),
   ]));
 });
+
+// A ringing call was answered or declined, maybe on another device: its
+// ringing notification goes away, and a quiet notification saying what
+// happened takes its place under the same tag. While a tab of ours is
+// focused, the user saw the ringing stop in that tab (the call was answered
+// or declined), so nothing should stay on screen. Chromium lets a push show
+// nothing while the active tab of any of its windows is a visible page of
+// ours; a focused tab of ours is always such a tab, so there the push shows
+// nothing. (A visible but unfocused tab also qualifies, but it still gets the
+// quiet notification: only a focused tab leaves the screen clear.) Safari
+// has no such exception (it revokes the subscription after 3 pushes that
+// show nothing), so other browsers show the quiet notification and close it
+// at once.
+async function stopRinging(title, options) {
+  const ringing = await self.registration.getNotifications({ tag: options.tag });
+  for (const n of ringing) n.close();
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  const focused = windows.some((w) => w.visibilityState === "visible" && w.focused);
+  if (focused && isChromium()) return;
+  await self.registration.showNotification(title, {
+    ...options,
+    renotify: false,
+    silent: true,
+    requireInteraction: false,
+  });
+  if (!focused) return;
+  const shown = await self.registration.getNotifications({ tag: options.tag });
+  for (const n of shown) n.close();
+}
+
+// Chromium-based browsers (Chrome, Edge, Opera, Brave…) list a "Chromium"
+// brand in User-Agent Client Hints, which Safari and Firefox don't implement.
+function isChromium() {
+  const brands = (self.navigator.userAgentData && self.navigator.userAgentData.brands) || [];
+  return brands.some((b) => b.brand === "Chromium");
+}
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();

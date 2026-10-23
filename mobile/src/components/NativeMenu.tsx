@@ -1,6 +1,15 @@
-import React from "react";
-import { Platform, Pressable, View, type ColorValue, type StyleProp, type ViewStyle } from "react-native";
+import React, { useState } from "react";
+import {
+  Platform,
+  Pressable,
+  View,
+  type ColorValue,
+  type ImageSourcePropType,
+  type StyleProp,
+  type ViewStyle,
+} from "react-native";
 import { Button, Host, Menu, RNHostView, buttonStyle, menuIndicator } from "./SwiftUI";
+import * as Compose from "./JetpackCompose";
 import type { SFSymbol } from "sf-symbols-typescript";
 import { NativeContextMenu, NativeMenuButton, type NativeMenuItem } from "../../modules/native-menu";
 import { colors, glassSupported } from "../theme";
@@ -13,6 +22,11 @@ export interface MenuAction {
   label: string;
   /** SF Symbol shown beside the label on iOS. */
   systemImage?: SFSymbol;
+  /**
+   * Leading icon in the Android dropdown (GlassMenuButton `dropdown`): an
+   * Android vector drawable, `require("…/assets/icons/<name>.xml")`.
+   */
+  androidIcon?: ImageSourcePropType;
   destructive?: boolean;
   onPress: () => void;
 }
@@ -122,7 +136,8 @@ export function LongPressMenu({
  * Round glass button that opens an anchored popover menu on tap (the iOS 26
  * "+" in Messages). A UIKit glass UIButton with its menu as the primary
  * action on iOS 26, so the menu morphs out of the button; GlassIconButton +
- * ActionSheet elsewhere.
+ * ActionSheet elsewhere — or, with `dropdown`, a Material dropdown anchored
+ * to the button on Android.
  */
 export function GlassMenuButton({
   actions,
@@ -131,6 +146,10 @@ export function GlassMenuButton({
   label,
   title,
   size = 44,
+  iconSize = 18,
+  fallbackIconSize = 24,
+  iconColor = colors.ink2,
+  dropdown,
 }: {
   actions: MenuAction[];
   systemImage: SFSymbol;
@@ -138,14 +157,30 @@ export function GlassMenuButton({
   label: string;
   title?: string;
   size?: number;
+  /** The SF Symbol's point size (iOS 26). */
+  iconSize?: number;
+  /** The Ionicons glyph's size (elsewhere). */
+  fallbackIconSize?: number;
+  /** The SF Symbol's color (iOS 26). */
+  iconColor?: string;
+  /**
+   * Android: open a Material dropdown under the button (a top-bar menu)
+   * instead of the bottom sheet (the composer "+" keeps the sheet).
+   */
+  dropdown?: boolean;
 }) {
+  if (dropdown && Platform.OS === "android") {
+    return (
+      <DropdownButton actions={actions} icon={fallbackIcon} label={label} size={size} iconSize={fallbackIconSize} />
+    );
+  }
   if (!nativeMenus) {
     return (
       <GlassIconButton
         icon={fallbackIcon}
         label={label}
         size={size}
-        iconSize={24}
+        iconSize={fallbackIconSize}
         onPress={() =>
           showActionSheet({
             title,
@@ -166,12 +201,70 @@ export function GlassMenuButton({
     <NativeMenuButton
       actions={toItems(actions)}
       systemImage={systemImage}
-      iconSize={18}
-      iconColor={colors.ink2}
+      iconSize={iconSize}
+      iconColor={iconColor}
       label={label}
       onPressAction={(e) => pressById(actions, e.nativeEvent.id)}
       style={{ width: size, height: size }}
     />
+  );
+}
+
+/**
+ * Android: the round button with a Material 3 dropdown anchored to it — the
+ * Jetpack Compose `DropdownMenu` (via @expo/ui), with the React Native button
+ * hosted as its trigger. Light, on the app's paper, whatever the device theme;
+ * `seedColor` keeps any color not set here sage instead of the wallpaper's.
+ */
+function DropdownButton({
+  actions,
+  icon,
+  label,
+  size,
+  iconSize,
+}: {
+  actions: MenuAction[];
+  icon: IconName;
+  label: string;
+  size: number;
+  iconSize: number;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Compose.Host matchContents colorScheme="light" seedColor={colors.sage}>
+      <Compose.DropdownMenu expanded={open} onDismissRequest={() => setOpen(false)} color={colors.paper}>
+        <Compose.DropdownMenu.Trigger>
+          <Compose.RNHostView matchContents>
+            <GlassIconButton icon={icon} label={label} size={size} iconSize={iconSize} onPress={() => setOpen(true)} />
+          </Compose.RNHostView>
+        </Compose.DropdownMenu.Trigger>
+        <Compose.DropdownMenu.Items>
+          {actions.map((a) => {
+            const tint = a.destructive ? colors.danger : colors.ink;
+            return (
+              <Compose.DropdownMenuItem
+                key={a.label}
+                onClick={() => {
+                  setOpen(false);
+                  a.onPress();
+                }}
+              >
+                {a.androidIcon && (
+                  <Compose.DropdownMenuItem.LeadingIcon>
+                    <Compose.Icon source={a.androidIcon} size={22} tint={tint} />
+                  </Compose.DropdownMenuItem.LeadingIcon>
+                )}
+                <Compose.DropdownMenuItem.Text>
+                  <Compose.Text color={tint} style={{ typography: "bodyLarge" }}>
+                    {a.label}
+                  </Compose.Text>
+                </Compose.DropdownMenuItem.Text>
+              </Compose.DropdownMenuItem>
+            );
+          })}
+        </Compose.DropdownMenu.Items>
+      </Compose.DropdownMenu>
+    </Compose.Host>
   );
 }
 

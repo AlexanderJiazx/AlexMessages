@@ -36,7 +36,9 @@ two ways, rewrite it before sending.
   rail + conversation above the `720` breakpoint.
 - Modal screens **must** wrap their root in `SafeAreaView edges={["top","bottom"]}`
   — without it the header renders under the Android status bar (edge-to-edge)
-  and the close control is unreachable to users and UiAutomator.
+  and the close control is unreachable to users and UiAutomator. The one
+  exception is the call screen, which pads with `useSafeAreaInsets()`
+  instead (see **Calls** below).
 - Menus go through `src/components/NativeMenu.tsx`: `LongPressMenu` (the
   iMessage-style system context menu — the view lifts out beside its menu),
   `GlassMenuButton` (a native glass button whose menu morphs out of it, e.g.
@@ -48,6 +50,18 @@ two ways, rewrite it before sending.
   fall back to `src/components/ActionSheet.tsx` (bottom-sheet `Modal`). Do
   **not** use `Alert.alert` for menus — Android caps it at 3 buttons and drops
   Cancel (alerts are fine for confirmations).
+- A top-bar menu on Android is a Material dropdown anchored to its button,
+  not the bottom sheet: `GlassMenuButton` with `dropdown` (used by the DM
+  header's call button; the composer "+" keeps the sheet). It is the Jetpack
+  Compose `DropdownMenu` from `@expo/ui/jetpack-compose` with the React
+  Native button hosted as its trigger (`RNHostView`). Import Compose
+  primitives from `src/components/JetpackCompose.tsx` (the Android file
+  re-exports `@expo/ui/jetpack-compose`; the iOS/web file is a typed stub),
+  mirroring `SwiftUI.tsx` on iOS. A dropdown item's leading icon
+  (`MenuAction.androidIcon`) is an Android vector drawable required from
+  `assets/icons/*.xml`: Expo UI's `Icon` renders only filled `<path>`s (no
+  strokes, no groups), and those two files are glyphs taken from the
+  bundled Ionicons font, so they match the app's other icons.
 - The iOS image viewer is `ImagePreview`
   (`modules/native-menu/ios/ImagePreviewModule.swift`, called through
   `previewImage` in `modules/native-menu/index.ios.ts`): a UIKit view
@@ -199,6 +213,135 @@ two ways, rewrite it before sending.
   swipe starts. Android calls `Keyboard.dismiss()` on `beforeRemove`.
 - iOS screenshots omit secure-text contents and the secure keyboard — an
   "empty" password field in a Maestro capture is not a bug.
+- The status bar belongs to the screens: every Stack screen sets
+  `statusBarStyle` (`app/_layout.tsx`: `"dark"` by default, `"light"` on
+  `/call`). Don't add expo-status-bar's `<StatusBar>` — with
+  `UIViewControllerBasedStatusBarAppearance` on (the image viewer needs it),
+  React Native's StatusBar module throws (a red box on iOS). Set the style on
+  every screen: once one screen sets it, Android gives the light style to
+  screens that don't.
+- `@expo/ui` must stay autolinked on Android: expo-router's own Android code
+  imports it, and excluding it (`expo.autolinking.android.exclude` in
+  `package.json`) crashed the app at launch with "Cannot find native module
+  'ExpoUI'".
+- **Calls** (`src/call/`, `app/call.tsx`; the root CLAUDE.md/AGENTS.md has
+  the whole design under **DM calls**). The shared `CallManager`
+  (`store.calls`) owns all call logic; this app only adapts and draws it.
+  - `src/call/platform.native.ts` adapts react-native-webrtc. Its
+    `MediaStreamTrack.stop()` only disables a track; `release()` frees the
+    native capturer. The adapter releases every stream it creates
+    (`releaseStream`) before the tracks in it: on Android,
+    `MediaStream.dispose()` also disposes the tracks it still lists and
+    throws on one that was already disposed. Don't release call tracks or
+    streams anywhere else.
+  - Video is `CallVideo` (`RTCView`). On Android an `RTCView` renders into a
+    `SurfaceView`, which ignores opacity and rounded-corner clipping: hide a
+    video by drawing a view over it (as `CallScreen`'s backdrop and the
+    floating tile's cover do), and give a video drawn over another video
+    `zOrder={1}`.
+  - All call sounds and audio routing go through `callAudio`
+    (react-native-incall-manager). While a call is live, nothing else may
+    touch the audio session: expo-audio's pause deactivates the iOS session
+    100 ms later, `setAudioModeAsync` sets the `.playback` category, and
+    expo-video sets `.playback` on every play. `src/media.ts` enforces it —
+    register any new player or recorder with `registerMedia`, and check
+    `isCallLive()` before starting one (`enablePlayback()` already returns
+    early during a call).
+  - The sound files must keep their names
+    (`assets/sounds/incallmanager_ringtone.mp3`,
+    `incallmanager_ringback.mp3`): InCallManager's `"_BUNDLE_"` looks them up
+    in the iOS bundle root and Android `res/raw`, where the `expo-asset`
+    plugin in `app.json` copies them at prebuild.
+  - `/call` is a `fullScreenModal` with `gestureEnabled: false` (a call ends
+    with a button, never a swipe). `CallHost` pushes it once per call and the
+    route closes itself when `useCallView().call` is null; the chevron closes
+    it mid-call and the floating tile reopens it. Both the push and the close
+    wait while the app is in the background (`useAppVisible`): on iOS a
+    modal dismissed in the background never finishes its transition, and
+    react-native-screens' snapshot of the closing screen comes out blank, so
+    the app came back to a black screen.
+  - The floating tile (`MiniCall`) on iOS: while a modal sheet (`settings`,
+    `new-chat`, `profile`: the `SHEETS` routes in `CallHost`) is open,
+    `OverSheet` renders it in a react-native-screens `FullWindowOverlay`
+    (with `unstable_accessibilityContainerViewIsModal={false}`, so VoiceOver
+    still reaches the app), because iOS presents the sheets above the root
+    view. On every other route it stays in the root view: react-native-screens
+    brings the overlay window's container to the front whenever UIKit adds a
+    subview to the window, so in the overlay the tile would draw above
+    context menus, the image viewer, and the closing call screen. An `Alert`
+    has its own window and always covers the tile. Each move between the
+    overlay and the root view (a sheet opens or closes) remounts `MiniCall`,
+    which shows the peer's avatar until the video's first frame arrives
+    again. Android needs no overlay: the sheets are views in the root view,
+    and the tile, drawn after the Stack, is above them. NOT verified on a
+    device: with a sheet open, the tile also draws above anything presented
+    over the sheet (the Settings → Profile photo menu and the photo picker),
+    and after a minimize onto a sheet it shows at once over the call screen
+    while that screen slides away.
+  - `CallScreen` pads its controls with `useSafeAreaInsets()` — never a
+    `SafeAreaView`, and no extra `SafeAreaProvider` in the modal. A
+    `SafeAreaView` has no insets on its first frames (Fabric applies them
+    natively afterwards) and in an iOS full-screen modal gets none at all, so
+    the chevron sat under the status bar while the screen opened. Measured on
+    Android: one frame with the root provider; about 0.75 s with a provider
+    inside the modal, which reports no top inset until the modal's transition
+    ends.
+  - The incoming-call notification is `presentCallNotification` in
+    `src/notify.ts` (identifier `call:<channel>`, Android channel `calls`);
+    `CallHost` removes it when the call stops ringing. On Android a
+    notification's channel is set by `trigger: { channelId }` — a
+    `channelId` inside `content` is ignored. It is the fallback: on iOS the
+    system call UI rings instead, and on Android the ring service does
+    while it runs (both below).
+  - The phone's own call handling is `src/call/system.ios.ts` (iOS),
+    `system.android.ts` (Android) and `system.ts` (Expo web). Keep their
+    seven exports identical: `session.tsx`, `CallHost` and `app/call.tsx`
+    import `./system`, and Metro picks the platform file.
+  - iOS: `modules/system-calls` reports every call to CallKit or, in
+    mainland China, LiveCommunicationKit (`SystemCalls.kind`, from the
+    region setting). While the system holds a call it owns the audio
+    session: `CallAudio.swift` puts WebRTC's `RTCAudioSession` in manual
+    audio and enables it only between the provider's activate and
+    deactivate callbacks, and does `callAudio`'s (InCallManager's) job for
+    that call. Never start InCallManager's session for a call the system
+    holds — `useCallRoute` in `system.ios.ts` picks the sounds for each
+    call. Adding a Swift file to the module needs `pod install`. The iOS
+    Simulator never uses the system call UI (`kind` is `none` there: iOS
+    ends every CallKit / LiveCommunicationKit call in the Simulator), so
+    test changes to this module on a real iPhone.
+  - Android: `modules/call-ringer` is the ring service that rings calls
+    while the app is closed (the root CLAUDE.md/AGENTS.md describes it
+    under **DM calls**). Its rules:
+    - Never `stopService` it: stopping a service started with
+      `startForegroundService` before it reached `startForeground` crashes
+      the app. `RingService.stop` clears the stored session, and the
+      service stops itself.
+    - The app and the service agree on "on screen" through `AppVisibility`
+      (an activity is resumed: the same signal as React Native's
+      `AppState`). The app claims each call it rings (`CallRinger.claim`)
+      and releases it when the call stops ringing or the app leaves the
+      screen; the service posts its notification only for an unclaimed
+      call while the app is off screen.
+    - The missed-call notification takes the conversation's slot (tag =
+      the channel, id 0). That is where expo-notifications posts the
+      conversation's message notification (identifier = the channel, id
+      `ExpoPresentationDelegate.ANDROID_NOTIFICATION_ID`), so either one
+      replaces the other, and `dismissForChannel` clears both.
+    - The service runs only while notifications are allowed
+      (`CallRinger.notificationsAllowed()`), and `session.tsx` re-syncs it
+      every time the app comes back to the foreground. Every path to the
+      login screen stops it (`syncRingService(false)`): logout, and an app
+      start with no stored token or a failed startup `GET /api/me`. The
+      service keeps its own copy of the session and would otherwise ring
+      calls that the signed-out app can't answer. expo-notifications
+      reports "denied" rather than "undetermined" once the app has asked
+      before, so ask through `ensureNotificationPermission()`, which asks
+      whenever Android still shows the prompt. After two denials
+      (`canAskAgain` false) Android shows no prompt; send the user to
+      `CallRinger.openNotificationSettings()`.
+    - A native change needs a rebuild (`npm run android`): Fast Refresh
+      pushes the new JS into the old native build, which then fails with
+      "undefined is not a function".
 
 ## Test
 

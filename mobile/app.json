@@ -12,7 +12,8 @@
       "bundleIdentifier": "com.alexanderjia.messages",
       "infoPlist": {
         "UIBackgroundModes": [
-          "audio"
+          "audio",
+          "voip"
         ],
         "UIViewControllerBasedStatusBarAppearance": true
       }
@@ -43,7 +44,9 @@
             "enableSceneSupport": true
           },
           "android": {
-            "buildArchs": ["arm64-v8a"],
+            "buildArchs": [
+              "arm64-v8a"
+            ],
             "enableMinifyInReleaseBuilds": true,
             "enableShrinkResourcesInReleaseBuilds": true
           }
@@ -52,7 +55,14 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow Alex Messages to access your microphone for voice messages and dictation."
+          "microphonePermission": "Allow Alex Messages to access your microphone for calls, voice messages, and dictation."
+        }
+      ],
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "Allow Alex Messages to use your camera for video calls.",
+          "microphonePermission": "Allow Alex Messages to access your microphone for calls, voice messages, and dictation."
         }
       ],
       [
@@ -72,7 +82,16 @@
       "expo-secure-store",
       "expo-web-browser",
       "expo-sharing",
-      "expo-build-properties"
+      "expo-build-properties",
+      [
+        "expo-asset",
+        {
+          "assets": [
+            "./assets/sounds/incallmanager_ringtone.mp3",
+            "./assets/sounds/incallmanager_ringback.mp3"
+          ]
+        }
+      ]
     ]
   }
 }

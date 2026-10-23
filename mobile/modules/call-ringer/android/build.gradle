@@ -1,0 +1,23 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.alexanderjia.messages'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.callringer"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+}
+
+dependencies {
+  // The same versions other modules in the app already ask for (expo-asset,
+  // expo-audio): nothing new to resolve.
+  implementation 'com.facebook.react:react-android'
+  implementation 'com.squareup.okhttp3:okhttp:4.9.2'
+  implementation 'androidx.core:core-ktx:1.15.0'
+}

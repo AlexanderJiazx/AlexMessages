@@ -31,7 +31,8 @@ export const EdgeBlur = requireNativeView<EdgeBlurProps>("EdgeBlur");
 export function previewImage(
   url: string,
   sourceTag: number | null,
-  name?: string
+  name?: string,
+  headers?: Record<string, string>
 ): Promise<void> {
-  return requireNativeModule("ImagePreview").preview(url, sourceTag, name);
+  return requireNativeModule("ImagePreview").preview(url, sourceTag, name, headers ?? {});
 }

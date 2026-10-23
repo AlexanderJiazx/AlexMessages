@@ -3,7 +3,6 @@ package webapp
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -14,18 +13,43 @@ import (
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
 	"alexmessage/internal/debuglog"
+	"alexmessage/internal/httpx"
 	"alexmessage/internal/push"
 	"alexmessage/internal/runtime"
 )
 
 var upgrader = websocket.Upgrader{
-	// Starlette/FastAPI did not enforce WS origin; match that here.
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: httpx.WebSocketOrigin,
 }
 
-// registerWS wires the /ws WebSocket endpoint (mirrors routes/ws.py).
+// The /ws heartbeat. The server sends a WebSocket ping control frame every
+// wsPingInterval; browsers and native WebSocket stacks answer it with a pong
+// by themselves, so a client that never sends a frame of its own (the legacy
+// static/app.js has no keepalive) still refreshes its read deadline. A socket
+// that sends nothing, pong included, for wsReadTimeout is dropped as dead.
+// The ping also keeps a reverse proxy from closing an idle socket (nginx's
+// default proxy_read_timeout is 60 s).
+var (
+	// The tests shorten these two.
+	wsPingInterval = 25 * time.Second
+	wsReadTimeout  = 75 * time.Second
+	// wsSessionCheck is how often the session is re-checked, so a logout
+	// elsewhere closes the socket (close 4401) even while it is idle.
+	wsSessionCheck = 5 * time.Second
+	// wsWriteWait bounds a ping write, which waits for any frame in flight.
+	wsWriteWait = 10 * time.Second
+)
+
+// registerWS wires the /ws WebSocket endpoint (mirrors routes/ws.py), and the
+// call listener socket on /ws?mode=calls (call_listener.go).
 func registerWS(r *gin.Engine) {
-	r.GET("/ws", handleWS)
+	r.GET("/ws", func(c *gin.Context) {
+		if c.Query("mode") == "calls" {
+			handleCallListener(c)
+			return
+		}
+		handleWS(c)
+	})
 }
 
 // ---------- wire payload shapes ----------
@@ -36,12 +60,14 @@ type dmThread struct {
 }
 
 type dmStatePayload struct {
-	Pinned         bool  `json:"pinned"`
-	LastReadAt     int64 `json:"last_read_at"`
-	ClearedAt      int64 `json:"cleared_at"`
-	ForceUnread    bool  `json:"force_unread"`
-	UnreadCount    int   `json:"unread_count"`
-	PeerLastReadAt int64 `json:"peer_last_read_at"`
+	Pinned               bool  `json:"pinned"`
+	LastReadAt           int64 `json:"last_read_at"`
+	ClearedAt            int64 `json:"cleared_at"`
+	ForceUnread          bool  `json:"force_unread"`
+	UnreadCount          int   `json:"unread_count"`
+	PeerLastReadAt       int64 `json:"peer_last_read_at"`
+	LastReadPosition     int64 `json:"last_read_position"`
+	PeerLastReadPosition int64 `json:"peer_last_read_position"`
 }
 
 type initPayload struct {
@@ -70,11 +96,14 @@ type broadcastMessage struct {
 	ReplyTo     *string             `json:"reply_to"`
 	Attachments []db.Attachment     `json:"attachments"`
 	CreatedAt   int64               `json:"created_at"`
+	Position    int64               `json:"position"`
 	EditedAt    *int64              `json:"edited_at"`
 	// ClientID echoes the sender's optimistic-message nonce so their client can
 	// reconcile the locally rendered bubble with the persisted message. Other
 	// recipients have no matching pending bubble and simply ignore it.
 	ClientID string `json:"client_id,omitempty"`
+	// Call is set on type="call" messages (the thread entry for a finished call).
+	Call *db.CallRecord `json:"call,omitempty"`
 }
 
 // ---------- handler ----------
@@ -82,7 +111,8 @@ type broadcastMessage struct {
 func handleWS(c *gin.Context) {
 	// Cookie or bearer auth is read before the upgrade; we still complete the
 	// handshake so the client receives close(4401) and redirects to /login.
-	user := auth.ResolveSession(requestSessionToken(c), "user")
+	token := requestSessionToken(c)
+	user := auth.ResolveSession(token, "user")
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -96,23 +126,79 @@ func handleWS(c *gin.Context) {
 	}
 	defer conn.Close()
 
+	pingInterval, readTimeout := wsPingInterval, wsReadTimeout
+	conn.SetReadLimit(128 * 1024)
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	// Pongs arrive inside ReadMessage, on this goroutine.
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readTimeout))
+	})
+	stopped := make(chan struct{})
+	watcherDone := make(chan struct{})
+	defer func() { close(stopped); <-watcherDone }()
+	go func() {
+		defer close(watcherDone)
+		session := time.NewTicker(wsSessionCheck)
+		defer session.Stop()
+		beat := time.NewTicker(pingInterval)
+		defer beat.Stop()
+		for {
+			select {
+			case <-stopped:
+				return
+			case <-beat.C:
+				// WriteControl may run alongside the client's other writes.
+				// A ping that can't be written means the socket is dead;
+				// closing it ends the read loop at once.
+				if conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)) != nil {
+					_ = conn.Close()
+					return
+				}
+			case <-session.C:
+				if auth.ResolveSession(token, "user") == nil {
+					_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "Session revoked"), time.Now().Add(time.Second))
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
+
 	presence := runtime.PresenceTracker()
-	client := &runtime.Client{Conn: conn, UserID: user.ID}
+	client := &runtime.Client{Conn: conn, UserID: user.ID, SessionToken: token}
 	presence.Add(client)
-	debuglog.Emit("messages", "info", "ws_connect", "User connected", map[string]any{"user": user.Username})
-
-	runtime.SendJSON(client, buildInitPayload(user))
-	runtime.BroadcastPresence()
-
+	// Registered right after Add, so no early return or panic below can leave
+	// the socket in presence (the user shown online with no socket).
+	unloaded := false // the page closed the socket on its way out (1001)
 	defer func() {
 		presence.Remove(client)
+		callSocketGone(client, unloaded)
 		runtime.BroadcastPresence()
 		debuglog.Emit("messages", "info", "ws_disconnect", "User disconnected", map[string]any{"user": user.Username})
 	}()
+	debuglog.Emit("messages", "info", "ws_connect", "User connected", map[string]any{"user": user.Username})
+
+	payload, err := buildInitPayload(user)
+	if err != nil {
+		// A partial init would replace the client's state with missing threads.
+		// Close 1011 (internal error) makes the client reconnect and retry.
+		debuglog.Emit("messages", "error", "ws_init_failed", "Init payload could not be loaded", map[string]any{"user": user.Username, "err": err.Error()})
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "init failed"), time.Now().Add(time.Second))
+		return
+	}
+	runtime.SendJSON(client, payload)
+	runtime.BroadcastPresence()
+	deliverRingingCalls(client)
 
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			unloaded = websocket.IsCloseError(err, websocket.CloseGoingAway)
+			return
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+		if auth.ResolveSession(token, "user") == nil {
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "Session revoked"), time.Now().Add(time.Second))
 			return
 		}
 		var data map[string]any
@@ -122,13 +208,20 @@ func handleWS(c *gin.Context) {
 		kind, _ := data["type"].(string)
 		switch kind {
 		case "message":
-			handleWSMessage(user.ID, data)
+			handleWSMessage(user.ID, data, token)
 		case "edit":
-			handleWSEdit(user.ID, data)
+			handleWSEdit(user.ID, data, token)
 		case "switch":
 			handleWSSwitch(client, data)
 		case "open_dm":
 			handleWSOpenDM(client, user.ID, data)
+		case "call_start", "call_accept", "call_hangup", "call_signal", "call_resume":
+			handleCallMessage(client, user, kind, data)
+		case "visibility":
+			// Whether this device's screen is showing the app; incoming calls
+			// ring through Web Push when no device of the callee is visible.
+			visible, _ := data["visible"].(bool)
+			client.SetVisible(visible)
 		case "ping":
 			runtime.SendJSON(client, gin.H{"type": "pong"})
 		}
@@ -137,28 +230,48 @@ func handleWS(c *gin.Context) {
 
 // ---------- init payload ----------
 
-func buildInitPayload(user *db.User) initPayload {
+// buildInitPayload returns an error when any of its reads fails; the client
+// replaces its state with init, so it must not get a partial one.
+func buildInitPayload(user *db.User) (initPayload, error) {
 	userID := user.ID
-	contacts, _ := db.ListContacts(userID)
+	contacts, err := db.ListContacts(userID)
+	if err != nil {
+		return initPayload{}, err
+	}
 	contactSet := make(map[int]struct{}, len(contacts))
 	for _, id := range contacts {
 		contactSet[id] = struct{}{}
 	}
-	known, _ := runtime.AllKnownUsers()
-	dmStates, _ := db.ListDMStates(userID)
+	known, err := runtime.AllKnownUsers()
+	if err != nil {
+		return initPayload{}, err
+	}
+	dmStates, err := db.ListDMStates(userID)
+	if err != nil {
+		return initPayload{}, err
+	}
 
 	// DM threads to surface = contacts ∪ anyone we've messaged before.
 	partnerIDs := map[int]struct{}{}
 	for _, id := range contacts {
 		partnerIDs[id] = struct{}{}
 	}
-	if partners, err := db.DMPartnerIDs(userID); err == nil {
-		for id := range partners {
-			partnerIDs[id] = struct{}{}
-		}
+	partners, err := db.DMPartnerIDs(userID)
+	if err != nil {
+		return initPayload{}, err
+	}
+	for id := range partners {
+		partnerIDs[id] = struct{}{}
 	}
 
-	history := map[string][]db.HistoryMessage{}
+	history, err := db.FetchDMHistories(userID, runtime.InitialHistoryPage)
+	if err != nil {
+		return initPayload{}, err
+	}
+	summaries, err := db.DMSummaries(userID)
+	if err != nil {
+		return initPayload{}, err
+	}
 	historyHasMore := map[string]bool{}
 
 	dmThreads := []dmThread{}
@@ -167,32 +280,40 @@ func buildInitPayload(user *db.User) initPayload {
 		ch := db.DMChannelID(userID, pid)
 		state := dmStates[ch] // zero-value defaults when absent
 		clearedAt := state.ClearedAt
-		latestTS, _ := db.ChannelLatestMessageTS(ch)
+		summary := summaries[ch]
 		// Hide a deleted-for-me thread that has had no new activity since.
 		_, isContact := contactSet[pid]
-		if clearedAt != 0 && latestTS <= clearedAt && !isContact {
+		if clearedAt != 0 && summary.LatestPosition <= state.ClearedPosition && !isContact {
+			delete(history, ch)
 			continue
 		}
-		msgs, _ := db.FetchChannelWindow(ch, runtime.InitialHistoryPage, nil, afterPtr(clearedAt))
+		msgs := history[ch]
+		if msgs == nil {
+			msgs = []db.HistoryMessage{}
+		}
 		history[ch] = msgs
 		historyHasMore[ch] = len(msgs) == runtime.InitialHistoryPage
-		unread, _ := db.CountUnread(userID, ch, state.LastReadAt, clearedAt)
+		unread := summary.Unread
 		if state.ForceUnread && unread == 0 {
 			unread = 1
 		}
-		peerState, _ := db.GetDMState(pid, ch)
 		dmStateOut[ch] = dmStatePayload{
-			Pinned:         state.Pinned,
-			LastReadAt:     state.LastReadAt,
-			ClearedAt:      clearedAt,
-			ForceUnread:    state.ForceUnread,
-			UnreadCount:    unread,
-			PeerLastReadAt: peerState.LastReadAt,
+			Pinned:               state.Pinned,
+			LastReadAt:           state.LastReadAt,
+			ClearedAt:            clearedAt,
+			ForceUnread:          state.ForceUnread,
+			UnreadCount:          unread,
+			PeerLastReadAt:       summary.PeerLastReadAt,
+			LastReadPosition:     state.LastReadPosition,
+			PeerLastReadPosition: summary.PeerLastReadPosition,
 		}
 		dmThreads = append(dmThreads, dmThread{Channel: ch, PeerID: pid})
 	}
 
-	visible, _ := runtime.VisibleUserIDs(userID)
+	visible := map[int]struct{}{userID: {}}
+	for id := range partnerIDs {
+		visible[id] = struct{}{}
+	}
 	visibleUsers := []runtime.PublicUser{}
 	for uid := range visible {
 		if u, ok := known[uid]; ok {
@@ -221,34 +342,25 @@ func buildInitPayload(user *db.User) initPayload {
 		HistoryHasMore: historyHasMore,
 		PageSize:       runtime.InitialHistoryPage,
 		MaxUpload:      runtime.MaxUploadBytes,
-	}
-}
-
-// afterPtr maps `cleared_at or None` — 0 becomes nil (no lower bound).
-func afterPtr(clearedAt int64) *int64 {
-	if clearedAt == 0 {
-		return nil
-	}
-	return &clearedAt
+	}, nil
 }
 
 // ---------- message persistence ----------
 
 // makeMessagePayload persists a message (+ attachments) and returns the live
 // broadcast shape, including the resolved author.
-func makeMessagePayload(userID *int, channel, text string, replyTo *string, attachments []db.Attachment, msgType string) broadcastMessage {
-	msgID, _ := tokenHex(6) // 12 hex chars, like uuid4().hex[:12]
-	ts, _ := db.InsertMessage(msgID, channel, userID, text, replyTo, msgType, nil)
-	for _, a := range attachments {
-		rel := a.URL
-		if strings.HasPrefix(a.URL, "/uploads/") {
-			rel = a.URL[len("/uploads/"):]
-		}
-		owner := 0
-		if userID != nil {
-			owner = *userID
-		}
-		_ = db.InsertAttachment(msgID, owner, a.Name, rel, a.Size, a.Mime, a.Width, a.Height)
+func makeMessagePayload(userID *int, channel, text string, replyTo *string, attachments []db.Attachment, msgType, clientID string, sessionToken ...string) (broadcastMessage, error) {
+	msgID, err := tokenHex(6)
+	if err != nil {
+		return broadcastMessage{}, err
+	} // 12 hex chars, like uuid4().hex[:12]
+	ts, err := db.InsertMessageWithAttachments(msgID, channel, userID, text, replyTo, msgType, clientID, attachments, sessionToken...)
+	if err != nil {
+		return broadcastMessage{}, err
+	}
+	position, err := db.MessagePosition(msgID)
+	if err != nil {
+		return broadcastMessage{}, err
 	}
 	var author *runtime.PublicUser
 	if userID != nil {
@@ -267,12 +379,14 @@ func makeMessagePayload(userID *int, channel, text string, replyTo *string, atta
 		ReplyTo:     replyTo,
 		Attachments: attachments,
 		CreatedAt:   ts,
-	}
+		Position:    position,
+		ClientID:    clientID,
+	}, nil
 }
 
 // ---------- client → server handlers ----------
 
-func handleWSMessage(userID int, data map[string]any) {
+func handleWSMessage(userID int, data map[string]any, sessionToken ...string) {
 	channel, _ := data["channel"].(string)
 	a, b, ok := db.ParseDMChannel(channel)
 	if !ok || (a != userID && b != userID) {
@@ -305,8 +419,8 @@ func handleWSMessage(userID int, data map[string]any) {
 			continue
 		}
 		url, ok := am["url"].(string)
-		if !ok || !strings.HasPrefix(url, userPrefix) {
-			continue
+		if !ok || !strings.HasPrefix(url, userPrefix) || !validUploadFile(userID, strings.TrimPrefix(url, userPrefix)) {
+			return // Do not acknowledge a message after silently dropping a file.
 		}
 		cleanAtts = append(cleanAtts, db.Attachment{
 			Name:   truncateRunes(strOrDefault(am, "name", "file"), 120),
@@ -318,20 +432,50 @@ func handleWSMessage(userID int, data map[string]any) {
 		})
 	}
 
+	if text == "" && len(cleanAtts) == 0 {
+		return
+	}
 	var replyTo *string
 	if v, ok := data["reply_to"].(string); ok {
-		replyTo = &v
+		meta, _ := db.GetMessageMeta(v)
+		if meta != nil && meta.Channel == channel {
+			replyTo = &v
+		}
 	}
 
 	uid := userID
-	msg := makeMessagePayload(&uid, channel, text, replyTo, cleanAtts, "message")
-	if cid, ok := data["client_id"].(string); ok {
-		msg.ClientID = truncateRunes(cid, 64)
+	clientID := truncateRunes(strField(data, "client_id"), 64)
+	previous, _ := db.MessageByClientID(userID, channel, clientID)
+	var msg broadcastMessage
+	if previous == nil {
+		var err error
+		msg, err = makeMessagePayload(&uid, channel, text, replyTo, cleanAtts, "message", clientID, sessionToken...)
+		if err != nil {
+			// A competing retry may have committed the same nonce first.
+			previous, _ = db.MessageByClientID(userID, channel, clientID)
+			if previous == nil {
+				debuglog.Emit("messages", "error", "message_save_failed", "Message could not be saved", nil)
+				return
+			}
+		}
 	}
-	runtime.Broadcast(
-		gin.H{"type": "message", "channel": channel, "message": msg},
-		runtime.RecipientsForChannel(channel),
-	)
+	if previous != nil {
+		author, _ := db.GetUserByID(userID)
+		if author == nil {
+			return
+		}
+		pu := runtime.UserPublic(author)
+		msg = broadcastMessage{ID: previous.ID, Type: previous.Type, Channel: previous.Channel, UserID: previous.UserID, Author: &pu, Text: previous.Text, ReplyTo: previous.ReplyTo, Attachments: previous.Attachments, CreatedAt: previous.CreatedAt, EditedAt: previous.EditedAt, Position: previous.Position, ClientID: clientID}
+	}
+
+	recipients := runtime.RecipientsForChannel(channel)
+	if previous != nil {
+		recipients = runtime.PresenceTracker().SocketsFor(map[int]struct{}{userID: {}})
+	}
+	runtime.Broadcast(gin.H{"type": "message", "channel": channel, "message": msg}, recipients)
+	if previous != nil {
+		return
+	}
 
 	// DM-only: poke Web Push for the other participant (fire-and-forget).
 	if a, b, ok := db.ParseDMChannel(channel); ok {
@@ -346,7 +490,7 @@ func handleWSMessage(userID int, data map[string]any) {
 // handleWSEdit rewrites the body of the user's own message and notifies both
 // DM participants. Only plain "message" rows with a non-empty new text can be
 // edited; attachments are untouched.
-func handleWSEdit(userID int, data map[string]any) {
+func handleWSEdit(userID int, data map[string]any, sessionToken string) {
 	msgID, _ := data["id"].(string)
 	text, _ := data["text"].(string)
 	text = truncateRunes(trimSpace(text), 4000)
@@ -365,7 +509,7 @@ func handleWSEdit(userID int, data map[string]any) {
 		return
 	}
 	ts := db.NowTS()
-	if err := db.UpdateMessageText(msgID, text, ts); err != nil {
+	if err := db.EditMessageForSession(msgID, text, ts, userID, sessionToken); err != nil {
 		return
 	}
 	runtime.Broadcast(
@@ -386,7 +530,7 @@ func handleWSOpenDM(client *runtime.Client, userID int, data map[string]any) {
 	ch := db.DMChannelID(userID, peerID)
 	state, _ := db.GetDMState(userID, ch)
 	peerState, _ := db.GetDMState(peerID, ch)
-	hist, _ := db.FetchChannelWindow(ch, runtime.InitialHistoryPage, nil, afterPtr(state.ClearedAt))
+	hist, _ := db.FetchDMWindow(userID, ch, runtime.InitialHistoryPage, nil, "")
 	runtime.SendJSON(client, gin.H{
 		"type":     "dm_opened",
 		"channel":  ch,
@@ -394,12 +538,14 @@ func handleWSOpenDM(client *runtime.Client, userID int, data map[string]any) {
 		"history":  hist,
 		"has_more": len(hist) == runtime.InitialHistoryPage,
 		"state": dmStatePayload{
-			Pinned:         state.Pinned,
-			LastReadAt:     state.LastReadAt,
-			ClearedAt:      state.ClearedAt,
-			ForceUnread:    state.ForceUnread,
-			UnreadCount:    0,
-			PeerLastReadAt: peerState.LastReadAt,
+			Pinned:               state.Pinned,
+			LastReadAt:           state.LastReadAt,
+			ClearedAt:            state.ClearedAt,
+			ForceUnread:          state.ForceUnread,
+			UnreadCount:          0,
+			PeerLastReadAt:       peerState.LastReadAt,
+			LastReadPosition:     state.LastReadPosition,
+			PeerLastReadPosition: peerState.LastReadPosition,
 		},
 	})
 }

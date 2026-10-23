@@ -15,7 +15,7 @@ public final class ImagePreviewModule: Module {
     Name("ImagePreview")
 
     /// `sourceTag` is the React tag of the tapped image's box.
-    AsyncFunction("preview") { (url: String, sourceTag: Int?, name: String?) in
+    AsyncFunction("preview") { (url: String, sourceTag: Int?, name: String?, headers: [String: String]?) in
       guard let remote = URL(string: url) else {
         throw InvalidPreviewURLException(url)
       }
@@ -23,7 +23,7 @@ public final class ImagePreviewModule: Module {
         throw NoPresenterException()
       }
       let source = sourceTag.flatMap { self.appContext?.findView(withTag: $0, ofType: UIView.self) }
-      ImageViewerController.present(url: remote, name: name, source: source, from: presenter)
+      ImageViewerController.present(url: remote, name: name, source: source, headers: headers ?? [:], from: presenter)
     }
     .runOnQueue(.main)
   }
@@ -39,6 +39,9 @@ final class NoPresenterException: Exception {
 
 private final class ImageViewerController: UIViewController, UIScrollViewDelegate, UIGestureRecognizerDelegate {
   private let url: URL
+  private let headers: [String: String]
+  private var download: URLSessionDataTask?
+  private var isClosing = false
   private let name: String?
   /// The tapped box; hidden while the viewer is up (the picture is "out").
   private weak var source: UIView?
@@ -54,9 +57,9 @@ private final class ImageViewerController: UIViewController, UIScrollViewDelegat
   private var didFlyIn = false
   private var file: URL?
 
-  static func present(url: URL, name: String?, source: UIView?, from presenter: UIViewController) {
+  static func present(url: URL, name: String?, source: UIView?, headers: [String: String], from presenter: UIViewController) {
     presenter.view.window?.endEditing(true)
-    let viewer = ImageViewerController(url: url, name: name, source: source)
+    let viewer = ImageViewerController(url: url, name: name, source: source, headers: headers)
     viewer.modalPresentationStyle = .overFullScreen
     // Without this the status bar keeps reporting the presenter's appearance,
     // so it stayed on screen in the black chrome-less mode.
@@ -64,8 +67,9 @@ private final class ImageViewerController: UIViewController, UIScrollViewDelegat
     presenter.present(viewer, animated: false)
   }
 
-  private init(url: URL, name: String?, source: UIView?) {
+  private init(url: URL, name: String?, source: UIView?, headers: [String: String]) {
     self.url = url
+    self.headers = headers
     self.name = name
     self.source = source
     sourceRadius = source?.layer.cornerRadius ?? 0
@@ -140,6 +144,12 @@ private final class ImageViewerController: UIViewController, UIScrollViewDelegat
     pan.delegate = self
     view.addGestureRecognizer(pan)
 
+    // A pending network download must never create an invisible touch blocker.
+    if imageView.image == nil {
+      backdrop.alpha = 1
+      closeButton.alpha = 1
+      titleLabel.alpha = 1
+    }
     load()
   }
 
@@ -214,24 +224,37 @@ private final class ImageViewerController: UIViewController, UIScrollViewDelegat
   // MARK: - Loading
 
   private func load() {
-    URLSession.shared.dataTask(with: url) { [weak self] data, response, _ in
-      guard let self, let data else { return }
-      if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { return }
-      let image = UIImage(data: data)?.preparingForDisplay()
+    var request = URLRequest(url: url)
+    request.allHTTPHeaderFields = headers
+    request.timeoutInterval = 30
+    download = URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+      guard let self else { return }
+      guard let data,
+            let http = response as? HTTPURLResponse,
+            (200..<300).contains(http.statusCode),
+            let image = UIImage(data: data)?.preparingForDisplay() else {
+        DispatchQueue.main.async {
+          if self.imageView.image == nil, !self.isClosing {
+            self.isClosing = true
+            self.dismiss(animated: false)
+          }
+        }
+        return
+      }
       let file = self.save(data)
       DispatchQueue.main.async {
+        guard !self.isClosing else { return }
         self.file = file
         self.shareButton.isEnabled = file != nil
-        guard let image else { return }
         let first = self.imageView.image == nil
         self.imageView.image = image
-        // Same picture, sharper: only re-fit when nothing was showing yet.
         if first || self.scroll.zoomScale <= self.scroll.minimumZoomScale {
           self.layoutImage()
         }
         if first, !self.didFlyIn { self.flyIn() }
       }
-    }.resume()
+    }
+    download?.resume()
   }
 
   /// The downloaded file under tmp/ImagePreview/<uuid>/, named after the
@@ -348,6 +371,10 @@ private final class ImageViewerController: UIViewController, UIScrollViewDelegat
   }
 
   @objc private func close() {
+    if isClosing { return }
+    isClosing = true
+    download?.cancel()
+    if imageView.image == nil { dismiss(animated: false); return }
     flyOut()
   }
 

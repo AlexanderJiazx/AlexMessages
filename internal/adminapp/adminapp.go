@@ -7,6 +7,7 @@
 package adminapp
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +31,9 @@ func NewEngine() *gin.Engine {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	for _, dir := range []string{"static", "fonts"} {
+		r.StaticFS("/"+dir, httpx.NoListFS{FS: http.Dir(filepath.Join(db.BaseDir, dir))})
+	}
 
 	// The admin page shows a login form when no cookie; its JS handles both states.
 	r.GET("/", func(c *gin.Context) {
@@ -205,7 +209,10 @@ func handleReject(c *gin.Context) {
 		httpx.Error(c, http.StatusNotFound, "User not found")
 		return
 	}
-	_ = db.UpdateUserStatus(userID, "rejected")
+	if err := db.UpdateUserStatus(userID, "rejected"); err != nil {
+		userMutationError(c, err)
+		return
+	}
 	_ = db.DeleteUserSessions(userID)
 	fresh, _ := db.GetUserByID(userID)
 	c.JSON(http.StatusOK, gin.H{"user": db.UserToPublic(fresh)})
@@ -219,7 +226,14 @@ func handleDisable(c *gin.Context) {
 	if !ok {
 		return
 	}
-	_ = db.UpdateUserStatus(userID, "disabled")
+	if user, _ := db.GetUserByID(userID); user == nil {
+		httpx.Error(c, http.StatusNotFound, "User not found")
+		return
+	}
+	if err := db.UpdateUserStatus(userID, "disabled"); err != nil {
+		userMutationError(c, err)
+		return
+	}
 	_ = db.DeleteUserSessions(userID)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -279,7 +293,10 @@ func handlePatchUser(c *gin.Context) {
 				return
 			}
 		}
-		_ = db.SetAdmin(userID, wants)
+		if err := db.SetAdmin(userID, wants); err != nil {
+			userMutationError(c, err)
+			return
+		}
 	}
 	fresh, _ := db.GetUserByID(userID)
 	c.JSON(http.StatusOK, gin.H{"user": db.UserToPublic(fresh)})
@@ -327,14 +344,16 @@ func handleDeleteUser(c *gin.Context) {
 		httpx.Error(c, http.StatusNotFound, "User not found")
 		return
 	}
-	if user.IsAdmin {
-		if n, _ := db.CountAdmins(); n <= 1 {
+	// db.DeleteUser refuses the last approved administrator atomically; a
+	// disabled or rejected admin can always be deleted.
+	if err := db.DeleteUser(userID); err != nil {
+		if errors.Is(err, db.ErrLastAdministrator) {
 			httpx.Error(c, http.StatusBadRequest, "Refusing to delete the last administrator")
 			return
 		}
-	}
-	_ = db.DeleteUserSessions(userID)
-	_ = db.DeleteUser(userID)        // cascades messages/attachments/contacts via FK
+		userMutationError(c, err)
+		return
+	} // cascades messages/attachments/contacts via FK
 	db.DeleteUserUploads(userID)     // remove storage directory on disk
 	db.DeleteUserAvatarFiles(userID) // remove profile photo files on disk
 	c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -442,4 +461,12 @@ func loadAdminHTML() string {
 		return "<h1>admin.html missing</h1>"
 	}
 	return string(b)
+}
+
+func userMutationError(c *gin.Context, err error) {
+	if errors.Is(err, db.ErrLastAdministrator) {
+		httpx.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.Error(c, http.StatusInternalServerError, "internal error")
 }

@@ -28,3 +28,5 @@ mobile/build/
 mobile/ios/
 mobile/android/
 mobile/.kotlin/
+# Gradle output of the local native modules (compiled with the Android app)
+mobile/modules/*/android/build/

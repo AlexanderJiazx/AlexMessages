@@ -80,13 +80,18 @@ func handleMarkRead(c *gin.Context) {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return
 	}
+	state, err := db.GetDMState(user.ID, channel)
+	if err != nil {
+		httpx.Error(c, http.StatusInternalServerError, "internal error")
+		return
+	}
 	// Read receipt: tell both participants (the peer shows the "Read" remark;
 	// the reader's other tabs clear their unread state).
 	runtime.Broadcast(
-		gin.H{"type": "dm_read", "channel": channel, "user_id": user.ID, "last_read_at": cutoff},
+		gin.H{"type": "dm_read", "channel": channel, "user_id": user.ID, "last_read_at": cutoff, "last_read_position": state.LastReadPosition},
 		runtime.RecipientsForChannel(channel),
 	)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "last_read_at": cutoff})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "last_read_at": cutoff, "last_read_position": state.LastReadPosition})
 }
 
 func handleMarkUnread(c *gin.Context) {
