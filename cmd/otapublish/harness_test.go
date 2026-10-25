@@ -88,6 +88,8 @@ case "$1 $2" in
     while [ $# -gt 0 ]; do [ "$1" = "--output-dir" ] && out="$2"; shift; done
     mkdir -p "$out" && cp -R "$FAKE_EXPORT_DIR"/. "$out"/ ;;
   "expo config") cat "$FAKE_EXPO_CONFIG" ;;
+  "expo prebuild")
+    mkdir -p android ios && cp "$FAKE_GRADLEW" android/gradlew && chmod +x android/gradlew ;;
   "tsc --noEmit") ;;
   *) echo "fake npx: unexpected $*" >&2; exit 1 ;;
 esac

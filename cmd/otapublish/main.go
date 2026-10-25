@@ -14,6 +14,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -120,6 +121,7 @@ func init() {
 		"republish":         {"republish <label> [--channel production|beta] [--notes <text>]", "re-sign archived content as a new update (D9 step 5)", setupRepublish},
 		"resign-active":     {"resign-active", "re-sign every update a pointer references, and the last 3 per runtime, with the newest leaf (D4)", setupResignActive},
 		"status":            {"status", "the Pi's pointers, revoked updates and census summary", setupStatus},
+		"native":            {"native (--notes <text> [--no-upload [--allow-local]] | --upload-only <artifact dir>)", "build, sign and check the APK and the IPA of a release commit, then upload, register and publish them (D10)", setupNative},
 	}
 }
 
@@ -315,6 +317,18 @@ func (a *app) confirm(question string) bool {
 	}
 	line, _ := a.in.ReadString('\n')
 	return strings.TrimSpace(line) == "yes"
+}
+
+// childStdin is the standard input of a program that reads the terminal
+// itself (apksigner's password prompt). It is the terminal, so the program
+// can turn echo off, unless confirm read input ahead (stdin is not a
+// terminal), which then comes first.
+func (a *app) childStdin() io.Reader {
+	if a.in == nil || a.in.Buffered() == 0 {
+		return a.stdin
+	}
+	ahead, _ := a.in.Peek(a.in.Buffered())
+	return io.MultiReader(bytes.NewReader(bytes.Clone(ahead)), a.stdin)
 }
 
 func writeJSON(path string, v any) error {
