@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"errors"
 	"os/exec"
+	"path"
 	"slices"
 	"strings"
 	"testing"
@@ -88,21 +90,61 @@ func TestRefusesSmallKeysAndBadKeyIDs(t *testing.T) {
 }
 
 // TestServerBinariesNeverImportSigning is the import guard of D4: signing
-// code is reachable only from the publisher's tools, never from the
-// binaries deployed to the Pi.
+// code and the key-file encryption are reachable only from the publisher's
+// tools, never from the binaries deployed to the Pi (otactl included).
 func TestServerBinariesNeverImportSigning(t *testing.T) {
-	out, err := exec.Command("go", "list", "-deps",
-		"alexmessage/cmd/server", "alexmessage/cmd/admin", "alexmessage/cmd/meet").CombinedOutput()
+	out, err := exec.Command("go", "list", "-deps", "alexmessage/cmd/server", "alexmessage/cmd/admin",
+		"alexmessage/cmd/meet", "alexmessage/cmd/otactl").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}
 	deps := strings.Fields(string(out))
-	if !slices.Contains(deps, "alexmessage/internal/webapp") {
-		t.Fatalf("go list printed no webapp dependency:\n%s", out)
-	}
-	for _, forbidden := range []string{"alexmessage/internal/ota/sign", "alexmessage/internal/ota/otatest"} {
-		if slices.Contains(deps, forbidden) {
-			t.Errorf("a server binary imports %s", forbidden)
+	for _, want := range []string{"alexmessage/internal/webapp", "alexmessage/cmd/otactl"} {
+		if !slices.Contains(deps, want) {
+			t.Fatalf("go list printed no %s:\n%s", want, out)
 		}
+	}
+	for _, dep := range deps {
+		if dep == "alexmessage/internal/ota/sign" || dep == "alexmessage/internal/ota/otatest" ||
+			dep == "filippo.io/age" || strings.HasPrefix(dep, "filippo.io/age/") {
+			t.Errorf("a binary deployed to the Pi imports %s", dep)
+		}
+	}
+}
+
+// privateKeyRE matches the first line of a PEM private key of any type
+// (PKCS#8, RSA, EC, OPENSSH, ENCRYPTED).
+const privateKeyRE = `-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----`
+
+// TestNoPrivateKeysTracked is the private-key guard of D4: no tracked file
+// holds a PEM private key or has a key file's extension. The publisher's key
+// files are age-encrypted PKCS#8 DER and never contain the PEM header, but a
+// decrypted or exported copy would.
+func TestNoPrivateKeysTracked(t *testing.T) {
+	top, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Skip("not in a git checkout")
+	}
+	root := strings.TrimSpace(string(top))
+	files, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
+	}
+	for _, f := range strings.Split(string(files), "\x00") {
+		switch strings.ToLower(path.Ext(f)) {
+		case ".key", ".p12", ".pfx", ".jks", ".keystore":
+			t.Errorf("tracked key file %s", f)
+		}
+	}
+	// git grep searches the working-tree copy of every tracked file, binary
+	// files too; it exits 1 when nothing matches.
+	out, err := exec.Command("git", "-C", root, "grep", "-l", "-E", "-e", privateKeyRE).Output()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		t.Errorf("tracked files hold a PEM private key:\n%s", out)
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+	default:
+		t.Fatalf("git grep: %v", err)
 	}
 }
