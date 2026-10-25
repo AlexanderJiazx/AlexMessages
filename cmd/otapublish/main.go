@@ -122,6 +122,8 @@ func init() {
 		"resign-active":     {"resign-active", "re-sign every update a pointer references, and the last 3 per runtime, with the newest leaf (D4)", setupResignActive},
 		"status":            {"status", "the Pi's pointers, revoked updates and census summary", setupStatus},
 		"native":            {"native (--notes <text> [--no-upload [--allow-local]] | --upload-only <artifact dir>)", "build, sign and check the APK and the IPA of a release commit, then upload, register and publish them (D10)", setupNative},
+		"audit":             {"audit [--record]", "compare the Mac archive with the Pi and report every difference; --record stores the Pi's pointers, revoked ids and policy as the Mac's record", setupAudit},
+		"restore-pi":        {"restore-pi", "rebuild the Pi's update store from the Mac archive after a lost SD card", setupRestorePi},
 	}
 }
 
