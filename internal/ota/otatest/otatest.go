@@ -39,11 +39,16 @@ type Fixture struct {
 // Update is an update written by AddUpdate.
 type Update struct {
 	ID          string
+	Platform    string
+	Runtime     string
+	Label       string
 	CreatedAt   time.Time
 	Manifest    []byte
 	ManifestSig string
 	Rollback    []byte
 	RollbackSig string
+	Info        []byte
+	LeafSHA     string
 	AssetName   string
 	Asset       []byte
 }
@@ -134,19 +139,60 @@ func NewUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// UpdateOptions choose what AddUpdateWith writes. Zero values take the
+// defaults of AddUpdate.
+type UpdateOptions struct {
+	Label     string    // default 20261105.1
+	CreatedAt time.Time // default the fixture's Now
+	// Leaf and LeafKey sign the manifest and the directive; default the
+	// fixture's leaf. AddLeaf makes another leaf.
+	Leaf    *x509.Certificate
+	LeafKey *rsa.PrivateKey
+	// Metadata replaces the manifest's metadata ({}); for refusal tests.
+	Metadata map[string]any
+}
+
 // AddUpdate writes a signed update for platform and runtime: its launch
 // asset, manifest, rollback directive and info.json.
 func (f *Fixture) AddUpdate(t testing.TB, platform, runtime string) *Update {
 	t.Helper()
-	u := &Update{ID: NewUUID(), CreatedAt: f.Now.UTC().Truncate(time.Millisecond)}
+	return f.AddUpdateWith(t, platform, runtime, UpdateOptions{})
+}
+
+// AddUpdateWith is AddUpdate with options.
+func (f *Fixture) AddUpdateWith(t testing.TB, platform, runtime string, o UpdateOptions) *Update {
+	t.Helper()
+	u := f.BuildUpdate(t, platform, runtime, o)
+	f.WriteUpdate(t, u)
+	return u
+}
+
+// BuildUpdate makes a signed update like AddUpdateWith without writing it.
+func (f *Fixture) BuildUpdate(t testing.TB, platform, runtime string, o UpdateOptions) *Update {
+	t.Helper()
+	if o.Label == "" {
+		o.Label = "20261105.1"
+	}
+	if o.CreatedAt.IsZero() {
+		o.CreatedAt = f.Now
+	}
+	if o.Leaf == nil {
+		o.Leaf, o.LeafKey = f.Leaf, f.LeafKey
+	}
+	if o.Metadata == nil {
+		o.Metadata = map[string]any{}
+	}
+	u := &Update{ID: NewUUID(), CreatedAt: o.CreatedAt.UTC().Truncate(time.Millisecond), Platform: platform,
+		Runtime: runtime, Label: o.Label, LeafSHA: leafSHA(o.Leaf)}
 	u.Asset = []byte("console.log(" + `"` + u.ID + `"` + ");\n")
 	sum := sha256.Sum256(u.Asset)
 	hash := base64.RawURLEncoding.EncodeToString(sum[:])
 	u.AssetName = hash + ".js"
 	md5sum := md5.Sum(u.Asset)
+	createdAt := u.CreatedAt.Format("2006-01-02T15:04:05.000Z")
 	manifest := map[string]any{
 		"id":             u.ID,
-		"createdAt":      u.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+		"createdAt":      createdAt,
 		"runtimeVersion": runtime,
 		"launchAsset": map[string]any{
 			"hash":          hash,
@@ -156,10 +202,10 @@ func (f *Fixture) AddUpdate(t testing.TB, platform, runtime string) *Update {
 			"url":           f.AssetURL + u.AssetName,
 		},
 		"assets":   []any{},
-		"metadata": map[string]any{},
+		"metadata": o.Metadata,
 		"extra": map[string]any{
 			"expoClient": map[string]any{"name": "Alex Messages"},
-			"am":         map[string]any{"label": "20261105.1", "commit": "0000000", "notes": "test", "critical": false},
+			"am":         map[string]any{"label": o.Label, "commit": "0000000", "notes": "test", "critical": false},
 		},
 	}
 	var err error
@@ -173,25 +219,63 @@ func (f *Fixture) AddUpdate(t testing.TB, platform, runtime string) *Update {
 	if u.Rollback, err = json.Marshal(directive); err != nil {
 		t.Fatal(err)
 	}
-	if u.ManifestSig, err = sign.SignatureHeader(u.Manifest, f.LeafKey, "root-2026"); err != nil {
+	if u.ManifestSig, err = sign.SignatureHeader(u.Manifest, o.LeafKey, "root-2026"); err != nil {
 		t.Fatal(err)
 	}
-	if u.RollbackSig, err = sign.SignatureHeader(u.Rollback, f.LeafKey, "root-2026"); err != nil {
+	if u.RollbackSig, err = sign.SignatureHeader(u.Rollback, o.LeafKey, "root-2026"); err != nil {
 		t.Fatal(err)
 	}
-	dir := "updates/" + u.ID + "/"
-	f.Write(t, "assets/"+u.AssetName, u.Asset)
-	f.Write(t, dir+"manifest.json", u.Manifest)
-	f.Write(t, dir+"manifest.sig", []byte(u.ManifestSig+"\n"))
-	f.Write(t, dir+"manifest.leaf", []byte(f.LeafSHA+"\n"))
-	f.Write(t, dir+"rollback.json", u.Rollback)
-	f.Write(t, dir+"rollback.sig", []byte(u.RollbackSig+"\n"))
-	f.Write(t, dir+"rollback.leaf", []byte(f.LeafSHA+"\n"))
-	f.writeJSON(t, dir+"info.json", map[string]any{
-		"platform": platform, "runtime": runtime, "label": "20261105.1", "commit": "0000000",
-		"created_at": u.CreatedAt.Format(time.RFC3339), "notes": "test", "critical": false,
-	})
+	if u.Info, err = json.Marshal(map[string]any{
+		"platform": platform, "runtime": runtime, "label": o.Label, "commit": "0000000",
+		"created_at": createdAt, "notes": "test", "critical": false,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	return u
+}
+
+// Files returns the files of updates/<id>/ by name.
+func (u *Update) Files() map[string][]byte {
+	return map[string][]byte{
+		"manifest.json": u.Manifest,
+		"manifest.sig":  []byte(u.ManifestSig + "\n"),
+		"manifest.leaf": []byte(u.LeafSHA + "\n"),
+		"rollback.json": u.Rollback,
+		"rollback.sig":  []byte(u.RollbackSig + "\n"),
+		"rollback.leaf": []byte(u.LeafSHA + "\n"),
+		"info.json":     u.Info,
+	}
+}
+
+// WriteUpdate writes an update's files and its asset into the store.
+func (f *Fixture) WriteUpdate(t testing.TB, u *Update) {
+	t.Helper()
+	f.Write(t, "assets/"+u.AssetName, u.Asset)
+	for name, b := range u.Files() {
+		f.Write(t, "updates/"+u.ID+"/"+name, b)
+	}
+}
+
+// AddLeaf issues another leaf for the fixture's leaf key, valid from
+// notBefore for 400 days (sign.LeafValidity counts from 24 hours before the
+// time given), writes it as certs/leaf-<name>.pem and returns it.
+func (f *Fixture) AddLeaf(t testing.TB, name string, notBefore time.Time) *x509.Certificate {
+	t.Helper()
+	der, err := sign.IssueLeaf(f.Root, f.RootKey, &f.LeafKey.PublicKey, "Alex Messages OTA test leaf "+name, notBefore.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Write(t, "certs/leaf-"+name+".pem", sign.EncodePEM(der))
+	return cert
+}
+
+func leafSHA(c *x509.Certificate) string {
+	sum := sha256.Sum256(c.Raw)
+	return hex.EncodeToString(sum[:])
 }
 
 // RegisterRuntime registers one native build of platform with runtime and

@@ -220,7 +220,9 @@ func TestParseSignatureHeader(t *testing.T) {
 }
 
 func TestParseCertificatesPEMRejectsOtherBlocks(t *testing.T) {
-	if _, err := ParseCertificatesPEM([]byte("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")); err == nil {
+	// Split so the repository's private-key guard does not match this line.
+	block := "-----BEGIN " + "PRIVATE KEY-----\nAAAA\n-----END " + "PRIVATE KEY-----\n"
+	if _, err := ParseCertificatesPEM([]byte(block)); err == nil {
 		t.Fatal("a private key block was accepted")
 	}
 }

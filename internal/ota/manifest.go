@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -110,6 +111,12 @@ type Selection struct {
 // update and points at that same update's pre-signed directive, which must
 // still be served.
 func (s *Store) Select(req *ManifestRequest) (*Selection, error) {
+	return s.SelectAt(req, time.Now())
+}
+
+// SelectAt is Select at the time now, which decides whether a test_unsigned
+// pointer still serves its manifest.
+func (s *Store) SelectAt(req *ManifestRequest, now time.Time) (*Selection, error) {
 	if err := s.CheckFormat(); err != nil {
 		return nil, err
 	}
@@ -156,6 +163,8 @@ func (s *Store) Select(req *ManifestRequest) (*Selection, error) {
 			return sel, nil
 		}
 		kind, part = KindRollback, "directive"
+	case StateTestUnsigned:
+		return s.selectTestUnsigned(sel, p, req, now)
 	}
 
 	info, err := s.ReadUpdateInfo(p.Update)
@@ -175,5 +184,31 @@ func (s *Store) Select(req *ManifestRequest) (*Selection, error) {
 		{Name: part, ContentType: "application/json; charset=utf-8", Signature: signed.Signature, Body: signed.Body},
 		{Name: "certificate_chain", ContentType: "application/x-pem-file", Body: EncodeCertificatePEM(signed.Leaf)},
 	}
+	return sel, nil
+}
+
+// selectTestUnsigned serves the unsigned manifest of `otactl test-unsigned`
+// (plan step 6.4) until the pointer's until time: a manifest part with no
+// expo-signature and no certificate_chain part. A phone whose binary checks
+// signatures must reject it. Pointer.Validate allows this state only on the
+// beta channel.
+func (s *Store) selectTestUnsigned(sel *Selection, p *Pointer, req *ManifestRequest, now time.Time) (*Selection, error) {
+	until, err := time.Parse(time.RFC3339, p.Until)
+	if err != nil {
+		return nil, err
+	}
+	if !now.Before(until) || req.CurrentUpdateID == p.Update {
+		return sel, nil
+	}
+	body, info, err := s.ReadTestManifest(p.Update)
+	if err != nil {
+		return nil, err
+	}
+	if info.Platform != req.Platform || info.Runtime != req.Runtime {
+		return nil, fmt.Errorf("test update %s is for %s/%s, but the pointer is %s/%s/%s",
+			p.Update, info.Platform, info.Runtime, sel.Channel, req.Platform, req.Runtime)
+	}
+	sel.UpdateID = p.Update
+	sel.Parts = []Part{{Name: "manifest", ContentType: "application/json; charset=utf-8", Body: body}}
 	return sel, nil
 }

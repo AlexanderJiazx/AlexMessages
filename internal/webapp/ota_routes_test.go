@@ -199,6 +199,46 @@ func TestOTAManifestEndpoint(t *testing.T) {
 	}
 }
 
+// TestOTAManifestTestUnsigned: a beta pointer in state test_unsigned (otactl
+// test-unsigned, plan step 6.4) serves its unsigned manifest to beta phones
+// until its until time: one manifest part, no expo-signature, no
+// certificate_chain.
+func TestOTAManifestTestUnsigned(t *testing.T) {
+	f, r := otaEnv(t)
+	embedded := otatest.NewUUID()
+	f.RegisterRuntime(t, ota.PlatformAndroid, otaRuntime, embedded, 2)
+	u := f.BuildUpdate(t, ota.PlatformAndroid, otaRuntime, otatest.UpdateOptions{})
+	f.Write(t, "test/"+u.ID+"/manifest.json", u.Manifest)
+	f.Write(t, "test/"+u.ID+"/info.json", u.Info)
+	point := func(until time.Time) {
+		f.Write(t, "channels/beta/android/"+otaRuntime+".json", []byte(`{"state":"test_unsigned","update":"`+u.ID+
+			`","since":"2026-11-05T10:00:00Z","until":"`+until.UTC().Format(time.RFC3339)+`"}`))
+	}
+	beta := func() *http.Request {
+		req := manifestRequest(ota.PlatformAndroid, embedded, embedded, "")
+		req.Header.Set("Expo-Extra-Params", `am_channel="beta"`)
+		return req
+	}
+
+	point(time.Now().Add(10 * time.Minute))
+	w := serve(r, beta())
+	if w.Code != http.StatusOK {
+		t.Fatalf("beta: %d %s", w.Code, w.Body.String())
+	}
+	raw := w.Body.String()
+	if strings.Contains(strings.ToLower(raw), "expo-signature") || strings.Contains(raw, "certificate_chain") ||
+		strings.Count(raw, `name="manifest"`) != 1 || !strings.Contains(raw, string(u.Manifest)) {
+		t.Fatalf("test_unsigned answer:\n%s", raw)
+	}
+	expectNoUpdate(t, serve(r, manifestRequest(ota.PlatformAndroid, embedded, embedded, "")), "a production phone")
+	cur := beta()
+	cur.Header.Set("Expo-Current-Update-ID", u.ID)
+	expectNoUpdate(t, serve(r, cur), "a phone that runs the test update")
+
+	point(time.Now().Add(-time.Second))
+	expectNoUpdate(t, serve(r, beta()), "after until")
+}
+
 func TestOTAManifestRejectsBadHeaders(t *testing.T) {
 	_, r := otaEnv(t)
 	for name, edit := range map[string]func(*http.Request){

@@ -1,7 +1,6 @@
 package ota
 
 import (
-	"bufio"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -10,13 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
 
 // The update store under data/ota (OTAUpdatePlan.md, D2). Server deploys
-// never touch it. The server only reads it; otactl (Phase 2, not built yet)
-// will write it, replacing files with WriteFileAtomic.
+// never touch it. The server only reads it; cmd/otactl writes it, replacing
+// files with WriteFileAtomic or renaming whole files and directories into
+// place.
 //
 //	FORMAT                                   "1"
 //	certs/ota-root-2026.pem, leaf-*.pem      public certificates only
@@ -24,26 +25,43 @@ import (
 //	updates/<id>/manifest.json, .sig, .leaf  signed bytes, expo-signature value, leaf SHA-256
 //	updates/<id>/rollback.json, .sig, .leaf  the update's rollBackToEmbedded directive
 //	updates/<id>/info.json                   UpdateInfo
+//	test/<id>/manifest.json, info.json       otactl test-unsigned's unsigned manifest
 //	runtimes/<platform>/<runtime>.json       RuntimeInfo
 //	channels/<channel>/<platform>/<runtime>.json  Pointer
 //	revoked.txt                              one update id per line
 //	native/policy.json, native/<platform>/*  Policy and the native builds
 //	census.db                                the install census (package census)
-//	incoming/, log/actions.log               otactl's upload staging and action log
+//	incoming/, log/actions.log, .lock        otactl's upload staging, action log and lock
 
 // Pointer states.
 const (
 	StateUpdate   = "update"
 	StateRollback = "rollback"
 	StateHalted   = "halted"
+	// StateTestUnsigned serves the unsigned manifest test/<id>/manifest.json
+	// until Until, then nothing (otactl test-unsigned, plan step 6.4). Only a
+	// beta pointer can be in this state. Previous is the pointer it replaced,
+	// which `otactl test-unsigned --clear` restores.
+	StateTestUnsigned = "test_unsigned"
 )
 
 // Pointer is channels/<channel>/<platform>/<runtime>.json. A halted pointer
 // keeps the id of the update it halted.
 type Pointer struct {
-	State  string `json:"state"`
-	Update string `json:"update,omitempty"`
-	Since  string `json:"since"` // RFC 3339
+	State    string   `json:"state"`
+	Update   string   `json:"update,omitempty"`
+	Since    string   `json:"since"`              // RFC 3339
+	Until    string   `json:"until,omitempty"`    // RFC 3339; test_unsigned only
+	Previous *Pointer `json:"previous,omitempty"` // test_unsigned only
+}
+
+// PointerEntry is a pointer with the channel, platform and runtime it
+// belongs to.
+type PointerEntry struct {
+	Channel  string `json:"channel"`
+	Platform string `json:"platform"`
+	Runtime  string `json:"runtime"`
+	Pointer
 }
 
 // RuntimeBuild is one native build registered for a runtime.
@@ -175,7 +193,7 @@ func (s *Store) ReadPointer(channel, platform, runtime string) (*Pointer, error)
 	if err != nil || !found {
 		return nil, err
 	}
-	if err := p.validate(); err != nil {
+	if err := p.Validate(channel); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &p, nil
@@ -186,7 +204,7 @@ func (s *Store) WritePointer(channel, platform, runtime string, p Pointer) error
 	if err := checkStoreKey(channel, platform, runtime); err != nil {
 		return err
 	}
-	if err := p.validate(); err != nil {
+	if err := p.Validate(channel); err != nil {
 		return err
 	}
 	b, err := json.Marshal(p)
@@ -196,20 +214,61 @@ func (s *Store) WritePointer(channel, platform, runtime string, p Pointer) error
 	return WriteFileAtomic(pointerPath(s, channel, platform, runtime), append(b, '\n'), 0o644)
 }
 
-func (p *Pointer) validate() error {
-	switch p.State {
-	case StateUpdate, StateRollback:
+// RemovePointer deletes a pointer; phones of that channel, platform and
+// runtime then get nothing (beta phones fall back to production).
+func (s *Store) RemovePointer(channel, platform, runtime string) error {
+	if err := checkStoreKey(channel, platform, runtime); err != nil {
+		return err
+	}
+	err := os.Remove(pointerPath(s, channel, platform, runtime))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// Validate checks a pointer of channel.
+func (p *Pointer) Validate(channel string) error {
+	validID := func() error {
 		if id, ok := NormalizeUUID(p.Update); !ok || id != p.Update {
 			return fmt.Errorf("pointer: update %q is not a lowercase UUID", p.Update)
 		}
+		return nil
+	}
+	switch p.State {
+	case StateUpdate, StateRollback:
+		if err := validID(); err != nil {
+			return err
+		}
 	case StateHalted:
 		if p.Update != "" {
-			if id, ok := NormalizeUUID(p.Update); !ok || id != p.Update {
-				return fmt.Errorf("pointer: update %q is not a lowercase UUID", p.Update)
+			if err := validID(); err != nil {
+				return err
+			}
+		}
+	case StateTestUnsigned:
+		if channel != ChannelBeta {
+			return errors.New("pointer: only a beta pointer can be in state test_unsigned")
+		}
+		if err := validID(); err != nil {
+			return err
+		}
+		if _, err := time.Parse(time.RFC3339, p.Until); err != nil {
+			return fmt.Errorf("pointer: until: %w", err)
+		}
+		if p.Previous != nil {
+			if p.Previous.State == StateTestUnsigned {
+				return errors.New("pointer: previous is in state test_unsigned")
+			}
+			if err := p.Previous.Validate(channel); err != nil {
+				return fmt.Errorf("previous: %w", err)
 			}
 		}
 	default:
 		return fmt.Errorf("pointer: unknown state %q", p.State)
+	}
+	if p.State != StateTestUnsigned && (p.Until != "" || p.Previous != nil) {
+		return fmt.Errorf("pointer: until and previous belong to state test_unsigned, not %s", p.State)
 	}
 	if p.Since != "" {
 		if _, err := time.Parse(time.RFC3339, p.Since); err != nil {
@@ -217,6 +276,132 @@ func (p *Pointer) validate() error {
 		}
 	}
 	return nil
+}
+
+// ListPointers returns every pointer, sorted by channel, platform and
+// runtime.
+func (s *Store) ListPointers() ([]PointerEntry, error) {
+	var out []PointerEntry
+	for _, channel := range []string{ChannelBeta, ChannelProduction} {
+		for _, platform := range []string{PlatformAndroid, PlatformIOS} {
+			runtimes, err := s.listJSON("channels", channel, platform)
+			if err != nil {
+				return nil, err
+			}
+			for _, rt := range runtimes {
+				p, err := s.ReadPointer(channel, platform, rt)
+				if err != nil {
+					return nil, err
+				}
+				if p != nil {
+					out = append(out, PointerEntry{Channel: channel, Platform: platform, Runtime: rt, Pointer: *p})
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// ListRuntimes returns every registered runtime, Android first.
+func (s *Store) ListRuntimes() ([]RuntimeInfo, error) {
+	var out []RuntimeInfo
+	for _, platform := range []string{PlatformAndroid, PlatformIOS} {
+		runtimes, err := s.listJSON("runtimes", platform)
+		if err != nil {
+			return nil, err
+		}
+		for _, rt := range runtimes {
+			info, err := s.ReadRuntime(platform, rt)
+			if err != nil {
+				return nil, err
+			}
+			if info != nil {
+				out = append(out, *info)
+			}
+		}
+	}
+	return out, nil
+}
+
+// listJSON returns the runtimes named by the <runtime>.json files of a
+// directory, sorted; a missing directory has none. Temporary files of
+// WriteFileAtomic start with a dot and are skipped.
+func (s *Store) listJSON(parts ...string) ([]string, error) {
+	entries, err := os.ReadDir(s.path(parts...))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		rt, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || !e.Type().IsRegular() || !ValidRuntime(rt) {
+			continue
+		}
+		names = append(names, rt)
+	}
+	return names, nil // os.ReadDir sorts by name
+}
+
+// Revoked returns the ids in revoked.txt, in file order, lowercase.
+func (s *Store) Revoked() ([]string, error) {
+	b, err := os.ReadFile(s.path("revoked.txt"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		ids = append(ids, strings.ToLower(line))
+	}
+	return ids, nil
+}
+
+// ListUpdates returns the ids of every stored update, sorted.
+func (s *Store) ListUpdates() ([]string, error) {
+	entries, err := os.ReadDir(s.path("updates"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, e := range entries {
+		if id, ok := NormalizeUUID(e.Name()); ok && id == e.Name() && e.IsDir() {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// ReadTestManifest returns test/<id>/manifest.json and its info.json: the
+// unsigned manifest of otactl test-unsigned.
+func (s *Store) ReadTestManifest(id string) ([]byte, *UpdateInfo, error) {
+	if n, ok := NormalizeUUID(id); !ok || n != id {
+		return nil, nil, fmt.Errorf("invalid update id %q", id)
+	}
+	body, err := os.ReadFile(s.path("test", id, "manifest.json"))
+	if err != nil {
+		return nil, nil, err
+	}
+	var info UpdateInfo
+	found, err := readJSON(s.path("test", id, "info.json"), &info)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !found {
+		return nil, nil, fmt.Errorf("test/%s/info.json is missing", id)
+	}
+	return body, &info, nil
 }
 
 // ReadRuntime returns the native builds registered for a runtime, or nil when
@@ -265,25 +450,11 @@ func (s *Store) IsRegisteredEmbedded(platform, runtime, embeddedID string) (bool
 
 // IsRevoked reports whether revoked.txt lists the update id.
 func (s *Store) IsRevoked(id string) (bool, error) {
-	f, err := os.Open(s.path("revoked.txt"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
+	ids, err := s.Revoked()
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.EqualFold(line, id) {
-			return true, nil
-		}
-	}
-	return false, sc.Err()
+	return slices.Contains(ids, strings.ToLower(id)), nil
 }
 
 // ReadUpdateInfo returns updates/<id>/info.json.
@@ -343,6 +514,10 @@ func (s *Store) ReadSigned(id, kind string) (*Signed, error) {
 	return &Signed{Body: body, Signature: signature, Leaf: leaf}, nil
 }
 
+// ValidLeafFileName reports whether name is a leaf certificate file name of
+// certs/: leaf-<name>.pem.
+func ValidLeafFileName(name string) bool { return leafFileRE.MatchString(name) }
+
 // FindLeaf returns the certificate in certs/leaf-*.pem whose LeafSHA256 is
 // sha.
 func (s *Store) FindLeaf(sha string) (*x509.Certificate, error) {
@@ -374,18 +549,13 @@ func (s *Store) FindLeaf(sha string) (*x509.Certificate, error) {
 
 // ReadRoot returns the root certificate stored at certs/ota-root-2026.pem.
 func (s *Store) ReadRoot() (*x509.Certificate, error) {
-	b, err := os.ReadFile(s.path("certs", RootCertFile))
-	if err != nil {
-		return nil, err
-	}
-	certs, err := ParseCertificatesPEM(b)
-	if err != nil {
-		return nil, err
-	}
-	if len(certs) != 1 {
-		return nil, fmt.Errorf("certs/%s holds %d certificates, want 1", RootCertFile, len(certs))
-	}
-	return certs[0], nil
+	root, _, err := ReadRootFile(s.path("certs", RootCertFile))
+	return root, err
+}
+
+// Path returns the path of a file or directory inside the store.
+func (s *Store) Path(parts ...string) string {
+	return s.path(parts...)
 }
 
 // AssetFile returns the path of /ota/assets/<name>, or false when name is
