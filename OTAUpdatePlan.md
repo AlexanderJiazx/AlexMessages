@@ -9,7 +9,8 @@ This version applies the findings of `OTAUpdatePlan-Review.md` (4 reviewers: sec
 **OTA updates do NOT work today.**
 - `expo-updates` is not a dependency of `mobile/`.
 - `mobile/app.json` has no `updates` block and no `runtimeVersion`.
-- The server has no update endpoint.
+- The server's update endpoint exists only in local commits (Phase 1, below). Production does not run it.
+- `cmd/otactl` and `cmd/otapublish` do not exist (Phase 2), and no key exists (Phase 3).
 - The prebuild output switches updates off: `EXUpdatesEnabled` is false in `mobile/ios/AlexMessages/Supporting/Expo.plist`, and `expo.modules.updates.ENABLED` is false in `mobile/android/app/src/main/AndroidManifest.xml`.
 
 **No phone that has the app today can ever receive an OTA update.** OTA needs native code (the expo-updates client) inside the app binary. Every phone must install one new binary by hand ("build 2", Phase 6). After that install, JS updates arrive by themselves.
@@ -27,9 +28,9 @@ This version applies the findings of `OTAUpdatePlan-Review.md` (4 reviewers: sec
 
 **What does not change:** the web client (`web/`), the legacy `static/` frontend and Alex Meet (`cmd/meet`) get no OTA feature and no visible change. The web build picks up the shared-core changes (`shared/`) and must still pass its build and e2e suite (Phase 4.3).
 
-**Done so far:** research, this plan, a review of the plan, your answers (section 8), and step 0.2: local commit `37e425d` (2026-10-22, on your Mac only, not on GitHub) holds the DM-calls work, the security fixes, `SecurityReview.md` and both plan files. This file has uncommitted edits made after that commit.
+**Done so far:** research, this plan, a review of the plan, your answers (section 8), step 0.2 (local commit `37e425d`, 2026-10-22, on your Mac only, not on GitHub: the DM-calls work, the security fixes, `SecurityReview.md` and both plan files), and **Phase 1, steps 1.1–1.6 (2026-10-25), in local commits on `react` that are NOT pushed and NOT deployed**. Phase 1 changed parts of this plan; section 10 lists them under "Changes made while building Phase 1".
 
-**Not done:** every step of Phases 0–9 (section 5) except 0.2. Your answers to the questions are in section 8; three items there are still open. Every claim in section 9 is unverified. Sections 6 and 7 describe use after the build; nothing in them works today.
+**Not done:** every step of Phases 0 and 2–9 (section 5) except 0.2. Your answers to the questions are in section 8; three items there are still open. Every claim in section 9 is unverified. Sections 6 and 7 describe use after the build; nothing in them works today.
 
 ---
 
@@ -130,13 +131,16 @@ Why `.js` and real extensions: Cloudflare then caches and brotli-compresses the 
 
 | Pointer state | Answer |
 |---|---|
-| no pointer, `halted`, the runtime is not registered, or the update id is in `revoked.txt` | `204` with `expo-protocol-version: 1` |
+| no pointer, `halted`, or the runtime is not registered | `204` with `expo-protocol-version: 1` |
+| `update`, and the update id is in `revoked.txt` | `204` |
 | `update`, and `Expo-Current-Update-ID` equals it | `204` |
 | `update` | `multipart/mixed`: the `manifest` part (stored bytes, stored `expo-signature` part header) and a `certificate_chain` part (the leaf named in `manifest.leaf`) |
 | `rollback`, and the phone already runs its embedded bundle | `204` |
 | `rollback` | `multipart/mixed`: the `directive` part (the pre-signed `rollBackToEmbedded`) and a `certificate_chain` part (the leaf named in `rollback.leaf`) |
 
-5. Record the census row (D8).
+`revoked.txt` blocks only the `update` state. A `rollback` pointer serves the directive even though its update id is revoked: `rollback-embedded` (D9) puts the bad id into `revoked.txt` and points at that same update's directive, and the directive is how phones leave the bad update.
+
+5. Record the census row (D8). No row is written when step 2 (`OTA_DISABLED`) answered, or when `data/ota/FORMAT` is missing (the store is then treated as absent and every request gets `204`).
 
 Response headers on every answer: `expo-protocol-version: 1`, `expo-sfv-version: 0`. The server ignores `A-IM: bsdiff` and always sends full files; both clients accept that.
 
@@ -145,17 +149,22 @@ Response headers on every answer: `expo-protocol-version: 1`, `expo-sfv-version:
 ```
 data/ota/
   FORMAT                                          "1"
-  certs/ota-root-2026.pem, leaf-<yyyymm>.pem      public certificates only
+  certs/ota-root-2026.pem, leaf-<yyyymm>.pem      public certificates only (the server finds a leaf by the SHA-256 in a
+                                                  .leaf file among certs/leaf-*.pem, so the name may carry a suffix)
   assets/<sha256-b64url>.<ext>                    write-once; never deleted (the spec forbids removing them)
   updates/<updateId>/manifest.json                the exact signed bytes
-                     manifest.sig, manifest.leaf  the expo-signature value; SHA-256 of the leaf that made it
+                     manifest.sig, manifest.leaf  the expo-signature value (sig="…", keyid="root-2026", alg="rsa-v1_5-sha256");
+                                                  lowercase hex SHA-256 of the DER of the leaf that made it
                      rollback.json                rollBackToEmbedded, commitTime = createdAt + 1 s
                      rollback.sig, rollback.leaf
-                     info.json                    platform, runtime, label, commit, createdAt, notes, critical
-  runtimes/<platform>/<runtime>.json              native builds registered for this runtime, with their embedded update id
+                     info.json                    {"platform","runtime","label","commit","created_at","notes","critical"}
+  runtimes/<platform>/<runtime>.json              native builds registered for this runtime, with their embedded update id:
+                                                  {"platform","runtime","builds":[{"build","version","embedded_update_id",
+                                                  "commit_time","commit","registered_at"}]}
   channels/<production|beta>/<platform>/<runtime>.json
-                                                  {"state":"update"|"rollback"|"halted","update":"<id>","since":…}
-  revoked.txt                                     update ids that are never activated or served again
+                                                  {"state":"update"|"rollback"|"halted","update":"<id>","since":"<RFC 3339>"}
+  revoked.txt                                     update ids, one per line ("#" starts a comment), that are never activated
+                                                  or served as an update again
   native/policy.json, native/android/*.apk, native/ios/*.ipa
   census.db                                       SQLite census (D8); not in alexmessage.db
   incoming/<publishId>/                           upload staging (same filesystem, so ingest is a rename)
@@ -212,7 +221,7 @@ module.exports = {
 |---|---|---|
 | Key | RSA-4096 | RSA-3072 |
 | Certificate | self-signed; `basicConstraints CA:true, pathlen:0`; keyUsage `keyCertSign` | keyUsage `digitalSignature`; EKU `codeSigning` |
-| Validity | 20 years | 400 days, `notBefore` 24 h in the past; replaced every 12 months |
+| Validity | 20 years, `notBefore` 24 h in the past | 400 days, `notBefore` 24 h in the past, never past the root's `notAfter`; replaced every 12 months |
 | Where the certificate lives | committed at `mobile/certs/ota-root-2026.pem`, embedded in every binary; a copy at `data/ota/certs/ota-root-2026.pem` | `data/ota/certs/leaf-<yyyymm>.pem` on the Pi; sent in every manifest response |
 | Where the private key lives | encrypted with a passphrase (age), on one USB stick, plus one copy in your password manager. Never on the Mac's disk. | encrypted with a different passphrase (age) at `~/.alexmessages/keys/ota-leaf-<yyyymm>.key.age` on the Mac |
 | Where the passphrase lives | in your head, and on paper stored with the USB stick (not in the password manager that holds the encrypted key) | in your head, and on paper stored with the USB stick |
@@ -330,7 +339,7 @@ Each blocked automatic apply logs `ota.blocked {reasons}` at most once per hour 
    - no per-IP rate limit, because the server cannot see a trustworthy client IP (fact 16).
 
    A new failed id or fatal error emits a debug-console event `ota.client_failure`. **The census is for reading only.** No gate and no automatic action uses it.
-2. **`X-AM-Client` header (build 2).** Value: `v=1;platform=android;version=1.2.0;build=2;runtime=<fp>;update=<uuid|embedded>;channel=<am_channel or production>`. `ApiClient` sends it on every REST call (new `clientInfo` option in `shared/src/api.ts`); the `/ws` upgrade carries it as the `client=` query parameter (`shared/src/socket.ts`); `RingSocket.kt` sends `v=1;platform=android;build=2;component=ring`. The RingSocket part is native, so it must be in build 2. The server stores it per session (`sessions.client`, `sessions.client_seen_at`, at most one write per 10 minutes). Because it arrives on an authenticated session, it is the data the promote gate (D5) and the automatic halt (below) use. The web client sends nothing and is never gated.
+2. **`X-AM-Client` header (build 2).** Value: `v=1;platform=android;version=1.2.0;build=2;runtime=<fp>;update=<uuid|embedded>;channel=<am_channel or production>`. `ApiClient` sends it on every REST call (new `clientInfo` option in `shared/src/api.ts`); the `/ws` upgrade carries it as the `client=` query parameter (`shared/src/socket.ts`); `RingSocket.kt` sends `v=1;platform=android;build=2;component=ring`. The RingSocket part is native, so it must be in build 2. The server stores it per session (`sessions.client`, `sessions.client_seen_at`): at once when the value changes (so a newly applied update id reaches the promote gate without delay), otherwise at most one write per 10 minutes. The ring service's value is never stored: it shares the app's session and carries less. A value that does not parse counts as absent: it is not stored and never gated. Because it arrives on an authenticated session, it is the data the promote gate (D5) and the automatic halt (below) use. The web client sends nothing and is never gated.
 3. **Debug-console events from the app.** First give the mobile `DebugReporter` a per-install session id: `session.tsx` creates it without `sessionStorage`, so today its session id is a new random 8-character value after every launch and every OTA reload, and events before and after an update cannot be joined. Pass a storage adapter backed by the hydrated prefs map, and expose the reporter from `Session`. Events: `ota.boot {updateId, label, runtime, build, isEmbeddedLaunch, isEmergencyLaunch, emergencyLaunchReason, channel}`, `ota.check`, `ota.download {durationMs, bytes}`, `ota.apply {trigger}`, `ota.blocked`, `ota.error` (with a short summary of `Updates.readLogEntriesAsync(3600000)`), `apk.download`, `apk.install`.
 4. **Crash breadcrumb.** A JS global error handler writes `{updateId, ts, message, stack ≤ 2 KB}` to a file and reports it as `ota.crash` at the next launch. It **must save the previous handler and always call it**: expo-updates' automatic rollback depends on the fatal error reaching React Native's fatal handler.
 5. **Personal data.** Logout calls `Updates.setExtraParamAsync("am_uid", null)`. `POST /api/me/delete` deletes the census rows whose `am_uid` is that user; `GET /api/me/export` includes them. The admin pages render every census field as text (`textContent` or `escapeHTML`), never as HTML.
@@ -392,10 +401,11 @@ Each blocked automatic apply logs `ota.blocked {reasons}` at most once per hour 
 The dynamic proof that the shipped binary rejects an unsigned manifest is Phase 6.4 on your own phones (`otactl test-unsigned`), because the shipped binary only talks to the production URL.
 
 **Minimum-client gate:**
-- `data/ota/native/policy.json`: per platform `min_build` (0 = off) and `latest {version, build, url, sha256, size, notes}`.
-- **Soft gate (default):** the server adds `client_policy {state: ok|update_available|update_required, latest}` to the WS `init`, based on the `X-AM-Client` build. The app shows a Settings row for `update_available` and a blocking screen for `update_required` (Android: Install; iPhone: a button that opens `/app`).
-- **Hard gate (only when an old native protocol is about to be removed):** REST answers 426 and `/ws` closes with code **4426**, only for clients that send `X-AM-Client` with a build below `min_build`. Build 2's `ChatSocket` stops its 1.5 s reconnect loop on 4426, shows "Update Alex Messages to keep messaging", and tries again at every return to the foreground. Build 2's `RingSocket` keeps its service, posts "Update Alex Messages to keep receiving calls", and tries again every 30 minutes. So a corrected policy heals phones by itself. **Clients without the header are never gated:** today's builds reconnect every 1.5 s on any close code except 4401.
-- `otactl policy` refuses a `min_build` above the highest registered build of that platform, prints how many census installs it would gate, and asks for `yes`.
+- `data/ota/native/policy.json`: per platform `min_build` (0 = off), `hard_gate` (default `false`) and `latest {version, build, url, sha256, size, notes}`. `latest.url` must be an `http` or `https` URL whose path is `/app/<platform>/AlexMessages-<version>-<build>.<apk|ipa>` for that platform, version and build, with no query, fragment or user info; `sha256` is 64 lowercase hex characters. A missing file means no gate and no published build.
+- **Soft gate (default):** the server adds `client_policy {state: ok|update_available|update_required, latest}` to the WS `init`, based on the `X-AM-Client` build (`update_required` below `min_build`, `update_available` below `latest.build`). The app shows a Settings row for `update_available` and a blocking screen for `update_required` (Android: Install; iPhone: a button that opens `/app`).
+- **Hard gate (only when an old native protocol is about to be removed; only while `hard_gate` is `true` for the platform):** REST under `/api/` answers 426 (`{"detail", "client_policy"}`) and `/ws` and the call listener close with code **4426**, only for clients that send `X-AM-Client` with a build below `min_build`. The WebSocket gate is checked before authentication, so a gated build sees 4426 even with an expired session. Never gated: `/api/app/`, `/api/ota/`, `/api/debug/report` and `/api/logout` (the app must still read the policy, report errors and sign out). Build 2's `ChatSocket` stops its 1.5 s reconnect loop on 4426, shows "Update Alex Messages to keep messaging", and tries again at every return to the foreground. Build 2's `RingSocket` keeps its service, posts "Update Alex Messages to keep receiving calls", and tries again every 30 minutes. So a corrected policy heals phones by itself. **Clients without the header are never gated:** today's builds reconnect every 1.5 s on any close code except 4401.
+- A `policy.json` that cannot be read or fails validation gates nobody (logged as `ota.store_error`).
+- `otactl policy` sets `min_build`, `hard_gate` and `latest`. It refuses a `min_build` above the highest registered build of that platform, prints how many census installs it would gate, and asks for `yes`.
 - Native-only protocols (`/ws?mode=calls`, the ring flows) must stay backward-compatible with the lowest build in the census.
 
 ### D11. The one-time migration to build 2
@@ -414,7 +424,7 @@ Build 2 = version **1.2.0**, `ios.buildNumber` **"2"**, `android.versionCode` **
 1. **Go unit tests** (`internal/ota`, `internal/ota/sign`, `internal/webapp`, `internal/db`, `cmd/otactl`, `cmd/otapublish`): exact multipart bytes and headers; every 204 path (including revoked ids and `OTA_DISABLED`); the directive path; 400s for bad headers; the leaf sent is the one named in `.leaf`; asset name validation (`../`, wrong length, bad extension), content type, Cache-Control (including `no-store` on 404), the nosniff/sandbox/attachment headers, Range and HEAD; chain checks that mirror the client (non-CA root, leaf without codeSigning, expired leaf, bad signature are rejected); `ingest` rejects non-empty `metadata` and a future `createdAt`; census limits (cap, registered embedded id, header sizes) and SFV parsing; `activate` refuses a revoked id, an unregistered runtime, a leaf that expires within 30 days, and a `createdAt` that is not newer; `halt --all` and `--label` touch every matching pointer; `policy` refuses a `min_build` above the highest registered build; atomic pointer writes; a sign-then-verify round trip; a test that `cmd/server`, `cmd/admin` and `cmd/meet` do not import `internal/ota/sign`.
 2. **shared Vitest:** `X-AM-Client`; `pendingCount` and `hasUnsentWork()`; 4426 stops the reconnect loop and retries on foreground; 426 handling; `DebugReporter.flush()` resolves after the POST.
 3. **mobile unit test:** `mobile/` contains neither `setUpdateRequestHeadersOverride` nor `setUpdateURLAndRequestHeadersOverride`.
-4. **`deploy/remote_deploy_test.py`:** `data/ota/` is unchanged by a deploy and by a forced rollback; `bin/otactl` is installed by rename.
+4. **`deploy/remote_deploy_test.py`:** `data/ota/` is unchanged by a deploy and by a forced rollback; `bin/otactl` is installed by rename; a release that contains `data/` is refused.
 5. **Local drill on release builds** (Phase 5). A drill profile (`AM_OTA_PROFILE=drill` in `mobile/app.config.js`) changes the package and bundle id to `com.alexanderjia.messages.drill`, the update URL to `http://localhost:8799/api/ota/manifest` (iOS Simulator) or `http://10.0.2.2:8799/api/ota/manifest` (Android emulator, with cleartext allowed for that profile only), and uses throwaway keys. Because the package id differs, a drill build can sit next to the real app and has its own runtime. Scenarios:
 
 | # | Scenario | Passes when |
@@ -430,7 +440,7 @@ Build 2 = version **1.2.0**, `ios.buildNumber` **"2"**, `android.versionCode` **
 | i | a picker is open for more than the threshold | no reload; the picked file arrives |
 | j | after a reload, check notifications and links | no old notification tap or deep link is replayed |
 | k | build 3 (no-op change) installed by `app-updater` on API 35 and API 30 emulators; then a debug-key-signed APK; then an APK of another package | 35: installs after the tap with no system dialog; 30: the system confirm screen; debug-signed: refused "signer mismatch"; other package: refused by the session |
-| l | `min_build` = 3 | build 2 shows the blocking screen; REST 426; WS 4426; the server sees one connection, not a reconnect loop; after `min_build` = 0 the phone reconnects on the next foreground and RingSocket within 30 minutes |
+| l | `min_build` = 3 with `hard_gate` = `true` | build 2 shows the blocking screen; REST 426; WS 4426; the server sees one connection, not a reconnect loop; after `min_build` = 0 the phone reconnects on the next foreground and RingSocket within 30 minutes |
 | m | calls in **release** builds (R8 minification is on) on both platforms | calls ring, connect and end; the ring service works after swipe-away |
 | n | U4 renders once, then crashes at startup on its second cold start | the phone crash-loops (expected); after `halt` + `rollback-embedded` and the D9 step 4 sequence it runs the built-in bundle |
 | o | `keys issue-leaf` (drill keys) + `resign-active`, then `rollback-embedded` | the directive verifies on both platforms; the endpoint sends the new leaf |
@@ -506,12 +516,14 @@ Calendar: week 1 Phase 0 and 1; weeks 2–3 Phase 2; then Phase 3 (you, half a d
 
 All of Phase 1–4 stays in local commits until release day (0.2). "Tests pass" means locally; CI first runs them at the push in 6.1.
 
+**Status (2026-10-25): steps 1.1–1.6 are done in local commits on `react`, NOT pushed and NOT deployed:** `884c288` (1.1), `8f355a8` (1.2 and 1.3), `dfa0335` (1.4), `662acb0` and `396bd6e` (1.5), `08fcb9a` (1.6). The `deploy.yml` change of 1.5 is in `662acb0`; the workflow was not run. The `deploy.yml` line that cross-compiles `otactl` is still to be added in 2.1.
+
 | # | Step | Done when |
 |---|---|---|
 | 1.1 | `internal/ota/`: store layout and validators, manifest selection, multipart writer, SFV parsing, certificate-chain verification with the client's rules, census (`census.db`, cap, registered embedded ids), policy. `internal/ota/sign`: signing only. | `go test ./internal/ota/...` passes (D12 item 1). |
 | 1.2 | `internal/webapp/ota_routes.go` (all D2 URLs and header rules, `OTA_DISABLED`, registered in the module list in `webapp.go`); the `/app` page (Android: download first, then uninstall the old app, allow "Install unknown apps" for the browser or file manager, install, sign in, allow notifications, full-screen calls and background use; iPhone: download the IPA and open it in 万能签; the SHA-256 sums; English only); `internal/webapp/client_info.go` (`X-AM-Client` middleware); `client_policy` in the WS `init` and the `client=` parameter in `ws.go`; the hard-gate code path (off by default); account deletion and export cover the census rows. | `go vet ./... && go test ./...` pass; a local `curl` with phone headers gets `204` with `expo-protocol-version: 1`. |
 | 1.3 | `internal/db`: `sessions.client` and `sessions.client_seen_at` through `ensureColumn`; census prune in the maintenance sweep. | DB tests pass; an old database migrates on start. |
-| 1.4 | `internal/adminapp`: read-only `GET /api/ota/installs` (fields rendered as text). | Test passes. |
+| 1.4 | `internal/adminapp`: read-only `GET /api/ota/installs` (JSON `{"installs": […], "max_rows": 5000}`; JSON escapes `<`, `>` and `&`; the admin page that renders the fields as text comes in 9.1). | Test passes. |
 | 1.5 | `deploy.yml`: stamp every binary with `-X main.commit=$GITHUB_SHA`; the line that cross-compiles `otactl` into `bin/` is added in Phase 2.1, together with `cmd/otactl`. `remote_deploy.sh`: install `bin/otactl` by rename (`install -m 755 new bin/otactl.tmp && mv bin/otactl.tmp bin/otactl`), never by overwrite. `deploy/remote_deploy_test.py`: `data/ota` survives a deploy and a rollback. | Tests pass. |
 | 1.6 | Docs: an OTA section in `DEPLOY.md` and `CLAUDE.md`. | DEPLOY.md contains the emergency commands of D9 verbatim, the kill switch, the publish commands of section 6, the key locations, and the leaf renewal steps. |
 
@@ -669,6 +681,8 @@ The texts are English, like the rest of the app (your answer).
 | Downloads from mainland China take an acceptable time | the first real update (7.1): `ota.download` times |
 | rsync exists on the Pi | step 0.8 |
 | Phones without the Play Store are not affected by Android developer verification | re-check at every native release (D10) |
+| expo-updates 57.0.26 parses the server's multipart answer (lowercase part headers, a `certificate_chain` part holding only the leaf) on both platforms. Phase 1's Go tests check the bytes against the expo-updates source, not against a running app. | Phase 5, scenario a |
+| `internal/ota`'s chain checks accept and reject the same certificates as the client | Phase 5, scenarios a, e and o |
 
 ---
 
@@ -681,6 +695,17 @@ The texts are English, like the rest of the app (your answer).
 - Expo behaviour: automatic recovery stated precisely (D9); replay limit (D4, scenario e); two cold starts (§0, D7, D9 step 4); channel from extra params; header override banned (D5).
 - Codebase: `msSinceCallAction` in all three platform files (D7); rsync check and tar fallback (0.8, D6 step 14); `pendingCount`; flush returns a promise; DebugReporter fact corrected (D8); Settings stack edits (4.2); `otactl init`; corrected facts 3, 6, 7, 11, 12.
 - Clarity: one owner for version and tag (4.1, section 6); IPA recipe and push entitlement (D10); every question answered or listed as open (section 8); emergency commands with scope (D9); effort and calendar (section 5); keyed commands run in your Terminal panel (D6); backport branch (D3, section 6); web build and e2e (4.3); unassigned items given steps (1.2, 1.6, 4.5, 6.6); §9 step references; §4 table completed.
+
+**Changes made while building Phase 1 (2026-10-25):**
+- D2, manifest table: a revoked id now blocks only a pointer in state `update`. Before, the row "the update id is in `revoked.txt` → 204" also covered `rollback` pointers, so the directive that `rollback-embedded` (D9) points at would never have been served.
+- D2, census: no census row is written while `OTA_DISABLED=1` or without `data/ota/FORMAT` (both answer before step 5).
+- D2, storage: the exact formats of `.sig`, `.leaf` (lowercase hex SHA-256 of the leaf's DER), `info.json` (`created_at`, not `createdAt`), `runtimes/…json`, the pointer's `since` (RFC 3339) and `revoked.txt`; leaf files are found by hash among `certs/leaf-*.pem`.
+- D4: the root's `notBefore` is also 24 h in the past, and a leaf never outlives the root.
+- D8 item 2: `sessions.client` is written at once when the value changes; the ring service's value is never stored; a value that does not parse counts as absent.
+- D10: the hard gate has its own switch, `hard_gate` in `policy.json` (default `false`). Without it, setting `min_build` would have turned on 426/4426 at once, and the plan's "soft gate (default)" could not exist. Also stated: the paths the hard gate never refuses, 4426 before the authentication check, the `latest.url` rule, and that a broken `policy.json` gates nobody. Scenario l sets `hard_gate`.
+- D12 item 4: the deploy test also checks that a release with `data/` is refused (new in `remote_deploy.sh`).
+- 1.4: the endpoint is JSON; the page that renders census fields as text is 9.1.
+- Section 9: two new unverified claims about the multipart format and the chain checks.
 
 **Updated from your answers (2026-10-25):** section 8 lists each answer and what it changed: the iPhone part now covers only your iPhone with 万能签 (IPA download on `/app` kept; AltStore list, iPhone banner and `LSApplicationQueriesSchemes` removed); Android testing uses the Mac's emulator and the hand-out starts with one user; steps 0.5 and 3.3 are dropped; step 3.0 added.
 
