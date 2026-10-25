@@ -1,0 +1,65 @@
+name: Mobile checks
+
+# The checks of OTAUpdatePlan.md step 2.3 on every push and pull request:
+# the OTA guards (D4), the shared TypeScript core's typecheck and unit
+# tests, and the mobile app's typecheck. otapublish ota runs the same npm
+# commands before it publishes an update (D6 steps 5 and 6). This workflow
+# uses no secrets and deploys nothing. `npm ci --ignore-scripts` runs no
+# package's install script.
+
+on:
+  push:
+    branches: [main, react]
+  pull_request:
+    branches: [main, react]
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: OTA guards, shared + mobile typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # No server binary deployed to the Pi imports the signing code or age,
+      # and no tracked file holds a private key or has a key file's
+      # extension.
+      - name: OTA guards — no signing code on the Pi, no private key tracked
+        shell: bash
+        run: |
+          go test ./internal/ota/sign/ -count=1 -v \
+            -run '^(TestServerBinariesNeverImportSigning|TestNoPrivateKeysTracked)$' | tee "$RUNNER_TEMP/guards.txt"
+          # A renamed or skipped guard fails the job instead of passing it.
+          for t in TestServerBinariesNeverImportSigning TestNoPrivateKeysTracked; do
+            grep -q -- "--- PASS: $t " "$RUNNER_TEMP/guards.txt" || { echo "::error::$t did not pass"; exit 1; }
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            shared/package-lock.json
+            mobile/package-lock.json
+      - name: Shared TypeScript core — typecheck + unit tests
+        working-directory: shared
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm test
+      - name: Mobile app — typecheck
+        working-directory: mobile
+        run: |
+          npm ci --ignore-scripts
+          npx --no -- tsc --noEmit
