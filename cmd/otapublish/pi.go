@@ -24,7 +24,8 @@ type pi interface {
 	// otactl runs `otactl <args>` and returns its standard output. Its
 	// standard error goes to ours.
 	otactl(args ...string) ([]byte, error)
-	// ready reports whether otactl and an initialized store exist.
+	// ready reports whether otactl and an initialized store exist. It
+	// returns an error, never false, when it cannot tell.
 	ready() (bool, error)
 	// upload copies the files under dir into the store's
 	// incoming/<publishID>/, a new directory.
@@ -109,21 +110,45 @@ func (p *sshPi) run(remote string, stdin io.Reader) ([]byte, int, error) {
 	return out.Bytes(), 0, err
 }
 
+// otactlExit is a non-zero exit status of otactl on the Pi.
+type otactlExit struct {
+	command string
+	code    int
+}
+
+func (e *otactlExit) Error() string {
+	return fmt.Sprintf("otactl %s on the Pi exited with status %d", e.command, e.code)
+}
+
+// otactlNoStore is otactl's exit status while the store has no FORMAT file
+// (cmd/otactl, exitNoStore).
+const otactlNoStore = 3
+
 func (p *sshPi) otactl(args ...string) ([]byte, error) {
 	out, code, err := p.run("cd "+piHome+" && exec bin/otactl "+shellJoin(args), nil)
 	if err == nil && code != 0 {
-		err = fmt.Errorf("otactl %s on the Pi exited with status %d", args[0], code)
+		err = &otactlExit{command: args[0], code: code}
 	}
 	return out, err
 }
 
+// ready is false only when bin/otactl is missing or otactl reports that
+// the store has no FORMAT file. Any other failure (the relay down, a store
+// otactl cannot read) is an error: reading it as "no store yet" would let
+// native count no registered build.
 func (p *sshPi) ready() (bool, error) {
 	_, code, err := p.run("test -x "+piHome+"/bin/otactl", nil)
 	if err != nil || code != 0 {
 		return false, err
 	}
-	_, err = p.storeDir()
-	return err == nil, nil
+	if _, err := p.storeDir(); err != nil {
+		var ee *otactlExit
+		if errors.As(err, &ee) && ee.code == otactlNoStore {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // storeDir is the store's absolute path, as otactl status reports it.

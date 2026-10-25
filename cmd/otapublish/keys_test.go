@@ -114,6 +114,25 @@ func TestCheckRemovable(t *testing.T) {
 	}
 }
 
+// TestUnreadableStoreIsNotMissing: only otactl's exit status 3 means "no
+// update store yet". A store whose otactl status fails otherwise is an
+// error for every command that asks whether the Pi has a store.
+func TestUnreadableStoreIsNotMissing(t *testing.T) {
+	h := newHarness(t)
+	h.ok("keys", "init-root", "--out", h.stick, "--cert-out", h.certOut)
+	h.otactl("init")
+	if err := os.WriteFile(filepath.Join(h.store, "FORMAT"), []byte("99\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"keys", "issue-leaf", "--root", h.rootKey()}, {"audit"}, {"restore-pi"}} {
+		out := h.fail(args...)
+		mustContain(t, out, "otactl status on the Pi exited with status 1")
+		if strings.Contains(out, "no update store") {
+			t.Fatalf("otapublish %s reads an unreadable store as a missing one:\n%s", strings.Join(args, " "), out)
+		}
+	}
+}
+
 func TestIssueLeaf(t *testing.T) {
 	h := newHarness(t)
 	h.ok("keys", "init-root", "--out", h.stick, "--cert-out", h.certOut)

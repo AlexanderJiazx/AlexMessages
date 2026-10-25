@@ -653,8 +653,16 @@ func TestInitAndStoreLocation(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "ota")
 	var out, errb bytes.Buffer
 	e := &env{stdin: strings.NewReader(""), stdout: &out, stderr: &errb, now: time.Now, getenv: func(string) string { return "" }}
-	if code := run([]string{"status", "--ota", dir}, e); code != 1 || !strings.Contains(errb.String(), "run otactl init") {
-		t.Fatalf("status before init: %d %s", code, errb.String())
+	// Before init every command but init and version exits 3, which
+	// otapublish (otactlNoStore) tells apart from every other failure.
+	for _, cmd := range []string{"status", "doctor", "runtimes"} {
+		errb.Reset()
+		if code := run([]string{cmd, "--ota", dir}, e); code != 3 || !strings.Contains(errb.String(), "run otactl init") {
+			t.Fatalf("%s before init: %d %s", cmd, code, errb.String())
+		}
+	}
+	if code := run([]string{"version", "--ota", dir, "--bin", t.TempDir()}, e); code != 0 {
+		t.Fatalf("version before init: %d %s", code, errb.String())
 	}
 	if code := run([]string{"init", "--ota", dir}, e); code != 0 {
 		t.Fatalf("init: %s", errb.String())
@@ -666,6 +674,14 @@ func TestInitAndStoreLocation(t *testing.T) {
 	}
 	if code := run([]string{"init", "--ota", dir}, e); code != 0 || !strings.Contains(out.String(), "already an update store") {
 		t.Fatalf("init again: %s", out.String())
+	}
+	// A store this binary cannot read is an error, not a missing store.
+	if err := os.WriteFile(filepath.Join(dir, "FORMAT"), []byte("99\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	errb.Reset()
+	if code := run([]string{"status", "--ota", dir}, e); code != 1 || !strings.Contains(errb.String(), `format "99" is not supported`) {
+		t.Fatalf("status of an unreadable store: %d %s", code, errb.String())
 	}
 
 	for _, c := range []struct{ exe, otaEnv, want string }{

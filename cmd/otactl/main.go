@@ -111,8 +111,21 @@ func (u usageError) Error() string { return u.msg }
 
 func usagef(format string, args ...any) error { return usageError{fmt.Sprintf(format, args...)} }
 
+// exitNoStore is the exit status of every command except init and version
+// while the store has no FORMAT file. otapublish reads it as "no update
+// store yet" (before plan step 6.3) and every other failure as an error.
+const exitNoStore = 3
+
+// noStoreError makes run exit with status exitNoStore.
+type noStoreError struct{ dir string }
+
+func (e noStoreError) Error() string {
+	return e.dir + " is not an update store (no FORMAT file); run otactl init"
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: otactl <command> [flags]   (every command also takes --data <dir>, --ota <dir>)")
+	fmt.Fprintf(w, "every command except init and version exits %d while the store has no FORMAT file\n", exitNoStore)
 	names := make([]string, 0, len(commands))
 	for n := range commands {
 		names = append(names, n)
@@ -136,6 +149,7 @@ func run(args []string, e *env) int {
 	}
 	err := runCommand(args[0], cmd, args[1:], e, "")
 	var ue usageError
+	var ns noStoreError
 	switch {
 	case err == nil:
 		return 0
@@ -144,6 +158,9 @@ func run(args []string, e *env) int {
 	case errors.As(err, &ue):
 		fmt.Fprintf(e.stderr, "otactl %s: %v\nusage: otactl %s\n", args[0], err, cmd.usage)
 		return 2
+	case errors.As(err, &ns):
+		fmt.Fprintf(e.stderr, "otactl %s: %v\n", args[0], err)
+		return exitNoStore
 	default:
 		fmt.Fprintf(e.stderr, "otactl %s: %v\n", args[0], err)
 		return 1
@@ -170,7 +187,7 @@ func runCommand(name string, cmd *command, args []string, e *env, via string) er
 	a.via = via
 	if name != "init" && name != "version" {
 		if err := a.store.CheckFormat(); errors.Is(err, ota.ErrNotInitialized) {
-			return fmt.Errorf("%s is not an update store (no FORMAT file); run otactl init", a.store.Dir)
+			return noStoreError{a.store.Dir}
 		} else if err != nil {
 			return err
 		}

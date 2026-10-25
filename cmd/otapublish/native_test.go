@@ -514,6 +514,22 @@ func TestNativeConfirmBeforePassword(t *testing.T) {
 	mustContain(t, h.toolLog(), "password accepted")
 }
 
+// TestNativeUnreadableStore: a Pi whose otactl status fails is not a Pi
+// without registered builds, so N is not taken to be 2, and nothing is
+// built.
+func TestNativeUnreadableStore(t *testing.T) {
+	h := newNativeHarness(t)
+	h.otactl("init")
+	if err := os.WriteFile(filepath.Join(h.store, "FORMAT"), []byte("99\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := h.fail("native", "--notes", "x", "--no-upload")
+	mustContain(t, out, "otactl status on the Pi exited with status 1")
+	if log := h.toolLog(); strings.Contains(log, "gradlew") || strings.Contains(log, "xcodebuild") {
+		t.Fatalf("a build ran:\n%s", log)
+	}
+}
+
 func TestNativeUploadRefusals(t *testing.T) {
 	h := newNativeHarness(t)
 	h.ok("native", "--notes", "x", "--no-upload")
