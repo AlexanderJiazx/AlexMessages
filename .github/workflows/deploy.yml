@@ -105,9 +105,10 @@ jobs:
       - name: Cross-compile linux/arm64 binaries (Raspberry Pi)
         run: |
           mkdir -p bin
+          # main.commit: each binary logs the commit it was built from.
           for c in server admin meet; do
             GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-              go build -trimpath -ldflags='-s -w' -o "bin/$c" "./cmd/$c"
+              go build -trimpath -ldflags="-s -w -X main.commit=$GITHUB_SHA" -o "bin/$c" "./cmd/$c"
           done
           file bin/*
 

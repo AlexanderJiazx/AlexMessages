@@ -18,8 +18,13 @@ import (
 	"alexmessage/internal/webapp"
 )
 
+// commit is the git commit this binary was built from. deploy.yml stamps it
+// with -ldflags "-X main.commit=<sha>"; a local build says "unknown".
+var commit = "unknown"
+
 func main() {
 	gin.SetMode(gin.ReleaseMode)
+	log.Printf("server built from commit %s", commit)
 
 	if err := db.InitDB(); err != nil {
 		log.Fatalf("db init: %v", err)
