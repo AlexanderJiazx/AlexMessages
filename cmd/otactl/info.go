@@ -200,8 +200,13 @@ func (a *app) status() error {
 		if warnings == nil {
 			warnings = []string{}
 		}
+		store, err := filepath.Abs(a.store.Dir)
+		if err != nil {
+			return err
+		}
+		// store: otapublish uploads into <store>/incoming/.
 		return a.printJSON(map[string]any{
-			"time": now.UTC().Format(time.RFC3339), "pointers": pointers, "revoked": revoked,
+			"time": now.UTC().Format(time.RFC3339), "store": store, "pointers": pointers, "revoked": revoked,
 			"census": map[string]any{"installs": total, "by_runtime": summary}, "warnings": warnings,
 		})
 	}
