@@ -103,6 +103,12 @@ the app has **diverged** from the Python original:
   while the app is closed, through a
   foreground service with its own socket (`/ws?mode=calls`). See **DM calls**
   below.
+- **OTA updates (server side only; NOT live)** — `cmd/server` serves the
+  Expo Updates protocol v1 manifest endpoint, the update files, the `/app`
+  install page and the native-build policy from the update store
+  `data/ota/`. The publishing tools are not built, nothing is deployed, and
+  no app build contains expo-updates yet: OTA updates do NOT work. See
+  **OTA updates** below.
 - **Branding** — user-visible name is **"Alex Messages"**. The Go module
   remains `alexmessage`.
 
@@ -123,7 +129,11 @@ served through `httpx.NoListFS`, so a request for a directory returns 404
 instead of a file listing. Each `main` also calls
 `db.StartBackgroundMaintenance()`, a 10-minute sweep that deletes upload files
 older than 24 hours that no attachment references, prunes expired sessions,
-and caps the debug ring buffer.
+and caps the debug ring buffer; `cmd/server` adds the OTA census prune to it
+with `db.AddMaintenance`. Each `main` logs
+`<server|admin|meet> built from commit <sha>` at start: `deploy.yml` sets
+`main.commit` with `-ldflags "-X main.commit=$GITHUB_SHA"`, and a build
+without the flag logs `unknown`.
 
 ## Repository layout
 
@@ -143,6 +153,10 @@ internal/
   webapp/    the user app: engine + one file per route module
   adminapp/  the admin panel + adminapp/debug.go (debug-console read API)
   meet/      Alex Meet (state.go, ws.go, routes.go, volctoken.go)
+  ota/       OTA update store, manifest selection, signature checks, policy;
+             ota/census (install census), ota/sign (signing: never in a
+             server binary), ota/otatest (test fixtures)
+deploy/      remote_deploy.sh (runs on the Pi for every deploy) + its Python test
 shared/      @alexmessages/shared — framework-agnostic TS core (see shared/README.md)
 web/         React web client (Vite + React 18 + TS)          (see web/README.md)
 mobile/      Expo React Native client (iOS + Android)         (see mobile/README.md)
@@ -157,7 +171,9 @@ The webapp route files: `pages.go`, `auth_routes.go`, `me.go`, `account.go`
 `transcribe.go` (voice dictation proxy), `calls.go` (DM calls: state machine +
 signaling), `call_listener.go` (the call listener socket that rings a closed
 Android app) and `ice.go` (STUN/TURN servers for calls), plus `avatar.go`
-(profile photos) and `linkpreview.go` (link previews).
+(profile photos), `linkpreview.go` (link previews), `ota_routes.go` (OTA
+updates: manifest, update files, `/app`, native-build policy) and
+`client_info.go` (the mobile app's `X-AM-Client` header and the hard gate).
 
 ## Clients
 
@@ -686,6 +702,78 @@ cards in the thread with a
    progress.
 7. Group calls are Alex Meet's job (below), not DM calls'.
 
+## OTA updates (server side; Phase 1 of `OTAUpdatePlan.md`)
+
+**Status (2026-10-25): OTA updates do NOT work.** The server side below is
+in local commits only (not pushed, not deployed). `cmd/otactl` (Pi) and
+`cmd/otapublish` (Mac) are not built (Phase 2), the keys do not exist
+(Phase 3), and no app build contains expo-updates (Phases 4–6). The
+operations (emergency commands, kill switch, publishing, keys, leaf renewal)
+are in `DEPLOY.md` → **OTA updates of the mobile app**.
+
+- **Update store** `data/ota/` (`OTA_DIR` overrides it; `ota.DirFromEnv`).
+  Layout and file formats: `internal/ota/store.go` and `DEPLOY.md`. The
+  server only reads it; `bin/otactl` (Phase 2) will be its only writer.
+  Without `data/ota/FORMAT` the store counts as absent and every manifest
+  request gets 204. Deploys never touch it: `deploy/remote_deploy.sh`
+  refuses a release that contains `data/`.
+- **`internal/ota`**: store reads (channel pointers in state
+  `update | rollback | halted`, registered runtimes, `revoked.txt`, the
+  signed `manifest`/`rollback` bytes with their `.sig` and `.leaf` files),
+  `Store.Select` (the manifest logic of plan D2: the beta pointer only when
+  `Expo-Extra-Params` has `am_channel="beta"` and a beta pointer exists; a
+  revoked id blocks only a pointer in state `update`), the multipart writer
+  (part headers are written in lowercase, because iOS reads
+  `expo-signature` case-sensitively), RFC 8941 parsing (`expo-signature`,
+  `Expo-Extra-Params`, `Expo-Recent-Failed-Update-IDs`), and
+  certificate-chain verification with expo-updates' rules (`VerifyChain`,
+  `VerifySignature`).
+- **`internal/ota/sign`** signs manifests and issues certificates. Only tests
+  import it today (`cmd/otapublish` will). `TestServerBinariesNeverImportSigning`
+  fails if `cmd/server`, `cmd/admin` or `cmd/meet` depends on it or on the
+  test fixtures in `internal/ota/otatest`.
+- **Routes** (`internal/webapp/ota_routes.go`, no login):
+  `GET /api/ota/manifest` (every answer carries `expo-protocol-version: 1`,
+  `expo-sfv-version: 0` and `Cache-Control: private, max-age=0, no-store`;
+  400 for bad headers; 204 when `OTA_DISABLED=1`, when there is no store, or
+  when nothing applies; otherwise a multipart `manifest` or `directive` part
+  plus a `certificate_chain` part holding the leaf named in the `.leaf`
+  file), `GET`/`HEAD /ota/assets/<sha256-b64url>.<ext>`,
+  `GET /api/app/latest`, `GET /app` (the install page), and
+  `GET`/`HEAD /app/<android|ios>/AlexMessages-<version>-<build>.<apk|ipa>`.
+  The server never sends `expo-manifest-filters` or
+  `expo-server-defined-headers`. Its 400 and 404 answers carry
+  `Cache-Control: no-store`, because Cloudflare caches 404s by extension.
+- **Install census** (`internal/ota/census`, `data/ota/census.db`, a SQLite
+  file of its own): every manifest request with `EAS-Client-ID` and
+  `Expo-Embedded-Update-ID` updates that install's row. A new row needs an
+  embedded id registered in `runtimes/` and fewer than 5,000 rows. A new
+  failed update id or fatal error emits the debug event `ota.client_failure`
+  (at most 30 per hour). Every field is an unauthenticated claim. `cmd/admin`
+  serves it at `GET /api/ota/installs`. `POST /api/me/delete` and the admin
+  user delete remove the rows whose `am_uid` is that user, and
+  `GET /api/me/export` includes them as `ota_installs`. The maintenance
+  sweep of `cmd/server` deletes rows unseen for 90 days.
+- **`X-AM-Client`** (`internal/webapp/client_info.go`), sent by app builds
+  from build 2 on: `v=1;platform=android;version=1.2.0;build=2;runtime=<fp>;update=<uuid|embedded>;channel=<production|beta>`
+  (the Android ring service sends `v=1;platform=android;build=2;component=ring`).
+  REST calls send it as a header; the `/ws` upgrade sends it as the
+  `client=` query parameter. On an authenticated request it is stored on
+  the session (`sessions.client`, `sessions.client_seen_at`): when it
+  changed, else at most once per 10 minutes, and never the ring service's
+  value. A missing or malformed value is never gated and stores nothing, so
+  the web client and the builds before 2 are unaffected.
+- **Native-build policy** `data/ota/native/policy.json`: per platform
+  `min_build`, `hard_gate` and `latest {version, build, url, sha256, size,
+  notes}`. With a valid `X-AM-Client`, the WS `init` carries
+  `client_policy {state: ok | update_available | update_required, latest}`
+  (the soft gate). Only while `hard_gate` is true for the platform and the
+  build is below `min_build` (the hard gate): REST calls under `/api/`
+  answer 426 (except `/api/app/`, `/api/ota/`, `/api/debug/report` and
+  `/api/logout`), and `/ws` and the call listener close with **4426** before
+  the 4401 check. A policy file that cannot be read or is invalid gates
+  nobody.
+
 ## Alex Meet (cmd/meet, internal/meet)
 
 The former 1:1 "AlexMessage Call" was replaced wholesale by **Alex Meet**, a
@@ -898,6 +986,10 @@ Environment variables (same semantics as the Python version):
 - `OPENROUTER_API_KEY` — required for `POST /api/transcribe` to reach a real
   model (absent in tests). `OPENROUTER_TRANSCRIBE_MODEL` and
   `OPENROUTER_BASE_URL` override the model and endpoint.
+- `OTA_DIR` — the OTA update store (default `data/ota`); read by
+  `cmd/server` and `cmd/admin` (the census), so set both to the same value.
+  `OTA_DISABLED=1` — the OTA kill switch: `/api/ota/manifest` answers 204 to
+  every request (see **OTA updates**).
 
 `go vet ./...` and `go build ./...` should both stay clean.
 
@@ -934,7 +1026,11 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   `internal/webapp/transcribe_test.go`, `internal/webapp/calls_test.go`,
   `internal/webapp/call_listener_test.go`, `internal/webapp/review_test.go`,
   `internal/meet/volctoken_test.go`, `internal/meet/routes_test.go`,
-  `internal/debuglog/debuglog_test.go`): DB layer (DM state, read receipts,
+  `internal/debuglog/debuglog_test.go`, the OTA tests
+  `internal/ota/{sfv,verify,store,manifest,client}_test.go`,
+  `internal/ota/census/census_test.go`, `internal/ota/sign/sign_test.go`,
+  `internal/webapp/ota_routes_test.go`, `internal/db/session_client_test.go`,
+  `internal/adminapp/ota_test.go`): DB layer (DM state, read receipts,
   attachment dims, paging, debug filters/prune), link-preview SSRF guard,
   image-dimension extraction, transcribe format/model mapping + upstream
   handling, VolcEngine token wire format, debug ingest rate-limiter; the DM
@@ -956,8 +1052,22 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   cutoffs; concurrent DM-state upserts; WAL and the message sequence
   surviving a purge or a migration; `BEGIN IMMEDIATE` waiting out another
   writer; orphan upload cleanup; a revoked cookie reaching Alex Meet's guest
-  gate. `go test ./...` — DB tests point the package-level path vars at a
-  temp dir.
+  gate. OTA: SFV parsing; the certificate-chain rules of expo-updates; the
+  store formats and atomic writes; every manifest answer (each 204 path,
+  `OTA_DISABLED`, the directive, 400s, the exact multipart bytes and a
+  signature that verifies against the root); asset and download headers,
+  Range and HEAD; census limits; the `X-AM-Client` record and both gates
+  (REST 426, WS 4426, `client_policy` in `init`); census rows covered by
+  account deletion and export; the session-column migration; the import
+  guard that keeps `internal/ota/sign` out of the server binaries.
+  `go test ./...` — DB tests point the package-level path vars at a temp
+  dir.
+- **deploy** — `python3 deploy/remote_deploy_test.py` runs
+  `deploy/remote_deploy.sh` against scratch directories with fake `sudo`,
+  `curl` and `sleep`: the React build is replaced whole, a failed health
+  check or a missing React build restores the old release, `data/` is
+  byte-identical after a deploy and after a rollback, a release that
+  contains `data/` is refused, and `bin/otactl` is installed by rename.
 - **shared** — `cd shared && npm test` (Vitest, 92 tests in 6 files): store
   reducers (optimistic send → delivered → read, edits, replies, unread),
   socket reconnect/queue, api error mapping, format helpers, WAV encoding,
@@ -1178,7 +1288,11 @@ partners, thread history, unread counts), the server closes the socket with
 1011 (`init failed`) instead of sending a partial `init`, and the client
 reconnects. HTTPS cookies carry Secure, including requests forwarded by
 loopback nginx with `X-Forwarded-Proto: https`; direct localhost HTTP remains
-usable.
+usable. Before the 4401 check, the main-app `/ws` and the call listener close
+with **4426** a mobile build that the OTA hard gate refuses (its
+`X-AM-Client` build is below `min_build` while `hard_gate` is on; see **OTA
+updates**). The gate is off by default, and a socket without `X-AM-Client`
+is never gated.
 
 ### Identity, DMs, per-user DM state, lazy history
 
@@ -1195,7 +1309,8 @@ persisted `client_id` prevents duplicate messages on Retry. The DB schema
 migrates added columns (`users.avatar`, `attachments.width/height`,
 `dm_state.force_unread`, `dm_state.last_read_position`,
 `dm_state.cleared_position`, `messages.edited_at`, `messages.position`,
-`messages.client_id`, `calls.channel`, `calls.media`, `calls.message_id`) on
+`messages.client_id`, `calls.channel`, `calls.media`, `calls.message_id`,
+`sessions.client`, `sessions.client_seen_at`) on
 startup via `ensureColumn`, tolerant of the three binaries racing the same
 ALTER. A one-time migration, recorded as `message_positions_v1` in the
 `schema_migrations` table, back-fills `messages.position` and the DM
@@ -1227,6 +1342,10 @@ Lives under `data/` (gitignored), created on first run:
 - `data/avatars/<user_id>_<token>.<ext>` — profile photos; replaced on change,
   removed on account deletion.
 - `data/vapid_private.pem` / `data/vapid_public.txt` — VAPID key pair.
+- `data/ota/` — the OTA update store (`OTA_DIR` overrides it), including the
+  install census `data/ota/census.db`. It does not exist until `bin/otactl
+  init` (Phase 2 of `OTAUpdatePlan.md`) creates it; without it the manifest
+  endpoint answers 204. Deploys never write into `data/`.
 
 Alex Meet rooms are in-memory only — a meet-server restart ends all meetings.
 
@@ -1244,8 +1363,14 @@ callee is visible, see **DM calls**)/`ping`; server sends `init`/`message`
 `call_signal`/`call_resume` (client) and `call_outgoing`/`call_incoming`/
 `call_ringing`/`call_accepted`/`call_signal`/`call_resumed`/`call_ended`/
 `call_error` (server) — see **DM calls**. `/ws?mode=calls` is the call
-listener socket (ringing only; see **DM calls**). The Alex Meet control-plane
-protocol is documented above.
+listener socket (ringing only; see **DM calls**). A mobile build from build 2
+on adds `client=<X-AM-Client value>` to the `/ws` upgrade; its `init` then
+carries `client_policy`, and the OTA hard gate closes it with 4426 (see **OTA
+updates**). The Alex Meet control-plane protocol is documented above.
+
+OTA routes (no login): `GET /api/ota/manifest`, `GET`/`HEAD /ota/assets/…`,
+`GET /api/app/latest`, `GET /app`, `GET`/`HEAD /app/<android|ios>/…`
+(`internal/webapp/ota_routes.go`); admin: `GET /api/ota/installs`.
 
 Notable additions for the TS clients: `POST /api/transcribe` (dictation proxy
 to OpenRouter) and the `session_token` field on `POST /api/login` (bearer auth

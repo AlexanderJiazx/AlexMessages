@@ -30,10 +30,12 @@ python3 deploy/remote_deploy_test.py
 (cd shared && npm ci && npm run typecheck && npm test)
 (cd web && npm ci && npm run build && npx playwright install chromium && npm run test:e2e)
 
-# 1. Cross-compile static linux/arm64 binaries.
+# 1. Cross-compile static linux/arm64 binaries. main.commit is the commit each
+#    binary logs at start ("server built from commit <sha>").
 mkdir -p bin
+commit=$(git rev-parse HEAD)
 for c in server admin meet; do
-  GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/$c ./cmd/$c
+  GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.commit=$commit" -o bin/$c ./cmd/$c
 done
 
 # 2. Bundle binaries + assets (NOT data/ — it lives on the server).
@@ -53,6 +55,10 @@ ssh -p 2222 alexander@35.226.215.209 \
 > server sends no `Cache-Control` on them, so browsers (Safari especially) keep
 > serving the old frontend after a deploy. Tell testers to hard-refresh, or add
 > cache-busting before relying on a frontend change being live.
+
+> **A bad mobile-app update (OTA):** see **OTA updates of the mobile app →
+> Emergency: stop or roll back a bad update** at the end of this file. OTA
+> updates do NOT work yet.
 
 ---
 
@@ -86,6 +92,8 @@ First run prints the seed admin account to stderr (a random password if
 | `STUN_URLS`                           | Google's public STUN         | server    |
 | `TURN_URLS` / `TURN_SECRET`           | *(empty; no TURN)*           | server    |
 | `TURN_USERNAME` / `TURN_CREDENTIAL`   | *(empty)*                    | server    |
+| `OTA_DIR`                             | `data/ota`                   | server, admin |
+| `OTA_DISABLED`                        | *(unset)*; `1` = every OTA manifest request gets `204` | server |
 
 The seed admin is created only if no admin exists yet; the bootstrap is
 idempotent and race-safe across the three processes.
@@ -236,6 +244,15 @@ internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/f
   ports `6001 6002 6003`, and **restores the binaries and React build** if any fails. A final
   step checks `https://messages.alexanderjia.com/api/me` end to end (relay →
   nginx → app).
+- Each binary is built with `-X main.commit=$GITHUB_SHA` and logs
+  `<server|admin|meet> built from commit <sha>` when it starts.
+- `remote_deploy.sh` never writes into `data/`: it refuses a release that
+  contains `data/`, so a deploy or a rollback leaves the database and the OTA
+  update store `data/ota/` unchanged. When a release contains `bin/otactl`
+  (from Phase 2.1 of `OTAUpdatePlan.md` on; no release contains it today), the
+  script installs it by rename (`install -m 755` to `bin/otactl.tmp`, then
+  `mv` over `bin/otactl`), so an `otactl` that runs during the deploy keeps its
+  file.
 
 The deploy job only runs when the repo variable **`DEPLOY_ENABLED` is `true`**.
 
@@ -287,3 +304,277 @@ done
 
 Then sign into the admin panel and watch the **Debug console** — live client and
 server events confirm the whole stack is wired up end to end.
+
+## OTA updates of the mobile app
+
+Design, reasons and the full build plan: `OTAUpdatePlan.md`.
+
+**Status (2026-10-25): OTA updates do NOT work yet.**
+
+Done (in local commits on `react`; NOT pushed, NOT deployed):
+- `cmd/server` serves the update endpoints, the `/app` install page, the
+  native-build policy and the install census described below.
+- `cmd/admin` serves the census at `GET /api/ota/installs`.
+- `remote_deploy.sh` refuses a release that contains `data/` and installs
+  `bin/otactl` by rename.
+
+NOT done:
+- `bin/otactl` (runs on the Pi) and `cmd/otapublish` (runs on your Mac) are
+  not built yet (Phase 2 of the plan). **Every `otactl` and `otapublish`
+  command in this section fails until then.**
+- The keys do not exist yet (Phase 3).
+- No app build contains expo-updates yet. Phones get OTA updates only from
+  build 2 on (Phases 4–6).
+- Production runs none of this code, and `data/ota/` does not exist on the
+  Pi. Until `bin/otactl init` creates it, the manifest endpoint answers `204`
+  (no update) to every request and `/app` says that no build is published.
+
+### What the server serves
+
+All on `https://messages.alexanderjia.com`, without login:
+
+| URL | What | Cache-Control |
+|-----|------|---------------|
+| `GET /api/ota/manifest` | Expo Updates protocol v1 manifest endpoint; this URL is baked into every app build from build 2 on | `private, max-age=0, no-store` |
+| `GET, HEAD /ota/assets/<sha256-b64url>.<ext>` | update files (the JS bundle as `.js`) | `public, max-age=31536000, immutable` |
+| `GET /api/app/latest` | native-build policy of both platforms (`data/ota/native/policy.json`) | `no-cache` |
+| `GET /app` | install page: download links, SHA-256 sums, Android and iPhone steps | `no-cache` |
+| `GET, HEAD /app/android/AlexMessages-<version>-<build>.apk` | APK | `public, max-age=31536000, immutable` |
+| `GET, HEAD /app/ios/AlexMessages-<version>-<build>.ipa` | unsigned IPA (install it through 万能签) | `public, max-age=31536000, immutable` |
+
+- 400 and 404 answers carry `Cache-Control: no-store`, so Cloudflare (which
+  caches by file extension, 404 answers included) never keeps a 404 for a
+  file that is uploaded later.
+- File answers carry `X-Content-Type-Options: nosniff`,
+  `Content-Security-Policy: sandbox` and `Content-Disposition: attachment`.
+- The manifest endpoint answers `400` for a missing or invalid
+  `expo-protocol-version`, `expo-platform` or `expo-runtime-version`, and
+  `500` when a file in `data/ota/` is damaged or cannot be read (debug-console
+  event `ota.store_error`, at most once per 10 minutes). A missing
+  `data/ota/` or a missing `data/ota/FORMAT` gives `204`, not `500`.
+- The server holds no signing key. It serves the bytes that `otapublish`
+  signed on the Mac.
+
+**The install census:** every manifest request from an install whose
+embedded update id belongs to a registered native build updates that
+install's row in `data/ota/census.db` (at most 5,000 rows; the maintenance
+sweep deletes rows unseen for 90 days). Every field is an unauthenticated
+claim of the phone. Read it at `https://admin.alexanderjia.com/api/ota/installs`
+(admin login; JSON), or with `bin/otactl census` over SSH (Phase 2).
+Deleting an account deletes the rows whose `am_uid` is that account.
+`backups/` does not hold the census; phones refill it at their next check.
+
+**Which commit runs:** each binary logs
+`<server|admin|meet> built from commit <sha>` when it starts. With the
+systemd default (output to the journal):
+`sudo journalctl -u alexmessage | grep 'built from commit' | tail -n 1`.
+`bin/otactl version` will print it too (Phase 2).
+
+### Storage: `data/ota/`
+
+`/home/alexander/alexmessage/data/ota/` on the Pi. `OTA_DIR` overrides it;
+give `alexmessage` and `alexmessage-admin` the same value. `bin/otactl init`
+creates it (Phase 2); after that only `otactl` writes into it. Server deploys
+and server rollbacks never touch it.
+
+```
+data/ota/
+  FORMAT                                    "1"; without it the server treats the store as absent (204 to every phone)
+  certs/ota-root-2026.pem, leaf-*.pem       public certificates only
+  assets/<sha256-b64url>.<ext>              write-once, never deleted
+  updates/<id>/manifest.json, rollback.json the exact signed bytes
+              manifest.sig, rollback.sig    the expo-signature value
+              manifest.leaf, rollback.leaf  lowercase hex SHA-256 of the DER leaf certificate that signed it
+              info.json                     {"platform","runtime","label","commit","created_at","notes","critical"}
+  runtimes/<platform>/<runtime>.json        {"platform","runtime","builds":[{"build","version","embedded_update_id",
+                                              "commit_time","commit","registered_at"}]}
+  channels/<production|beta>/<platform>/<runtime>.json
+                                            {"state":"update"|"rollback"|"halted","update":"<id>","since":"<RFC 3339>"}
+  revoked.txt                               one update id per line; "#" starts a comment
+  native/policy.json                        the minimum-client gate (below)
+  native/android/*.apk, native/ios/*.ipa
+  census.db                                 the install census
+```
+
+An id in `revoked.txt` is never served as an update. A pointer in state
+`rollback` still serves the rollback directive of a revoked update: that
+directive is how phones leave it.
+
+### Emergency: stop or roll back a bad update
+
+From `OTAUpdatePlan.md`, D9. **These commands fail today: `bin/otactl` does
+not exist yet (Phase 2), and production has no OTA pointers.**
+
+No key is needed. Use your normal SSH key from the Mac, or the emergency key
+(`~/.ssh/am-emergency`, plan step 3.4) that the Pi restricts to
+`bin/otactl emergency`, so a phone with an SSH app never carries a
+root-equivalent key. Each command prints every pointer it changed.
+
+1. **Stop:** `ssh -p 2222 alexander@35.226.215.209 'cd ~/alexmessage && bin/otactl halt --all'`
+   sets every pointer (every channel, platform and runtime) to `halted`.
+   Targeted: `bin/otactl halt --label <label>` halts every pointer (production
+   and beta, both platforms) that references that label's updates. Phones
+   that have not downloaded the bad update stop getting it at once. With the
+   emergency key: `ssh -p 2222 -i <emergency key> alexander@35.226.215.209 halt`.
+2. **Roll back:** `ssh -p 2222 alexander@35.226.215.209 'cd ~/alexmessage && bin/otactl rollback-embedded --label <label>'`.
+   Every pointer that references the label's updates (production and beta,
+   both platforms) switches to that update's pre-signed `rollBackToEmbedded`
+   directive (its `commitTime` is the bad update's `createdAt` + 1 s, so it
+   applies to that update and to anything older). The bad ids go into
+   `revoked.txt`, and the endpoint never serves them again. With the
+   emergency key: `… rollback-embedded` (acts on every pointer that is in
+   state `update` or `halted`).
+3. Phones apply the rollback after they have downloaded it: at the next
+   resume after 15 minutes, at Restart to Update, or at the second cold start
+   after the directive is live. `bin/otactl status` counts the installs still
+   reporting the bad id.
+4. If the bad update broke `UpdateHost` itself, tell the affected users:
+   "Open the app and keep it open for 30 seconds on Wi-Fi or mobile data.
+   Close it completely (iPhone: swipe it away; Android: Settings → Apps →
+   Alex Messages → Force stop). Open it again." The first open downloads the
+   rollback; the second open runs it. `bin/otactl status` shows the phone on
+   its embedded id after the second open.
+
+**Fix forward, at the Mac:**
+
+5. `go run ./cmd/otapublish republish <last good label>` re-signs the last
+   good content from the Mac archive as a new id with a new `createdAt`.
+   Assets are reused by hash, so phones download only the manifest. Or
+   publish a fix normally.
+6. Do this promptly. Any new update replaces the rollback pointer, because
+   its `createdAt` is later than the directive's `commitTime`, and it also
+   moves every phone past the bad update, which ends the replay exposure
+   (plan D4).
+
+**Rule:** `rollback-embedded` is allowed only while the server still works
+with the embedded JS of every runtime in the census, because that is the code
+phones go back to. `otactl rollback-embedded` prints the native builds the
+census shows and asks for `yes`.
+
+### Kill switch, if `data/ota` itself is damaged
+
+This one needs no `otactl` and works once the OTA server code is deployed:
+add `OTA_DISABLED=1` to `/etc/alexmessage/alexmessage.env` and run
+`sudo systemctl restart alexmessage`. The manifest endpoint then answers
+`204` to every request, so every phone keeps the update it runs. **The
+restart ends every live call** (calls are held in memory). To undo it, delete
+the line and restart again.
+
+### Publish (works only after Phases 2–6)
+
+From section 6 of `OTAUpdatePlan.md`. Claude starts every command that needs
+a key in your Terminal panel, and you type the passphrase there.
+
+**Ship a JS fix:**
+1. If the fix needs a server change, deploy the server first, by hand: set
+   the repo variable `DEPLOY_ENABLED` to `true`, run Actions → Deploy → Run
+   workflow, and set `DEPLOY_ENABLED` back to `false` when the run ends
+   (pushes never deploy). The server must keep working for phones still on
+   older updates.
+2. Commit and push.
+3. `go run ./cmd/otapublish ota --notes "Fixes the send button on iPad"`
+   (you type the leaf passphrase). It publishes to beta and prints the label.
+4. On your phone: Settings → Software Update → Check for Updates → Restart
+   to Update; try the fix.
+5. On each beta phone (iOS and Android): Check for Updates once more, so the
+   server sees the running update.
+6. `go run ./cmd/otapublish promote <label>`.
+7. Next day: `bin/otactl census` (or the admin page) shows every phone on the
+   label and no failure.
+
+**Ship a native change:**
+1. Claude makes the release commit `release: native N` (`app.json`: version
+   `1.N.0`, `ios.buildNumber` `"N"`, `android.versionCode` N) and pushes
+   after your go-ahead.
+2. `go run ./cmd/otapublish native --notes "…"` (you type the keystore
+   password). It refuses unless N = last registered build + 1, builds from a
+   clean worktree of the pushed commit, runs every artifact check, uploads,
+   registers the runtimes, updates `policy.json`, and tags `native-N` only
+   after the upload succeeded.
+
+**Backport a JS fix to phones on an older runtime:**
+`git switch -c release/native-N native-N`, cherry-pick the fix, push
+`release/native-N` (deploy.yml does not run on that branch), then
+`otapublish ota --from release/native-N`.
+
+**Upgrade Expo SDK, React Native or expo-updates:** always a native release
+(a new runtime on both platforms). Before it ships, re-run drill scenarios a,
+b, d, e, n, o and the rollback part of c (plan D12) on the new versions, and
+check that `fingerprint.config.js` still parses
+(`npx @expo/fingerprint fingerprint:generate` lists the skips).
+
+**Numbering:** native build N, one counter for both platforms; version
+`1.N.0`; OTA label `YYYYMMDD.k`; git tags `native-N` and `ota-<label>`.
+
+### Keys: where they live
+
+None of these exists yet (Phase 3 creates them). The Pi, the GCP relay,
+Cloudflare and GitHub never hold a private key.
+
+| Key or file | Where |
+|-------------|-------|
+| OTA root private key (RSA-4096) | encrypted with a passphrase (age) on one USB stick, plus one copy in your password manager; never on the Mac's disk |
+| Root passphrase | in your head, and on paper stored with the USB stick (not in the password manager that holds the encrypted key) |
+| OTA root certificate (public) | `mobile/certs/ota-root-2026.pem` (committed; embedded in every app build from build 2 on), and a copy at `data/ota/certs/ota-root-2026.pem` |
+| OTA leaf private key (RSA-3072) | `~/.alexmessages/keys/ota-leaf-<yyyymm>.key.age` on the Mac, encrypted (age) with a different passphrase |
+| Leaf passphrase | in your head, and on paper stored with the USB stick |
+| OTA leaf certificate (public) | `data/ota/certs/leaf-<yyyymm>.pem` on the Pi; sent with every manifest |
+| Android release keystore (PKCS12, RSA-4096) | `~/.alexmessages/keys/android-release.p12` on the Mac, a copy on the USB stick, and one in your password manager |
+| Keystore password | on paper with the USB stick, and in your password manager; never in a file on the Mac |
+| Android signer SHA-256 (public) | `mobile/release/android-signer.sha256` (committed) |
+| Emergency SSH key (optional) | `~/.ssh/am-emergency` on the device you would use in an emergency; restricted on the Pi to `bin/otactl emergency` |
+| Drill keys (throwaway) | `~/.alexmessages/drill-keys/` |
+| Archive of everything published | `~/AlexMessagesReleases/ota/` on the Mac, with `pointers.log` |
+
+### Renew the leaf certificate (every 12 months)
+
+A leaf certificate is valid for 400 days. Renewing it needs no new app build.
+These steps work only after Phases 2 and 3.
+
+1. Plug in the USB stick.
+2. `go run ./cmd/otapublish keys issue-leaf --root /Volumes/<stick>/ota-root-2026.key.age --out ~/.alexmessages/keys/`
+   (you type the root passphrase, then a new leaf passphrase; write the new
+   one on paper and keep it with the stick). It also uploads the new leaf
+   certificate to `data/ota/certs/` on the Pi.
+3. Unplug the stick.
+4. `go run ./cmd/otapublish resign-active` (you type the new leaf
+   passphrase). It re-signs with the new leaf every update that any pointer
+   references (production and beta, every platform and runtime) and the last
+   3 updates per platform and runtime, both `manifest.json` and
+   `rollback.json`. The signed bodies stay byte-identical; their `.sig` and
+   `.leaf` files change.
+5. `ssh -p 2222 alexander@35.226.215.209 'cd ~/alexmessage && bin/otactl doctor'`
+   checks the leaf of every pointer-referenced manifest and rollback
+   directive.
+
+`otactl activate` and `otactl rollback-embedded` refuse a signature whose
+leaf expires within 30 days. A lost leaf costs only a new leaf from the root.
+A lost root costs a reinstall of your iPhone, and a new Android build
+installed through the app's updater.
+
+### The minimum-client gate (`data/ota/native/policy.json`)
+
+`bin/otactl policy` will write it (Phase 2). Without the file nothing is
+gated and `/api/app/latest` lists no build. Format:
+
+```json
+{
+  "android": {"min_build": 0, "hard_gate": false,
+              "latest": {"version": "1.2.0", "build": 2,
+                         "url": "https://messages.alexanderjia.com/app/android/AlexMessages-1.2.0-2.apk",
+                         "sha256": "<64 lowercase hex characters>", "size": 51234567, "notes": "…"}},
+  "ios":     {"min_build": 0, "hard_gate": false, "latest": null}
+}
+```
+
+- The gate acts only on app builds that send the `X-AM-Client` header
+  (build 2 and later). The web client and the builds before 2 are never
+  gated.
+- **Soft gate:** the WebSocket `init` of such a build carries
+  `client_policy {state: ok | update_available | update_required, latest}`.
+- **Hard gate:** only while `hard_gate` is `true` for the platform, and only
+  for a build below `min_build`. REST calls under `/api/` answer `426`
+  (except `/api/app/`, `/api/ota/`, `/api/debug/report` and `/api/logout`),
+  and `/ws` and the call listener close with code `4426`.
+- A policy file that cannot be read or is invalid gates nobody (debug-console
+  event `ota.store_error`).
