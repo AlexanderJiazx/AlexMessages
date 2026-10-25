@@ -103,12 +103,13 @@ the app has **diverged** from the Python original:
   while the app is closed, through a
   foreground service with its own socket (`/ws?mode=calls`). See **DM calls**
   below.
-- **OTA updates (server side only; NOT live)** — `cmd/server` serves the
-  Expo Updates protocol v1 manifest endpoint, the update files, the `/app`
-  install page and the native-build policy from the update store
-  `data/ota/`. The publishing tools are not built, nothing is deployed, and
-  no app build contains expo-updates yet: OTA updates do NOT work. See
-  **OTA updates** below.
+- **OTA updates (server side and tools; NOT live)** — `cmd/server` serves
+  the Expo Updates protocol v1 manifest endpoint, the update files, the
+  `/app` install page and the native-build policy from the update store
+  `data/ota/`; `cmd/otactl` manages that store on the Pi and
+  `cmd/otapublish` signs and publishes from the publisher's Mac. Nothing is
+  deployed, the keys do not exist, and no app build contains expo-updates
+  yet: OTA updates do NOT work. See **OTA updates** below.
 - **Branding** — user-visible name is **"Alex Messages"**. The Go module
   remains `alexmessage`.
 
@@ -142,6 +143,9 @@ cmd/
   server/main.go   entrypoint: bootstrap + serve user app
   admin/main.go    entrypoint: bootstrap + serve admin panel
   meet/main.go     entrypoint: bootstrap + serve Alex Meet
+  otactl/          the OTA update store's tool on the Pi (verifies, never signs)
+  otapublish/      the publisher's Mac tool: keys, signed OTA publish, native
+                   builds, audit, restore (never deployed)
 internal/
   db/        SQLite schema + every query helper; debug.go (ring buffer) + maintenance.go
   auth/      scrypt hashing, session tokens, admin bootstrap
@@ -702,24 +706,27 @@ cards in the thread with a
    progress.
 7. Group calls are Alex Meet's job (below), not DM calls'.
 
-## OTA updates (server side; Phase 1 of `OTAUpdatePlan.md`)
+## OTA updates (Phases 1–2 of `OTAUpdatePlan.md`: server and tools)
 
-**Status (2026-10-25): OTA updates do NOT work.** The server side below is
-in local commits only (not pushed, not deployed). `cmd/otactl` (Pi) and
-`cmd/otapublish` (Mac) are not built (Phase 2), the keys do not exist
-(Phase 3), and no app build contains expo-updates (Phases 4–6). The
-operations (emergency commands, kill switch, publishing, keys, leaf renewal)
-are in `DEPLOY.md` → **OTA updates of the mobile app**.
+**Status (2026-10-25): OTA updates do NOT work.** The server side and the
+tools below are in local commits only (not pushed, not deployed). The keys
+do not exist (Phase 3), and no app build contains expo-updates (Phases
+4–6), so `otapublish ota` stops at its runtime step and `otapublish native`
+cannot build a release. The tools have run only in tests, against a
+temporary directory standing in for the Pi. The operations (the tools'
+commands, emergency commands, kill switch, publishing, audit, restore,
+keys, leaf renewal) are in `DEPLOY.md` → **OTA updates of the mobile app**.
 
 - **Update store** `data/ota/` (`OTA_DIR` overrides it; `ota.DirFromEnv`).
   Layout and file formats: `internal/ota/store.go` and `DEPLOY.md`. The
-  server only reads it; `bin/otactl` (Phase 2) will be its only writer.
+  server only reads it; `bin/otactl` is its only writer.
   Without `data/ota/FORMAT` the store counts as absent and every manifest
   request gets 204. Deploys never touch it: `deploy/remote_deploy.sh`
   refuses a release that contains `data/`.
 - **`internal/ota`**: store reads (channel pointers in state
-  `update | rollback | halted`, registered runtimes, `revoked.txt`, the
-  signed `manifest`/`rollback` bytes with their `.sig` and `.leaf` files),
+  `update | rollback | halted | test_unsigned`, registered runtimes,
+  `revoked.txt`, the signed `manifest`/`rollback` bytes with their `.sig`
+  and `.leaf` files),
   `Store.Select` (the manifest logic of plan D2: the beta pointer only when
   `Expo-Extra-Params` has `am_channel="beta"` and a beta pointer exists; a
   revoked id blocks only a pointer in state `update`), the multipart writer
@@ -727,11 +734,20 @@ are in `DEPLOY.md` → **OTA updates of the mobile app**.
   `expo-signature` case-sensitively), RFC 8941 parsing (`expo-signature`,
   `Expo-Extra-Params`, `Expo-Recent-Failed-Update-IDs`), and
   certificate-chain verification with expo-updates' rules (`VerifyChain`,
-  `VerifySignature`).
-- **`internal/ota/sign`** signs manifests and issues certificates. Only tests
-  import it today (`cmd/otapublish` will). `TestServerBinariesNeverImportSigning`
-  fails if `cmd/server`, `cmd/admin` or `cmd/meet` depends on it or on the
-  test fixtures in `internal/ota/otatest`.
+  `VerifySignature`). `update.go` holds the checks that `otactl` and
+  `otapublish` share: the strict parser of the manifests `otapublish`
+  writes, the `rollBackToEmbedded` directive, `info.json`, and
+  `VerifyUpdateFiles` (an update's files and both signatures against the
+  root). A beta pointer in state `test_unsigned` (`until`, `previous`)
+  serves the unsigned manifest `test/<id>/manifest.json` until `until`
+  (`otactl test-unsigned`, plan step 6.4; `Store.SelectAt`).
+- **`internal/ota/sign`** signs manifests and issues certificates. Only
+  `cmd/otapublish` and tests import it. `TestServerBinariesNeverImportSigning`
+  fails if `cmd/server`, `cmd/admin`, `cmd/meet` or `cmd/otactl` depends on
+  it, on the test fixtures in `internal/ota/otatest`, or on `filippo.io/age`;
+  `TestNoPrivateKeysTracked` fails on a tracked PEM private key or a tracked
+  `.key`, `.p12`, `.pfx`, `.jks` or `.keystore` file (both in
+  `internal/ota/sign/sign_test.go`).
 - **Routes** (`internal/webapp/ota_routes.go`, no login):
   `GET /api/ota/manifest` (every answer carries `expo-protocol-version: 1`,
   `expo-sfv-version: 0` and `Cache-Control: private, max-age=0, no-store`;
@@ -773,6 +789,48 @@ are in `DEPLOY.md` → **OTA updates of the mobile app**.
   `/api/logout`), and `/ws` and the call listener close with **4426** before
   the 4401 check. A policy file that cannot be read or is invalid gates
   nobody.
+- **`cmd/otactl`** (cross-compiled into `bin/` by `deploy.yml`; runs on the
+  Pi): the only writer of `data/ota/`. It holds no key: `ingest` verifies an
+  upload in `incoming/<publishId>/` completely (chains, asset hashes, both
+  signatures of every update, write-once bytes) before it moves anything;
+  `activate` / `promote` / `halt` / `rollback-embedded` / `restore-pointer`
+  / `test-unsigned` switch pointers; `revoke`, `register-runtime`, `policy`,
+  `repair-asset`; read-only `status`, `census`, `runtimes`, `doctor`,
+  `inventory`, `version`; `emergency` (the restricted key's forced command:
+  one word of `halt`, `rollback-embedded`, `status`). It finds the store
+  without the shell's help: `--ota`, else `$OTA_DIR`, else `../data/ota`
+  next to its executable when that sits in `bin/` (the Pi), else
+  `./data/ota`; so `OTA_DIR` must stay unset on the Pi (SSH sessions never
+  read the units' environment file). Every changing command holds
+  `data/ota/.lock` and appends a JSON line to `data/ota/log/actions.log`.
+  `promote` reads `alexmessage.db` read-only (an admin's app session must
+  report the update; no `ota.crash`/`ota.error` report may name it).
+- **`cmd/otapublish`** (runs on the publisher's Mac; never deployed; the only
+  binary that imports `internal/ota/sign` and `filippo.io/age`): `keys init-root |
+  issue-leaf | upload-certs | show`, `ota` (D6: 18 steps; `--dry-run` runs
+  steps 1–12; `--fixture` replaces steps with prepared data;
+  `--profile drill` uses throwaway keys and a local store), `promote`,
+  `republish`, `resign-active`, `status`, `native` (D10: unsigned Gradle
+  release build, unsigned `xcodebuild archive` packed into an IPA,
+  `zipalign` + `apksigner` with the release keystore, the artifact checks
+  in `artifacts.go` that read the APK's binary XML/resources (`axml.go`)
+  and the IPA's plists (`plist.go`), `build.json` in
+  `<archive>/builds/native-N-<UTC>/`, `--no-upload`, `--upload-only`),
+  `audit [--record]` and `restore-pi`. Every keyed command and every
+  publish runs in two stages: stage 1 checks the commit out into a clean
+  git worktree, builds otapublish there with the commit stamped in, and runs
+  it with `--in-worktree`. The archive (`~/AlexMessagesReleases`,
+  `$AM_RELEASES_DIR`) is authoritative for the write-once files; the Pi for
+  the pointers, `revoked.txt` and `policy.json` (layout in `DEPLOY.md`).
+  **Claude never runs a keyed command (`keys …`, `ota` without
+  `--dry-run`, `republish`, `resign-active`, `native`) through its own
+  command tool**: Claude starts it in the user's Terminal panel, where the
+  user types the passphrase or password. Claude may run `ota --dry-run`,
+  `status` and `audit` itself.
+- **`.github/workflows/mobile-checks.yml`** (never run on GitHub yet): on
+  every push and pull request to `main`/`react`, the two guard tests above,
+  `shared` typecheck + Vitest and `mobile` `tsc --noEmit`, each after
+  `npm ci --ignore-scripts`. No secrets.
 
 ## Alex Meet (cmd/meet, internal/meet)
 
@@ -988,8 +1046,12 @@ Environment variables (same semantics as the Python version):
   `OPENROUTER_BASE_URL` override the model and endpoint.
 - `OTA_DIR` — the OTA update store (default `data/ota`); read by
   `cmd/server` and `cmd/admin` (the census), so set both to the same value.
+  Leave it unset on the Pi: `bin/otactl` over SSH never reads the units'
+  environment file and finds the store next to its own executable.
   `OTA_DISABLED=1` — the OTA kill switch: `/api/ota/manifest` answers 204 to
   every request (see **OTA updates**).
+- `AM_RELEASES_DIR` — `otapublish`'s release archive on the Mac (default
+  `~/AlexMessagesReleases`; `--archive` overrides both).
 
 `go vet ./...` and `go build ./...` should both stay clean.
 
@@ -1027,10 +1089,11 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   `internal/webapp/call_listener_test.go`, `internal/webapp/review_test.go`,
   `internal/meet/volctoken_test.go`, `internal/meet/routes_test.go`,
   `internal/debuglog/debuglog_test.go`, the OTA tests
-  `internal/ota/{sfv,verify,store,manifest,client}_test.go`,
+  `internal/ota/{sfv,verify,store,manifest,client,update}_test.go`,
   `internal/ota/census/census_test.go`, `internal/ota/sign/sign_test.go`,
   `internal/webapp/ota_routes_test.go`, `internal/db/session_client_test.go`,
-  `internal/adminapp/ota_test.go`): DB layer (DM state, read receipts,
+  `internal/adminapp/ota_test.go`, `cmd/otactl/{otactl,gate}_test.go`,
+  `cmd/otapublish/*_test.go`): DB layer (DM state, read receipts,
   attachment dims, paging, debug filters/prune), link-preview SSRF guard,
   image-dimension extraction, transcribe format/model mapping + upstream
   handling, VolcEngine token wire format, debug ingest rate-limiter; the DM
@@ -1059,7 +1122,16 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   Range and HEAD; census limits; the `X-AM-Client` record and both gates
   (REST 426, WS 4426, `client_policy` in `init`); census rows covered by
   account deletion and export; the session-column migration; the import
-  guard that keeps `internal/ota/sign` out of the server binaries.
+  guard that keeps `internal/ota/sign` and age out of the binaries deployed
+  to the Pi, and the private-key guard. The OTA tools: every `otactl`
+  command against a temporary store (ingest verification, pointer
+  switching, emergency, the promote gate on a temporary database), and every
+  `otapublish` command against a fake Pi (a temporary directory; fake `ssh`,
+  `gh`, `npm`, `npx`, `gradlew`, `pod`, `xcodebuild`, `zipalign` and
+  `apksigner` scripts; the real `otactl`; the real webapp engine over
+  `httptest`; throwaway keys and injected passphrases), and the APK and IPA
+  readers against real `aapt2`, `apksigner` and `plutil` output
+  (`cmd/otapublish/testdata/native`).
   `go test ./...` — DB tests point the package-level path vars at a temp
   dir.
 - **deploy** — `python3 deploy/remote_deploy_test.py` runs
@@ -1344,8 +1416,9 @@ Lives under `data/` (gitignored), created on first run:
 - `data/vapid_private.pem` / `data/vapid_public.txt` — VAPID key pair.
 - `data/ota/` — the OTA update store (`OTA_DIR` overrides it), including the
   install census `data/ota/census.db`. It does not exist until `bin/otactl
-  init` (Phase 2 of `OTAUpdatePlan.md`) creates it; without it the manifest
-  endpoint answers 204. Deploys never write into `data/`.
+  init` creates it (on the Pi: release day, Phase 6 of `OTAUpdatePlan.md`);
+  without it the manifest endpoint answers 204. Deploys never write into
+  `data/`.
 
 Alex Meet rooms are in-memory only — a meet-server restart ends all meetings.
 

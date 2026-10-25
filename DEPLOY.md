@@ -31,10 +31,11 @@ python3 deploy/remote_deploy_test.py
 (cd web && npm ci && npm run build && npx playwright install chromium && npm run test:e2e)
 
 # 1. Cross-compile static linux/arm64 binaries. main.commit is the commit each
-#    binary logs at start ("server built from commit <sha>").
+#    binary logs at start ("server built from commit <sha>"). otactl manages
+#    the OTA update store data/ota on the Pi (see OTA updates below).
 mkdir -p bin
 commit=$(git rev-parse HEAD)
-for c in server admin meet; do
+for c in server admin meet otactl; do
   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.commit=$commit" -o bin/$c ./cmd/$c
 done
 
@@ -248,13 +249,23 @@ internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/f
   `<server|admin|meet> built from commit <sha>` when it starts.
 - `remote_deploy.sh` never writes into `data/`: it refuses a release that
   contains `data/`, so a deploy or a rollback leaves the database and the OTA
-  update store `data/ota/` unchanged. When a release contains `bin/otactl`
-  (from Phase 2.1 of `OTAUpdatePlan.md` on; no release contains it today), the
-  script installs it by rename (`install -m 755` to `bin/otactl.tmp`, then
-  `mv` over `bin/otactl`), so an `otactl` that runs during the deploy keeps its
-  file.
+  update store `data/ota/` unchanged. The workflow also cross-compiles
+  `bin/otactl` (a local change on `react`, not pushed; no deploy has shipped
+  `bin/otactl` yet). The script installs it by rename (`install -m 755` to
+  `bin/otactl.tmp`, then `mv` over `bin/otactl`), so an `otactl` that runs
+  during the deploy keeps its file.
 
 The deploy job only runs when the repo variable **`DEPLOY_ENABLED` is `true`**.
+
+`.github/workflows/mobile-checks.yml` (a local commit on `react`, not pushed;
+it has never run on GitHub) runs on every push and pull request to `main` or
+`react`: the two OTA guard tests (`TestServerBinariesNeverImportSigning`:
+no binary deployed to the Pi imports the signing code or age;
+`TestNoPrivateKeysTracked`: no tracked file holds a PEM private key or ends
+in `.key`, `.p12`, `.pfx`, `.jks` or `.keystore`), then
+`cd shared && npm ci --ignore-scripts && npm run typecheck && npm test` and
+`cd mobile && npm ci --ignore-scripts && npx --no -- tsc --noEmit`. It uses
+no secrets and deploys nothing.
 
 ### One-time setup
 
@@ -317,17 +328,31 @@ Done (in local commits on `react`; NOT pushed, NOT deployed):
 - `cmd/admin` serves the census at `GET /api/ota/installs`.
 - `remote_deploy.sh` refuses a release that contains `data/` and installs
   `bin/otactl` by rename.
+- The tools are built (Phase 2 of the plan): `cmd/otactl` (runs on the Pi)
+  and `cmd/otapublish` (runs on your Mac), described under **The tools**
+  below. Their tests run every command against a temporary directory that
+  stands in for the Pi; no tool has run against the real Pi.
+- `deploy.yml` cross-compiles `bin/otactl`; `mobile-checks.yml` exists
+  (see **Continuous deployment**). Neither workflow has run with these
+  changes.
 
 NOT done:
-- `bin/otactl` (runs on the Pi) and `cmd/otapublish` (runs on your Mac) are
-  not built yet (Phase 2 of the plan). **Every `otactl` and `otapublish`
-  command in this section fails until then.**
-- The keys do not exist yet (Phase 3).
-- No app build contains expo-updates yet. Phones get OTA updates only from
-  build 2 on (Phases 4–6).
-- Production runs none of this code, and `data/ota/` does not exist on the
-  Pi. Until `bin/otactl init` creates it, the manifest endpoint answers `204`
-  (no update) to every request and `/app` says that no build is published.
+- The keys do not exist yet (Phase 3). **Every `otapublish` command that
+  needs a key fails until then:** `keys issue-leaf`, `keys show`, `ota`
+  without `--dry-run`, `republish`, `resign-active` and `native`.
+- No app build contains expo-updates yet (Phase 4). Until then
+  `otapublish ota` stops at step 7 of its pipeline (the runtimes:
+  `expo-updates` is not installed), and `otapublish native` cannot build a
+  release (the release commit, `mobile/certs/ota-root-2026.pem`,
+  `mobile/release/android-signer.sha256` and
+  `mobile/plugins/withReleaseSigning.js` do not exist yet). Phones get OTA
+  updates only from build 2 on (Phases 4–6).
+- Production runs none of this code. `bin/otactl` is not on the Pi and
+  `data/ota/` does not exist there: **every `bin/otactl` command in this
+  section fails on the Pi until release day (Phase 6)** deploys it and
+  `bin/otactl init` creates the store. Until then the manifest endpoint
+  answers `204` (no update) to every request and `/app` says that no build
+  is published.
 
 ### What the server serves
 
@@ -360,7 +385,8 @@ embedded update id belongs to a registered native build updates that
 install's row in `data/ota/census.db` (at most 5,000 rows; the maintenance
 sweep deletes rows unseen for 90 days). Every field is an unauthenticated
 claim of the phone. Read it at `https://admin.alexanderjia.com/api/ota/installs`
-(admin login; JSON), or with `bin/otactl census` over SSH (Phase 2).
+(admin login; JSON), or with `bin/otactl census` over SSH (once release day
+has put `bin/otactl` on the Pi).
 Deleting an account deletes the rows whose `am_uid` is that account.
 `backups/` does not hold the census; phones refill it at their next check.
 
@@ -368,14 +394,23 @@ Deleting an account deletes the rows whose `am_uid` is that account.
 `<server|admin|meet> built from commit <sha>` when it starts. With the
 systemd default (output to the journal):
 `sudo journalctl -u alexmessage | grep 'built from commit' | tail -n 1`.
-`bin/otactl version` will print it too (Phase 2).
+`bin/otactl version` prints the commit of `bin/server`, `bin/admin`,
+`bin/meet` and itself (it reads `vcs.revision`: `-trimpath` leaves
+`-ldflags` out of the build info).
 
 ### Storage: `data/ota/`
 
-`/home/alexander/alexmessage/data/ota/` on the Pi. `OTA_DIR` overrides it;
-give `alexmessage` and `alexmessage-admin` the same value. `bin/otactl init`
-creates it (Phase 2); after that only `otactl` writes into it. Server deploys
-and server rollbacks never touch it.
+`/home/alexander/alexmessage/data/ota/` on the Pi. `bin/otactl init`
+creates it; after that only `otactl` writes into it. Server deploys and
+server rollbacks never touch it.
+
+**Leave `OTA_DIR` unset on the Pi.** The server units read it from their
+environment file, but `bin/otactl` over SSH (and the emergency key's forced
+command) never sees that file: it finds the store as `../data/ota` next to
+its own executable (`~/alexmessage/bin/otactl` → `~/alexmessage/data/ota`).
+`--ota <dir>` or `OTA_DIR` in the same shell overrides that, for local
+testing. With `OTA_DIR` set in the environment file, the server would read
+one store and `otactl` would write another.
 
 ```
 data/ota/
@@ -390,10 +425,15 @@ data/ota/
                                               "commit_time","commit","registered_at"}]}
   channels/<production|beta>/<platform>/<runtime>.json
                                             {"state":"update"|"rollback"|"halted","update":"<id>","since":"<RFC 3339>"}
+                                            a beta pointer in state "test_unsigned" also has "until" and "previous"
+  test/<id>/manifest.json, info.json        the unsigned manifest of otactl test-unsigned (plan step 6.4)
   revoked.txt                               one update id per line; "#" starts a comment
   native/policy.json                        the minimum-client gate (below)
   native/android/*.apk, native/ios/*.ipa
   census.db                                 the install census
+  incoming/<publishId>/                     uploads that otactl ingest has not moved in yet
+  log/actions.log                           one JSON line per otactl command that changed the store
+  .lock                                     held by every otactl command that changes the store
 ```
 
 An id in `revoked.txt` is never served as an update. A pointer in state
@@ -402,8 +442,9 @@ directive is how phones leave it.
 
 ### Emergency: stop or roll back a bad update
 
-From `OTAUpdatePlan.md`, D9. **These commands fail today: `bin/otactl` does
-not exist yet (Phase 2), and production has no OTA pointers.**
+From `OTAUpdatePlan.md`, D9. **These commands fail today:** `bin/otactl`
+is built, but no deploy has put it on the Pi, and production has no OTA
+pointers. They work from release day (Phase 6) on.
 
 No key is needed. Use your normal SSH key from the Mac, or the emergency key
 (`~/.ssh/am-emergency`, plan step 3.4) that the Pi restricts to
@@ -423,7 +464,8 @@ root-equivalent key. Each command prints every pointer it changed.
    applies to that update and to anything older). The bad ids go into
    `revoked.txt`, and the endpoint never serves them again. With the
    emergency key: `… rollback-embedded` (acts on every pointer that is in
-   state `update` or `halted`).
+   state `update` or `halted`). Both forms print the native builds in the
+   census and wait until you type `yes` and press Enter.
 3. Phones apply the rollback after they have downloaded it: at the next
    resume after 15 minutes, at Restart to Update, or at the second cold start
    after the directive is live. `bin/otactl status` counts the installs still
@@ -460,7 +502,91 @@ add `OTA_DISABLED=1` to `/etc/alexmessage/alexmessage.env` and run
 restart ends every live call** (calls are held in memory). To undo it, delete
 the line and restart again.
 
-### Publish (works only after Phases 2–6)
+### The tools: `bin/otactl` (Pi) and `cmd/otapublish` (Mac)
+
+**`bin/otactl`** runs on the Pi. It holds no key and signs nothing: it
+verifies what `otapublish` signed on the Mac, moves uploads into the store
+and switches the pointers. It is the only program that writes into
+`data/ota/`. Every command that changes the store holds `data/ota/.lock` and
+appends one line to `data/ota/log/actions.log`. Run it over SSH:
+`ssh -p 2222 alexander@35.226.215.209 'cd ~/alexmessage && bin/otactl <command>'`.
+
+| Command | What it does |
+|---------|--------------|
+| `init` | creates `data/ota/` (writes `FORMAT` last); safe to run again |
+| `version [--json]` | the commit of `otactl`, `bin/server`, `bin/admin` and `bin/meet` |
+| `status [--json]` | pointers, revoked ids and a census summary |
+| `census [--json]` | every install in the census, and every approved user's app sessions |
+| `runtimes [--json]` | the registered native builds per runtime |
+| `doctor [--json]` | checks the store and exits 1 on any error: a certificate that does not chain to the root; a pointer whose update is missing, damaged, for another platform or runtime, or signed by a leaf that expires within 30 days; an invalid `policy.json`; an APK or IPA named in the policy whose SHA-256 or size differs from the policy; an unreadable census. It warns about a missing root certificate, unregistered runtimes, pointers at revoked updates, `test_unsigned` pointers, leftover uploads in `incoming/` and less than 1 GB free |
+| `inventory [--json]` | every stored file with its SHA-256, for `otapublish audit` |
+| `halt (--all \| --label <label>)` | stop serving (see **Emergency**) |
+| `rollback-embedded (--label <label> \| --all-active) [--yes]` | send phones back to their built-in JS and revoke the updates (see **Emergency**) |
+| `revoke <id>… [--note <text>]` | never activate or serve these updates again |
+| `policy [--platform <p> [--min-build <n>] [--hard-gate=<bool>] [--latest-build <n>] [--notes <text>]] [--yes]` | show or change `native/policy.json` (below) |
+| `test-unsigned --channel beta [--minutes 10] [--platform <p>]`, `test-unsigned --clear` | plan step 6.4: beta phones get an unsigned copy of their built-in update, which they must refuse |
+| `repair-asset --asset <name> < file` | replaces `assets/<name>` only with bytes that hash to `<name>` |
+| `emergency` | the emergency key's forced command: one word, `halt`, `rollback-embedded` or `status` |
+| `ingest`, `activate`, `promote`, `restore-pointer`, `register-runtime` | `otapublish` runs these over SSH; you never need to |
+
+**`cmd/otapublish`** runs only on your Mac, from the repo root, as
+`go run ./cmd/otapublish <command>`. It is never deployed, and it is the only
+program that ever holds a signing key. Every command that touches a key, and
+every publish, checks the commit out into a clean git worktree, builds
+`otapublish` there and runs that build, so an edited checkout never touches a
+key.
+
+**Who runs what:** Claude never runs these commands through its own
+command tool: every `keys` command, `ota` without `--dry-run`, `republish`,
+`resign-active` and `native`. Claude starts them in your Terminal panel, and
+you type the passphrase or password there when one is asked. Claude runs
+`ota --dry-run`, `status` and `audit` itself. `audit --record` and
+`restore-pi` wait for you to type `yes`.
+
+| Command | What it does |
+|---------|--------------|
+| `keys init-root --id root-2026 --out /Volumes/<stick> --cert-out mobile/certs/ota-root-2026.pem` | the root key (plan step 3.1); `--out` must be a folder under `/Volumes/` on another disk than your home folder (the USB stick) |
+| `keys issue-leaf --root /Volumes/<stick>/ota-root-2026.key.age --out ~/.alexmessages/keys/ [--no-upload]` | a new signing leaf, certified by the root; copies the certificates to the Pi when `bin/otactl` is there, unless `--no-upload` |
+| `keys upload-certs` | copies the root and every unexpired leaf certificate to the Pi's `data/ota/certs/` |
+| `keys show (--root <key file> \| --leaf <key file>)` | decrypts a key file and prints its fingerprint and certificate |
+| `ota --notes <text> [--channel beta\|production] [--critical] [--from <ref>] [--platform <p>]` | publishes the JS of the pushed commit as a signed update; the channel defaults to `beta` |
+| `ota --dry-run --notes <text> [--allow-local] [--fixture <file>]` | steps 1–12 of the pipeline: no key, nothing uploaded; `--allow-local` accepts a commit that is not on origin; `--fixture` replaces steps with prepared data (`cmd/otapublish/testdata/dry-run.json`, for tests and for checking the tool before Phase 4) |
+| `promote <label> [--force]` | points production at the beta updates of a label |
+| `republish <label> [--channel production\|beta] [--notes <text>]` | re-signs archived content as a new update; the channel defaults to `production` |
+| `resign-active` | re-signs with the newest leaf (see **Renew the leaf certificate**) |
+| `status` | the Pi's pointers, revoked ids and census summary |
+| `native --notes <text> [--no-upload [--allow-local]]`, `native --upload-only <artifact dir>` | builds, signs, checks and publishes a native build (see **Publish**) |
+| `audit [--record]` | compares the Pi with the Mac archive (see **Audit**) |
+| `restore-pi` | rebuilds the Pi's store from the Mac archive (see **Restore after a lost SD card**) |
+
+Flags every command takes: `--archive <dir>` (default `$AM_RELEASES_DIR`,
+else `~/AlexMessagesReleases`), `--keys-dir <dir>` (default
+`~/.alexmessages/keys`), `--pi <user@host>` and `--pi-port <n>` (default
+`alexander@35.226.215.209` and `2222`), `--pi-dir <dir>` (a local update
+store instead of the Pi, for dry runs and the drill; with `--pi-data` and
+`--otactl`), `--public-url <url>` (with `--pi-dir` only: the server that
+phones talk to) and `--profile drill` (Phase 5: throwaway keys in
+`~/.alexmessages/drill-keys`, the archive `<archive>/drill`, a local store
+through `--pi-dir`, no git tags).
+
+**The Mac archive** is authoritative for the files that never change once
+written (certificates, assets, updates, runtimes, native builds). The Pi is
+authoritative for the pointers, `revoked.txt` and `policy.json`.
+
+```
+~/AlexMessagesReleases/
+  ota/                                   the Mac's copy of data/ota
+    certs/, assets/, updates/<id>/       every certificate, asset and signed update otapublish made
+    runtimes/<platform>/<runtime>.json   the registered builds
+    native/<platform>/<file>             every APK and IPA that otapublish native uploaded
+    native/policy.json                   the policy after the last native upload or audit --record
+    pointers.log                         one JSON line per pointer change otapublish made or audit --record recorded
+    revoked.txt                          the revoked ids that audit --record recorded
+  builds/native-<N>-<UTC time>/          otapublish native's artifact directory: build.json, the APK and the IPA
+  drill/                                 the drill's archive (the same layout)
+```
+
+### Publish (works only after Phases 3–6)
 
 From section 6 of `OTAUpdatePlan.md`. Claude starts every command that needs
 a key in your Terminal panel, and you type the passphrase there.
@@ -486,11 +612,24 @@ a key in your Terminal panel, and you type the passphrase there.
 1. Claude makes the release commit `release: native N` (`app.json`: version
    `1.N.0`, `ios.buildNumber` `"N"`, `android.versionCode` N) and pushes
    after your go-ahead.
-2. `go run ./cmd/otapublish native --notes "…"` (you type the keystore
-   password). It refuses unless N = last registered build + 1, builds from a
-   clean worktree of the pushed commit, runs every artifact check, uploads,
-   registers the runtimes, updates `policy.json`, and tags `native-N` only
-   after the upload succeeded.
+2. `go run ./cmd/otapublish native --notes "…"`. It refuses unless N is
+   the next build number (the highest build registered on the Pi + 1; 2
+   when none is registered). It builds both platforms from a clean worktree
+   of the pushed commit (`expo prebuild`, the unsigned Gradle release build,
+   `pod install` and an unsigned `xcodebuild archive` packed into an IPA),
+   then `apksigner` asks for the keystore password (you type it). It runs
+   every artifact check, saves the artifact directory
+   `~/AlexMessagesReleases/builds/native-N-<UTC time>/` (`build.json`, the
+   APK and the IPA), uploads both files, registers the runtimes, updates
+   `policy.json`, checks both downloads through `/api/app/latest`, and tags
+   `native-N` only after the upload succeeded.
+3. To build without uploading (plan step 5.3):
+   `go run ./cmd/otapublish native --notes "…" --no-upload` (add
+   `--allow-local` for a commit that is not pushed). It prints the artifact
+   directory. Once the commit is on origin,
+   `go run ./cmd/otapublish native --upload-only <artifact directory>`
+   checks the files again and uploads them (no password: they are already
+   signed).
 
 **Backport a JS fix to phones on an older runtime:**
 `git switch -c release/native-N native-N`, cherry-pick the fix, push
@@ -506,6 +645,45 @@ check that `fingerprint.config.js` still parses
 **Numbering:** native build N, one counter for both platforms; version
 `1.N.0`; OTA label `YYYYMMDD.k`; git tags `native-N` and `ota-<label>`.
 
+### Audit: compare the Pi with the Mac archive
+
+`go run ./cmd/otapublish audit` reads `bin/otactl inventory` from the Pi and
+compares it with the archive. It prints every difference as
+`DIFFERENCE: …`, history (an expired leaf, an update whose signature no
+longer verifies) as `note: …`, and exits 1 when anything differs. It changes
+nothing.
+
+- **Before you install an APK or IPA from `/app`, run `audit`.** The
+  download is not authenticated (plan D10); a file on the Pi whose SHA-256
+  differs from the archive is reported with "do NOT install this file from
+  /app".
+- After a command run on the Pi itself (`halt`, `rollback-embedded`,
+  `revoke`, `policy`, `test-unsigned`), `audit` reports the pointers,
+  revoked ids or policy it changed. If you made those changes,
+  `go run ./cmd/otapublish audit --record` (type `yes`) stores them as the
+  Mac's record (`pointers.log`, `ota/revoked.txt`, `ota/native/policy.json`
+  in the archive), so a restore rebuilds them. It never records a loss and
+  never changes the write-once files.
+
+### Restore after a lost SD card
+
+1. You: reinstall the Pi and deploy the server (the deploy puts
+   `bin/otactl` there).
+2. You or Claude: `ssh -p 2222 alexander@35.226.215.209 'cd ~/alexmessage && bin/otactl init'`.
+3. `go run ./cmd/otapublish restore-pi` (type `yes` after it prints its
+   plan). It uploads every write-once file the Pi lacks, registers the
+   archived native builds, revokes the recorded ids, writes the policy if
+   the Pi has none, writes every recorded pointer the Pi lacks, and runs
+   `otactl doctor`. It changes nothing the Pi already has, and it refuses
+   when the Pi holds a write-once file with other bytes than the archive.
+   An update signed by an expired leaf cannot be restored (its signatures
+   no longer verify): restore-pi skips it and the pointers that need it,
+   and says so; publish or republish instead.
+4. `go run ./cmd/otapublish audit` must print "No differences".
+
+restore-pi restores what the Mac recorded: a halt, rollback or revoke made
+on the Pi after the last `audit --record` is not restored.
+
 ### Keys: where they live
 
 None of these exists yet (Phase 3 creates them). The Pi, the GCP relay,
@@ -513,23 +691,24 @@ Cloudflare and GitHub never hold a private key.
 
 | Key or file | Where |
 |-------------|-------|
-| OTA root private key (RSA-4096) | encrypted with a passphrase (age) on one USB stick, plus one copy in your password manager; never on the Mac's disk |
+| OTA root private key (RSA-4096) | `ota-root-2026.key.age`, encrypted with a passphrase (age), on one USB stick, plus one copy in your password manager; never on the Mac's disk |
 | Root passphrase | in your head, and on paper stored with the USB stick (not in the password manager that holds the encrypted key) |
 | OTA root certificate (public) | `mobile/certs/ota-root-2026.pem` (committed; embedded in every app build from build 2 on), and a copy at `data/ota/certs/ota-root-2026.pem` |
-| OTA leaf private key (RSA-3072) | `~/.alexmessages/keys/ota-leaf-<yyyymm>.key.age` on the Mac, encrypted (age) with a different passphrase |
+| OTA leaf private key (RSA-3072) | `~/.alexmessages/keys/ota-leaf-<yyyymm>.key.age` on the Mac (a second leaf in the same month: `ota-leaf-<yyyymm>-2.key.age`), encrypted (age) with a different passphrase |
 | Leaf passphrase | in your head, and on paper stored with the USB stick |
-| OTA leaf certificate (public) | `data/ota/certs/leaf-<yyyymm>.pem` on the Pi; sent with every manifest |
+| OTA leaf certificate (public) | `data/ota/certs/leaf-<yyyymm>.pem` on the Pi (sent with every manifest), `~/.alexmessages/keys/ota-leaf-<yyyymm>.pem` and `~/AlexMessagesReleases/ota/certs/leaf-<yyyymm>.pem` on the Mac |
 | Android release keystore (PKCS12, RSA-4096) | `~/.alexmessages/keys/android-release.p12` on the Mac, a copy on the USB stick, and one in your password manager |
 | Keystore password | on paper with the USB stick, and in your password manager; never in a file on the Mac |
 | Android signer SHA-256 (public) | `mobile/release/android-signer.sha256` (committed) |
 | Emergency SSH key (optional) | `~/.ssh/am-emergency` on the device you would use in an emergency; restricted on the Pi to `bin/otactl emergency` |
 | Drill keys (throwaway) | `~/.alexmessages/drill-keys/` |
-| Archive of everything published | `~/AlexMessagesReleases/ota/` on the Mac, with `pointers.log` |
+| Archive of everything published | `~/AlexMessagesReleases/` on the Mac (layout under **The tools**) |
 
 ### Renew the leaf certificate (every 12 months)
 
 A leaf certificate is valid for 400 days. Renewing it needs no new app build.
-These steps work only after Phases 2 and 3.
+These steps work only after Phase 3 (the keys) and release day (Phase 6:
+`bin/otactl` and `data/ota` on the Pi).
 
 1. Plug in the USB stick.
 2. `go run ./cmd/otapublish keys issue-leaf --root /Volumes/<stick>/ota-root-2026.key.age --out ~/.alexmessages/keys/`
@@ -554,7 +733,8 @@ installed through the app's updater.
 
 ### The minimum-client gate (`data/ota/native/policy.json`)
 
-`bin/otactl policy` will write it (Phase 2). Without the file nothing is
+`bin/otactl policy` writes it, and `otapublish native` sets `latest` after
+it uploads a build. Without the file nothing is
 gated and `/api/app/latest` lists no build. Format:
 
 ```json
