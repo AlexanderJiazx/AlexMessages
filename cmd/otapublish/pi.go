@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -174,8 +175,13 @@ func (p *sshPi) upload(dir, publishID string) error {
 	}
 	// The tar fallback (D6 step 14): incoming/<publishId> is always a new
 	// directory. COPYFILE_DISABLE and --no-mac-metadata keep macOS from
-	// adding ._ files, which otactl ingest refuses.
-	tar := exec.Command("tar", "--no-mac-metadata", "-C", dir, "-cf", "-", ".")
+	// adding ._ files, which otactl ingest refuses. GNU tar (the tests on
+	// Linux) has no --no-mac-metadata and adds no such files.
+	args := []string{"-C", dir, "-cf", "-", "."}
+	if goruntime.GOOS == "darwin" {
+		args = append([]string{"--no-mac-metadata"}, args...)
+	}
+	tar := exec.Command("tar", args...)
 	tar.Env = append(p.a.environ(), "COPYFILE_DISABLE=1")
 	tar.Stderr = p.a.stderr
 	pipe, err := tar.StdoutPipe()
