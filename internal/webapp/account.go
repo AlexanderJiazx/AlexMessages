@@ -10,7 +10,9 @@ import (
 
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
+	"alexmessage/internal/debuglog"
 	"alexmessage/internal/httpx"
+	"alexmessage/internal/ota/census"
 	"alexmessage/internal/runtime"
 )
 
@@ -91,8 +93,36 @@ func handleDeleteAccount(c *gin.Context) {
 	}
 	db.DeleteUserUploads(user.ID)     // remove storage directory on disk
 	db.DeleteUserAvatarFiles(user.ID) // remove profile photo files on disk
+	deleteCensusRows(user.ID)         // OTA install census rows that claim this user
 	httpx.ClearSessionCookie(c, auth.UserCookie)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// deleteCensusRows removes the OTA census rows whose am_uid is the user
+// (OTAUpdatePlan.md, D8 item 5). The account is already gone, so a failure
+// is reported to the debug console instead of failing the request.
+func deleteCensusRows(userID int) {
+	cdb, err := census.Shared(otaCensusPath(), false)
+	if err == nil && cdb != nil {
+		err = cdb.DeleteUser(userID)
+	}
+	if err != nil {
+		debuglog.Emit("messages", "error", "ota.census_delete_failed", "Census rows of a deleted account could not be removed", map[string]any{"user_id": userID, "err": err.Error()})
+	}
+}
+
+// censusRowsOf returns the OTA census rows whose am_uid is the user, for the
+// data export; an empty list when there is no census.
+func censusRowsOf(userID int) []census.Install {
+	cdb, err := census.Shared(otaCensusPath(), false)
+	if err != nil || cdb == nil {
+		return []census.Install{}
+	}
+	rows, err := cdb.ForUser(userID)
+	if err != nil {
+		return []census.Install{}
+	}
+	return rows
 }
 
 // exportConversation is one DM thread in the data export.
@@ -172,6 +202,8 @@ func handleExportData(c *gin.Context) {
 		},
 		"contacts":      contacts,
 		"conversations": conversations,
+		// The OTA update census rows whose claimed user is this account.
+		"ota_installs": censusRowsOf(user.ID),
 	}
 
 	filename := fmt.Sprintf("alex-messages-export-%s.json", user.Username)

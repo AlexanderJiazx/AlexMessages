@@ -14,6 +14,7 @@ import (
 	"alexmessage/internal/db"
 	"alexmessage/internal/debuglog"
 	"alexmessage/internal/httpx"
+	"alexmessage/internal/ota"
 	"alexmessage/internal/push"
 	"alexmessage/internal/runtime"
 )
@@ -82,6 +83,9 @@ type initPayload struct {
 	HistoryHasMore map[string]bool                `json:"history_has_more"`
 	PageSize       int                            `json:"page_size"`
 	MaxUpload      int                            `json:"max_upload"`
+	// ClientPolicy is the native-build policy for a client that sent
+	// X-AM-Client (OTAUpdatePlan.md, D10); omitted for every other client.
+	ClientPolicy *ota.ClientPolicy `json:"client_policy,omitempty"`
 }
 
 // broadcastMessage is the live "message" shape — note it carries author, which
@@ -113,9 +117,22 @@ func handleWS(c *gin.Context) {
 	// handshake so the client receives close(4401) and redirects to /login.
 	token := requestSessionToken(c)
 	user := auth.ResolveSession(token, "user")
+	clientInfo, hasClient := wsClientInfo(c)
+	var policy *ota.Policy
+	if hasClient {
+		policy = currentPolicy()
+	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
+		return
+	}
+	// The hard gate (off unless policy.json sets hard_gate): close 4426 stops
+	// the app's reconnect loop until it returns to the foreground.
+	if policy != nil && policy.HardGated(clientInfo) {
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4426, "update required"), time.Now().Add(time.Second))
+		_ = conn.Close()
 		return
 	}
 	if user == nil {
@@ -185,6 +202,12 @@ func handleWS(c *gin.Context) {
 		debuglog.Emit("messages", "error", "ws_init_failed", "Init payload could not be loaded", map[string]any{"user": user.Username, "err": err.Error()})
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "init failed"), time.Now().Add(time.Second))
 		return
+	}
+	if hasClient {
+		recordSessionClient(token, clientInfo)
+		if policy != nil {
+			payload.ClientPolicy = policy.ClientPolicy(clientInfo)
+		}
 	}
 	runtime.SendJSON(client, payload)
 	runtime.BroadcastPresence()

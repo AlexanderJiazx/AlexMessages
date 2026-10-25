@@ -10,6 +10,7 @@ import (
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
 	"alexmessage/internal/debuglog"
+	"alexmessage/internal/ota"
 	"alexmessage/internal/runtime"
 )
 
@@ -46,9 +47,22 @@ var callListeners = runtime.NewPresence()
 func handleCallListener(c *gin.Context) {
 	token := requestSessionToken(c)
 	user := auth.ResolveSession(token, "user")
+	clientInfo, hasClient := wsClientInfo(c)
+	var policy *ota.Policy
+	if hasClient {
+		policy = currentPolicy()
+	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
+		return
+	}
+	// The hard gate (OTAUpdatePlan.md, D10): the ring service keeps running
+	// and retries every 30 minutes, so a corrected policy heals it.
+	if policy != nil && policy.HardGated(clientInfo) {
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4426, "update required"), time.Now().Add(time.Second))
+		_ = conn.Close()
 		return
 	}
 	if user == nil {
