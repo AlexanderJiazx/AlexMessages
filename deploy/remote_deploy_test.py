@@ -2,26 +2,56 @@
 import io
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tarfile
 import tempfile
 import unittest
 
 
+# The host's data/: the database and the OTA update store. A deploy only
+# copies the database out of it (OTAUpdatePlan.md, D2).
+HOST_DATA = {
+    "data/alexmessage.db": b"SQLite format 3\x00 old database",
+    "data/ota/FORMAT": b"1\n",
+    "data/ota/channels/production/android/a1b2c3.json": b'{"state":"update"}',
+    "data/ota/updates/0b6f0d4e-2c8f-4f7e-9d61-5d1c2b3a4f50/manifest.json": b'{"id":"0b6f0d4e"}',
+    "data/ota/census.db": b"SQLite format 3\x00 census",
+}
+
+
+def snapshot(root):
+    """Every path under data/ with its type, mode and bytes."""
+    found = {}
+    for path in sorted((root / "data").rglob("*")):
+        mode = path.lstat().st_mode
+        found[str(path.relative_to(root))] = (stat.S_IFMT(mode), stat.S_IMODE(mode), path.read_bytes() if path.is_file() else None)
+    return found
+
+
 class DeployTest(unittest.TestCase):
-    def run_release(self, *, failed_health=False, missing_web=False):
+    def run_release(self, *, failed_health=False, missing_web=False, extra=None):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
         (root / "bin").mkdir()
         (root / "bin/server").write_text("old binary")
+        (root / "bin/otactl").write_text("old otactl")
+        (root / "bin/otactl").chmod(0o755)
+        # Stands in for a running otactl: it keeps the old file's inode.
+        os.link(root / "bin/otactl", root / "running-otactl")
         (root / "web/dist/assets").mkdir(parents=True)
         (root / "web/dist/index.html").write_text("old html")
         (root / "web/dist/assets/stale.js").write_text("old asset")
+        for name, data in HOST_DATA.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes(data)
+        self.data_before = snapshot(root)
         with tarfile.open(root / "release.tgz", "w:gz") as archive:
-            files = {"bin/server": "new binary"}
+            files = {"bin/server": "new binary", "bin/otactl": "new otactl"}
             if not missing_web:
                 files.update({"web/dist/index.html": "new html", "web/dist/assets/new.js": "new asset"})
+            files.update(extra or {})
             for name, contents in files.items():
                 data = contents.encode()
                 info = tarfile.TarInfo(name)
@@ -41,12 +71,25 @@ class DeployTest(unittest.TestCase):
         result = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
         return root, result
 
+    def assert_data_unchanged(self, root):
+        self.assertEqual(snapshot(root), self.data_before)
+
     def test_success_replaces_react_assets(self):
         root, result = self.run_release()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((root / "web/dist/index.html").read_text(), "new html")
         self.assertFalse((root / "web/dist/assets/stale.js").exists())
         self.assertEqual((root / "bin/server").read_text(), "new binary")
+        self.assert_data_unchanged(root)
+
+    def test_otactl_is_installed_by_rename(self):
+        root, result = self.run_release()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((root / "bin/otactl").read_text(), "new otactl")
+        self.assertEqual(stat.S_IMODE((root / "bin/otactl").stat().st_mode), 0o755)
+        # Overwriting in place would have changed the running file too.
+        self.assertEqual((root / "running-otactl").read_text(), "old otactl")
+        self.assertFalse((root / "bin/otactl.tmp").exists())
 
     def test_health_failure_restores_react_and_binary(self):
         root, result = self.run_release(failed_health=True)
@@ -55,12 +98,22 @@ class DeployTest(unittest.TestCase):
         self.assertTrue((root / "web/dist/assets/stale.js").exists())
         self.assertFalse((root / "web/dist/assets/new.js").exists())
         self.assertEqual((root / "bin/server").read_text(), "old binary")
+        self.assertEqual((root / "bin/otactl").read_text(), "old otactl")
+        self.assert_data_unchanged(root)
 
     def test_missing_react_build_aborts_and_restores(self):
         root, result = self.run_release(missing_web=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((root / "web/dist/index.html").read_text(), "old html")
         self.assertEqual((root / "bin/server").read_text(), "old binary")
+
+    def test_release_with_data_is_refused(self):
+        root, result = self.run_release(extra={"data/ota/FORMAT": "2\n", "data/ota/revoked.txt": "x\n"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release contains data/", result.stderr)
+        self.assertEqual((root / "bin/server").read_text(), "old binary")
+        self.assertEqual((root / "web/dist/index.html").read_text(), "old html")
+        self.assert_data_unchanged(root)
 
 
 if __name__ == "__main__":
