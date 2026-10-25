@@ -508,7 +508,10 @@ the line and restart again.
 verifies what `otapublish` signed on the Mac, moves uploads into the store
 and switches the pointers. It is the only program that writes into
 `data/ota/`. Every command that changes the store holds `data/ota/.lock` and
-appends one line to `data/ota/log/actions.log`. Run it over SSH:
+appends one line to `data/ota/log/actions.log`. Every command except `init`
+and `version` exits with status 3 while the store has no `FORMAT` file (before
+`bin/otactl init`); `otapublish` reads only that status as "no update store
+yet", and any other failure as an error. Run it over SSH:
 `ssh -p 2222 alexander@35.226.215.209 'cd ~/alexmessage && bin/otactl <command>'`.
 
 | Command | What it does |
@@ -546,7 +549,7 @@ you type the passphrase or password there when one is asked. Claude runs
 | Command | What it does |
 |---------|--------------|
 | `keys init-root --id root-2026 --out /Volumes/<stick> --cert-out mobile/certs/ota-root-2026.pem` | the root key (plan step 3.1); `--out` must be a folder under `/Volumes/` on another disk than your home folder (the USB stick) |
-| `keys issue-leaf --root /Volumes/<stick>/ota-root-2026.key.age --out ~/.alexmessages/keys/ [--no-upload]` | a new signing leaf, certified by the root; copies the certificates to the Pi when `bin/otactl` is there, unless `--no-upload` |
+| `keys issue-leaf --root /Volumes/<stick>/ota-root-2026.key.age --out ~/.alexmessages/keys/ [--no-upload]` | a new signing leaf, certified by the root; then, unless `--no-upload`, asks the Pi over SSH whether it has an update store and copies the certificates there if it has one (before `bin/otactl init`, plan step 6.3, it prints "Not uploaded" and succeeds) |
 | `keys upload-certs` | copies the root and every unexpired leaf certificate to the Pi's `data/ota/certs/` |
 | `keys show (--root <key file> \| --leaf <key file>)` | decrypts a key file and prints its fingerprint and certificate |
 | `ota --notes <text> [--channel beta\|production] [--critical] [--from <ref>] [--platform <p>]` | publishes the JS of the pushed commit as a signed update; the channel defaults to `beta` |

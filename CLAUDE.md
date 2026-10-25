@@ -803,6 +803,9 @@ keys, leaf renewal) are in `DEPLOY.md` → **OTA updates of the mobile app**.
   `./data/ota`; so `OTA_DIR` must stay unset on the Pi (SSH sessions never
   read the units' environment file). Every changing command holds
   `data/ota/.lock` and appends a JSON line to `data/ota/log/actions.log`.
+  Every command except `init` and `version` exits with status 3 while the
+  store has no `FORMAT` file; `otapublish` reads only that status as "no
+  update store yet" (`otactlNoStore`), and any other failure as an error.
   `promote` reads `alexmessage.db` read-only (an admin's app session must
   report the update; no `ota.crash`/`ota.error` report may name it).
 - **`cmd/otapublish`** (runs on the publisher's Mac; never deployed; the only
