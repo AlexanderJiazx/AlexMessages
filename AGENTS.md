@@ -77,7 +77,9 @@ the app has **diverged** from the Python original:
   (Message · Voice call · Video call · add/remove contact).
 - **Voice dictation** — a ChatGPT-style dictation bar (cancel · live waveform +
   timer · stop → transcribe into the composer · send-audio voice message ·
-  send → transcribe-and-send). `POST /api/transcribe` accepts an audio clip and
+  send → transcribe-and-send) on the web; the mobile app instead morphs the
+  composer into an iOS 26 Messages-style recorder (see the mobile section).
+  `POST /api/transcribe` accepts an audio clip and
   proxies it to an OpenRouter chat-completion model that accepts
   `input_audio`; the OpenRouter key lives only on the server
   (`OPENROUTER_API_KEY`). wav/mp3 clips route to `mistralai/voxtral-small-24b-2507`;
@@ -101,6 +103,12 @@ the app has **diverged** from the Python original:
   while the app is closed, through a
   foreground service with its own socket (`/ws?mode=calls`). See **DM calls**
   below.
+- **OTA updates (deployed on 2026-10-28)** — release builds of the mobile
+  app, from build 2 (version 1.2.0) on, download new JavaScript from
+  `cmd/server` by themselves (expo-updates, unsigned), and
+  `mobile/scripts/publish-update.sh` publishes an update with one command.
+  `/app` is the install page with the APK and IPA downloads. A phone gets
+  updates only once build 2 is installed on it. See **OTA updates** below.
 - **Branding** — user-visible name is **"Alex Messages"**. The Go module
   remains `alexmessage`.
 
@@ -121,7 +129,10 @@ served through `httpx.NoListFS`, so a request for a directory returns 404
 instead of a file listing. Each `main` also calls
 `db.StartBackgroundMaintenance()`, a 10-minute sweep that deletes upload files
 older than 24 hours that no attachment references, prunes expired sessions,
-and caps the debug ring buffer.
+and caps the debug ring buffer. Each `main` logs
+`<server|admin|meet> built from commit <sha>` at start: `deploy.yml` sets
+`main.commit` with `-ldflags "-X main.commit=$GITHUB_SHA"`, and a build
+without the flag logs `unknown`.
 
 ## Repository layout
 
@@ -141,6 +152,7 @@ internal/
   webapp/    the user app: engine + one file per route module
   adminapp/  the admin panel + adminapp/debug.go (debug-console read API)
   meet/      Alex Meet (state.go, ws.go, routes.go, volctoken.go)
+deploy/      remote_deploy.sh (runs on the Pi for every deploy) + its Python test
 shared/      @alexmessages/shared — framework-agnostic TS core (see shared/README.md)
 web/         React web client (Vite + React 18 + TS)          (see web/README.md)
 mobile/      Expo React Native client (iOS + Android)         (see mobile/README.md)
@@ -155,7 +167,8 @@ The webapp route files: `pages.go`, `auth_routes.go`, `me.go`, `account.go`
 `transcribe.go` (voice dictation proxy), `calls.go` (DM calls: state machine +
 signaling), `call_listener.go` (the call listener socket that rings a closed
 Android app) and `ice.go` (STUN/TURN servers for calls), plus `avatar.go`
-(profile photos) and `linkpreview.go` (link previews).
+(profile photos), `linkpreview.go` (link previews) and `ota_routes.go`
+(OTA updates of the mobile app, and the `/app` install page).
 
 ## Clients
 
@@ -241,6 +254,10 @@ Android from one codebase, plus `expo start --web`.
   home tab; two-pane on wide screens), `conversation` (a single DM thread —
   pushed as a separate route on narrow screens, embedded as the right pane on
   wide ones), plus `settings`, `new-chat`, `profile` as **modals**.
+  `settings/` is its own nested native stack (`_layout` + `index`, `profile`,
+  `account`, `notifications`, `data`, `admin`), so sections push with the
+  platform transition and the native header owns back/Done; the grouped-list
+  primitives live in `src/components/SettingsList.tsx`.
 - `src/session.tsx` — the mobile twin of `web/src/client.ts`: one `ApiClient` +
   one `ChatStore` created once the server URL and bearer token are known.
   Auth token in `expo-secure-store` (AsyncStorage fallback on web); server URL
@@ -252,6 +269,11 @@ Android from one codebase, plus `expo start --web`.
   the process lives, `store.onNotify` posts a per-conversation notification,
   and taps route back to that conversation.
 - `src/audio.ts` — `useVoiceRecorder` (expo-audio) for dictation + voice notes.
+- `src/updates.ts` — over-the-air updates (expo-updates): applies a
+  downloaded update when the app returns after 15 minutes away; the Settings
+  footer's "built-in code" / "update of …" label. `scripts/publish-update.sh`
+  publishes an update, `scripts/publish-app.sh` a new app build (see **OTA
+  updates**).
 - `src/call/` — DM calls: `CallHost` (opens the `app/call.tsx` full-screen
   route, call sounds, the floating tile), `CallScreen`, `platform.native.ts`
   (react-native-webrtc behind the shared `CallPlatform`), `CallVideo`
@@ -260,22 +282,57 @@ Android from one codebase, plus `expo start --web`.
   `.ts` twins are the Expo-web stubs. `src/media.ts` stops and blocks in-app
   media during a call.
 - `src/theme.ts` — the shared "paper + sage" design tokens (background
-  `#F1EFE6`, paper `#FAF8F1`, sage `#4F7A5E`, deep sage `#355040`…), the `720`
-  wide-layout breakpoint, and `glassSupported` (iOS ≥ 26).
-- `src/components/` — `DMList`, `ConversationView`, `MessageList`, `Bubble`,
-  `Composer` (+ `DictationBar`), `Avatar`, `Icon`, `Sheet`, `ActionSheet`,
-  `attachments`, `ImageViewer`, `Toasts`.
+  `#F6F4EE`, paper `#FAF8F1`, sage `#4F7A5E`, deep sage `#355040`, incoming
+  bubble `#E9E8E0`…), the `type` scale, the `720` wide-layout breakpoint, and
+  `glassSupported` (iOS ≥ 26 with the Liquid Glass API present).
+- `src/components/` — `Glass` (glass primitives + `EdgeFade`), `NativeMenu`
+  (context / popover menus), `DMList` (rows wrapped in `SwipeRow`:
+  iMessage-style swipe right → Unread/Read + Pin, left → Delete, full swipe
+  fires the outermost action), `SwipeRow`,
+  `ConversationView`, `MessageList`, `Bubble`, `Composer` (+ `DictationBar`),
+  `Avatar`, `Icon`, `Sheet`, `ActionSheet`, `attachments`, `ImageViewer`,
+  `Toasts`. On iOS, images open in the native viewer from `modules/native-menu`
+  instead; `ImageViewer` is the Android/web fallback.
+- `modules/native-menu/` — local Expo module (Swift): the UIKit context-menu
+  view and glass menu button behind `NativeMenu` on iOS, and the UIKit image
+  viewer behind `previewImage`.
 - `modules/system-calls/` — local Expo module (Swift): CallKit, or
   LiveCommunicationKit in mainland China, behind `src/call/system.ios.ts`.
 - `modules/call-ringer/` — local Expo module (Kotlin): the Android ring
   service that rings calls while the app is closed, behind
   `src/call/system.android.ts`.
 
-Platform styling is deliberate: **liquid glass on iOS 26+**
-(`expo-glass-effect` `GlassView` where supported, graceful blur/tint fallback
-below) and **flat Material styling on Android** — same layout and the same
-sage palette, native-feeling surfaces on each. Wide layouts (iPad, tablets,
-desktop web) switch `chat` to a two-pane rail + conversation view.
+Platform styling is deliberate: **liquid glass on iOS 26+** and **flat
+Material styling on Android** — same layout and the same sage palette. All
+floating chrome goes through `src/components/Glass.tsx`: `GlassSurface` /
+`GlassIconButton` render `expo-glass-effect` `GlassView` on iOS 26+, a
+translucent paper chip on older iOS, and an elevated surface on Android.
+Glass stays light — matching the system (even Apple's Photos keeps light
+glass over a near-black photo); the material itself keeps content legible.
+The scroll-edge treatment is `EdgeBlur` (a `CABackdropLayer` + private
+`variableBlur` CAFilter — private API, see `mobile/AGENTS.md`) on iOS 26+ and
+`EdgeFade` (a gradient) elsewhere. The design is
+iOS-native: the DM list has glass account/compose buttons, a large title,
+search, and pinned threads as a large-avatar grid; the conversation runs edge
+to edge under a glass header capsule (avatar · name · presence) and a floating
+glass composer (round "+" beside the input pill). Voice messages morph the
+composer in place like Messages: tapping the waveform swells the pill over
+the "+" (both glass shapes share a `GlassContainer`, so they melt together)
+into a recorder (live waveform · timer · stop); stop peels an X back out and
+turns the pill into a review player (play · waveform · duration · transcribe
+→ composer · send). Geometry is Reanimated in `Composer`; contents and the
+recorder live in `DictationBar` (`VoicePanel`). Bubbles are iMessage-style
+runs (own = sage, right; peer = warm grey, left; no avatars in a DM) with
+centered timestamps at hour-long pauses; Settings is an inset-grouped list
+whose Profile/Account/Notifications/Data/Admin pages are native stack pushes
+inside the sheet. Voice messages (`voice-message.<ext>`, see
+`isVoiceMessage` in `shared/src/format.ts`) render as a play · waveform ·
+time bubble on every client; other audio uploads stay a named audio card.
+Playback must go through `enablePlayback()` (`src/audio.ts`) — expo-audio's
+partial `setAudioModeAsync` resets `playsInSilentMode`, and the iOS silent
+switch then mutes everything.
+Type sizes come from `theme.type` (iOS Dynamic Type defaults). Wide layouts
+(iPad, tablets, desktop web) switch `chat` to a two-pane rail + conversation.
 
 - `e2e/` — Maestro YAML flows: `chat`, `dictation`, `attach`, `new-chat`,
   `settings`, `dm-actions`, `reply-edit`, `tour` (8 flows; `subflows/login.yaml`
@@ -645,6 +702,106 @@ cards in the thread with a
    progress.
 7. Group calls are Alex Meet's job (below), not DM calls'.
 
+## OTA updates (expo-updates, unsigned)
+
+**Status (2026-10-28): the server side is deployed, and build 2 is on
+`/app`.** The Pi runs `cmd/server` from commit `3fa5bc3`, which answers
+`/api/ota/manifest` and serves https://messages.alexanderjia.com/app with
+the APK and the IPA of build 2 (version 1.2.0). No update is published yet,
+and a phone gets updates only once build 2 is installed on it.
+Release builds of the app download new JavaScript from `cmd/server` by
+themselves. The operations (publishing an update, publishing a new app
+build, rolling back) are in `DEPLOY.md` → **Mobile app updates**.
+Tested on 2026-10-27 against a local `cmd/server`, in the iOS Simulator and
+in the Android emulator: a release build ran its built-in code, downloaded
+a published update at one start and ran it from the next start, and, back
+from the background, downloaded a newer update and applied it at the next
+return without a restart (for that test, the running update waited 10 s
+instead of 15 minutes). An update published before the app was built is
+never taken: expo-updates only takes code newer than the code it runs.
+`publish-app.sh android` and `publish-app.sh ios` built the APK and the IPA
+(version 1.2.0, build 2, the production update URL), and both scripts'
+uploads worked against a stand-in for `ssh` that ran the remote command on
+the Mac. Tested on 2026-10-28 on the Pi, through Cloudflare and nginx: the
+manifest of a test update (runtime version 0.0.0, deleted afterwards) had
+https URLs, and its file downloaded with the phones' own `User-Agent`
+values (`okhttp/4.12.0` on Android, `AlexMessages/2 CFNetwork/… Darwin/…`
+on iOS) and matched the manifest's hash; the APK and the IPA downloaded
+from `/app` byte for byte as uploaded. Cloudflare answers 403 (error 1010)
+to some client `User-Agent` values, for example Python's `Python-urllib`,
+so test these routes with curl. NOT tested: real phones, including an IPA
+signed by 万能签.
+
+- **The app** (`mobile/`) contains `expo-updates` with Expo's defaults: every
+  start of a release build asks `GET /api/ota/manifest` for the newest update
+  of its platform and runtime version, downloads it in the background
+  (`checkAutomatically: ON_LOAD`, `fallbackToCacheTimeout: 0`), and runs it
+  from the next start. `mobile/app.json`: `version` 1.2.0, `runtimeVersion`
+  policy `appVersion` (the runtime version is `expo.version`), `updates.url`
+  `https://messages.alexanderjia.com/api/ota/manifest`. Updates are not
+  signed: the app trusts the server it reaches over HTTPS, as most Expo apps
+  do. `mobile/app.config.js` replaces `updates.url` with `AM_UPDATES_URL`
+  when that is set, for test builds against a local server.
+  `src/updates.ts`: `useUpdatesOnReturn` (called in `session.tsx`) also
+  applies a downloaded update when the app comes back after at least 15
+  minutes in the background (never during a call), and otherwise asks the
+  server again at that moment; `runningCodeLabel` is the Settings footer's
+  "Alex Messages 1.2.0 · built-in code" or "· update of Oct 27 at 8:32 PM"
+  (the update's publish time, in the phone's locale).
+  Debug builds (`npm run ios`, `npm run android`) load their JavaScript
+  from Metro and never use updates ("development build").
+- **Versions**: native build N is version `1.N.0` with `android.versionCode`
+  N and `ios.buildNumber` "N" (build 1 was 1.0.0, without expo-updates;
+  build 2 is 1.2.0, the first with it). An update reaches only the apps
+  whose version equals the version it was published under, so an update
+  never runs on native code it was not built for. A change to native code
+  (a new native module or config plugin, a native setting in `app.json`, a
+  change under `mobile/modules/`) needs the next version and a new build.
+- **Server** (`internal/webapp/ota_routes.go`, no login; expo-updates sends
+  no session): `GET /api/ota/manifest` reads `expo-platform` (`ios` or
+  `android`) and `expo-runtime-version`; 400 for a bad value, 204 when there
+  is no update, else 200 `multipart/mixed` with one `manifest` part (Expo
+  Updates protocol v1, part headers in lowercase). Every answer carries
+  `expo-protocol-version: 1`, `expo-sfv-version: 0` and
+  `Cache-Control: private, max-age=0, no-store`. The update served is the
+  newest directory `data/updates/<runtime version>/<unix seconds>/` (an
+  all-digit name; a dot-prefixed name is an upload in progress and is
+  skipped) that has a bundle for the platform. It holds the output of
+  `npx expo export` (`metadata.json`, `_expo/static/js/<platform>/…`,
+  `assets/`) plus `expoConfig.json` (`npx expo config --type public`),
+  which the manifest carries as `extra.expoClient` (expo-constants reads
+  `Constants.expoConfig` from it while an update runs). The manifest `id`
+  is a UUID-shaped SHA-256 of those two files and `createdAt` is the
+  directory name. Asset URLs are absolute (`httpx.Scheme` + `Host`, so
+  https behind the TLS proxy) and point at `GET /ota/files/<runtime
+  version>/<unix seconds>/<path>`, which serves `data/updates/`. Each
+  update's manifest is built once per platform and kept in memory: a
+  published update never changes.
+- **Publishing**: `mobile/scripts/publish-update.sh` exports both platforms
+  and copies the export over SSH (`PI`, `PI_PORT`; default
+  `alexander@35.226.215.209`, port 2222) into
+  `~/alexmessage/data/updates/<version>/.<unix seconds>`, then renames it to
+  `<unix seconds>`. `OTA_LOCAL=<data dir>` publishes into a local server's
+  `data/` instead. Deploys never touch `data/` (`deploy/remote_deploy.sh`
+  refuses a release that contains it).
+- **Rolling back**: expo-updates only takes an update newer than the one it
+  runs, so deleting the newest update directory does not undo it on phones
+  that already downloaded it. To undo an update, publish the old code again
+  (`git revert` the bad commit, run the script): the republished copy is
+  the newest.
+- **App downloads**: `GET /app` is the install page (Android and iPhone
+  steps); `GET`/`HEAD /app/AlexMessages.apk` and `/app/AlexMessages.ipa`
+  serve the files in `data/app/` (`Cache-Control: no-store`, because the
+  names never change and Cloudflare caches `.apk` by extension).
+  `mobile/scripts/publish-app.sh android|ios` runs `expo prebuild --clean`
+  and a release build (`gradlew assembleRelease`; an unsigned `xcodebuild
+  archive` packed into an IPA for 万能签) and copies the file there over
+  SSH (`APP_LOCAL=<data dir>` copies it into a local server's `data/`).
+  Android release builds are signed with the debug keystore of Expo's
+  Android template (`android/app/debug.keystore`, the same file after every
+  prebuild), so a new APK installs over the old app and keeps its data.
+- Tests: `internal/webapp/ota_routes_test.go`.
+
 ## Alex Meet (cmd/meet, internal/meet)
 
 The former 1:1 "AlexMessage Call" was replaced wholesale by **Alex Meet**, a
@@ -893,7 +1050,8 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   `internal/webapp/transcribe_test.go`, `internal/webapp/calls_test.go`,
   `internal/webapp/call_listener_test.go`, `internal/webapp/review_test.go`,
   `internal/meet/volctoken_test.go`, `internal/meet/routes_test.go`,
-  `internal/debuglog/debuglog_test.go`): DB layer (DM state, read receipts,
+  `internal/debuglog/debuglog_test.go`,
+  `internal/webapp/ota_routes_test.go`): DB layer (DM state, read receipts,
   attachment dims, paging, debug filters/prune), link-preview SSRF guard,
   image-dimension extraction, transcribe format/model mapping + upstream
   handling, VolcEngine token wire format, debug ingest rate-limiter; the DM
@@ -915,8 +1073,23 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   cutoffs; concurrent DM-state upserts; WAL and the message sequence
   surviving a purge or a migration; `BEGIN IMMEDIATE` waiting out another
   writer; orphan upload cleanup; a revoked cookie reaching Alex Meet's guest
-  gate. `go test ./...` — DB tests point the package-level path vars at a
-  temp dir.
+  gate. OTA updates: the manifest of the newest update (an upload in
+  progress skipped, the asset hashes, `extra.expoClient`, https URLs behind
+  the TLS proxy), 204 when there is no update, 400 for bad headers, a
+  `metadata.json` naming a file outside its update refused, and the `/app`
+  page and downloads.
+  `go test ./...` — DB tests point the package-level path vars at a temp
+  dir.
+- **deploy** — `python3 deploy/remote_deploy_test.py` runs
+  `deploy/remote_deploy.sh` against scratch directories with fake `sudo`,
+  `curl` and `sleep`: the React build is replaced whole, a failed health
+  check or a missing React build restores the old release, `data/` is
+  byte-identical after a deploy and after a rollback, and a release that
+  contains `data/` is refused.
+- **CI** — `.github/workflows/mobile-checks.yml` (first pushed on 2026-10-28):
+  on every push and pull request to `main`/`react`, `shared` typecheck +
+  Vitest and `mobile` `tsc --noEmit`, each after `npm ci --ignore-scripts`.
+  No secrets.
 - **shared** — `cd shared && npm test` (Vitest, 92 tests in 6 files): store
   reducers (optimistic send → delivered → read, edits, replies, unread),
   socket reconnect/queue, api error mapping, format helpers, WAV encoding,
@@ -973,13 +1146,34 @@ Real-world gotchas hit while bringing the RN app up on simulators/emulators:
 - **Safe areas on Android are real** — modal screens must use
   `SafeAreaView edges={["top","bottom"]}`; without it the header renders under
   the status bar (edge-to-edge) and the close control is unreachable.
-- **Android `Alert.alert` caps at 3 buttons** — action menus use the shared
-  `ActionSheet` component (`src/components/ActionSheet.tsx`), which uses
-  `ActionSheetIOS` on iOS and a bottom-sheet `Modal` on Android so Cancel and
-  extra actions always render. The exception is the DM header's call button
-  on Android: `GlassMenuButton` with `dropdown` opens a Jetpack Compose
-  `DropdownMenu` anchored to it (`@expo/ui/jetpack-compose`; see
-  `mobile/AGENTS.md`).
+- **Uploads and Expo's fetch** — Expo SDK 57 replaces the global `fetch` with
+  `expo/fetch`, which can't send React Native `{uri, name, type}` FormData
+  parts (every upload failed instantly). `ApiClient` takes a `readFile` hook
+  (mobile passes `expo-file-system`'s `File#bytes`) and attaches `bytes()` to
+  native parts, which `expo/fetch` accepts. Keep it when adding upload calls.
+- **Menus are native on iOS** — `src/components/NativeMenu.tsx` renders the
+  UIKit views of the local Expo module `mobile/modules/native-menu`: a
+  `UIContextMenuInteraction` on the React Native view for iMessage-style
+  long-press menus (every iOS), and a `.glass()` `UIButton` whose menu morphs
+  out of it for the composer "+" (iOS 26). `TapMenu` stays an `@expo/ui`
+  SwiftUI `Menu`. Android (and the "+" on older iOS) fall back to the shared
+  bottom-sheet `ActionSheet` (Android `Alert.alert` caps at 3 buttons). The
+  exception is the DM header's call button on Android: `GlassMenuButton`
+  with `dropdown` opens a Jetpack Compose `DropdownMenu` anchored to it
+  (`@expo/ui/jetpack-compose` through `src/components/JetpackCompose.tsx`,
+  which is a stub on iOS and web), with leading icons from
+  `mobile/assets/icons/*.xml` (Android vector drawables). Don't
+  host list rows or bubbles in SwiftUI — per-row hosting views re-render on
+  every scroll frame (see `mobile/AGENTS.md`).
+- **Keyboard on iOS** — `react-native-keyboard-controller` (provider mounted
+  on iOS only) moves the composer and message list with the keyboard (final
+  height set in the keyboard's own animation block; drags follow the finger).
+  A downward drag on the list or the composer dismisses the keyboard
+  interactively, as in Messages. Back waits for the keyboard to start hiding
+  before it pops (see `mobile/AGENTS.md`). Android keeps `KeyboardAvoidingView`.
+- **Message list** — an inverted FlatList; iOS 26 scroll-edge effects are
+  hidden per scroll view with `NoScrollEdgeEffects`
+  (`src/components/ScrollEdge.tsx`), see `mobile/AGENTS.md`.
 - **Status bar** — each Stack screen sets `statusBarStyle`
   (`app/_layout.tsx`). Don't add expo-status-bar's `<StatusBar>`: Info.plist
   turns on view-controller-based status bar appearance (the image viewer
@@ -1165,6 +1359,13 @@ Lives under `data/` (gitignored), created on first run:
 - `data/avatars/<user_id>_<token>.<ext>` — profile photos; replaced on change,
   removed on account deletion.
 - `data/vapid_private.pem` / `data/vapid_public.txt` — VAPID key pair.
+- `data/updates/<app version>/<unix seconds>/` — the published OTA updates
+  of the mobile app (`mobile/scripts/publish-update.sh` writes them; see
+  **OTA updates**). Without it the manifest endpoint answers 204.
+- `data/app/AlexMessages.apk` / `data/app/AlexMessages.ipa` — the app
+  downloads of the `/app` page (`mobile/scripts/publish-app.sh` writes them).
+
+Deploys never write into `data/`.
 
 Alex Meet rooms are in-memory only — a meet-server restart ends all meetings.
 
@@ -1182,8 +1383,12 @@ callee is visible, see **DM calls**)/`ping`; server sends `init`/`message`
 `call_signal`/`call_resume` (client) and `call_outgoing`/`call_incoming`/
 `call_ringing`/`call_accepted`/`call_signal`/`call_resumed`/`call_ended`/
 `call_error` (server) — see **DM calls**. `/ws?mode=calls` is the call
-listener socket (ringing only; see **DM calls**). The Alex Meet control-plane
-protocol is documented above.
+listener socket (ringing only; see **DM calls**). The Alex Meet
+control-plane protocol is documented above.
+
+OTA routes (no login; `internal/webapp/ota_routes.go`):
+`GET /api/ota/manifest`, `GET /ota/files/…`, `GET /app`, and
+`GET`/`HEAD /app/AlexMessages.apk` / `/app/AlexMessages.ipa`.
 
 Notable additions for the TS clients: `POST /api/transcribe` (dictation proxy
 to OpenRouter) and the `session_token` field on `POST /api/login` (bearer auth

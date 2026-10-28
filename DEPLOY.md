@@ -38,8 +38,10 @@ for c in server admin meet; do
   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.commit=$commit" -o bin/$c ./cmd/$c
 done
 
-# 2. Bundle binaries + assets (NOT data/ — it lives on the server).
-tar czf release.tgz --exclude static/test-speech.wav bin/ web/dist/ static/ fonts/ sound/ \
+# 2. Bundle binaries + assets (NOT data/ — it lives on the server). On a Mac,
+#    COPYFILE_DISABLE=1 and --no-xattrs keep macOS file metadata out of it.
+COPYFILE_DISABLE=1 tar --no-xattrs -czf release.tgz --exclude static/test-speech.wav \
+    bin/ web/dist/ static/ fonts/ sound/ \
     index.html login.html admin.html meet.html meet_login.html
 
 # 3. Ship + restart through the relay (ssh -p 2222 alexander@35.226.215.209;
@@ -49,6 +51,7 @@ scp -P 2222 release.tgz alexander@35.226.215.209:/home/alexander/alexmessage/
 ssh -p 2222 alexander@35.226.215.209 \
     "APP_DIR=/home/alexander/alexmessage HEALTH_PORTS='6001 6002 6003' bash -s" \
     < deploy/remote_deploy.sh
+rm release.tgz   # the deploy script deletes the Pi's copy; git does not ignore this one
 ```
 
 > **Stale-cache gotcha:** asset URLs are stable (`/static/app.js`) and the
@@ -219,10 +222,12 @@ internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/f
   passes that build to the deploy job as `react-web-dist`, and includes it in
   the release. The deploy script replaces the complete directory so stale
   hashed assets cannot survive. Releases missing `web/dist/index.html` abort.
-- **Updated mobile clients are required for protected attachments**: publish
-  native builds containing the bearer media headers and the updated iOS
-  `ImagePreview` module before deploying the attachment authorization change.
-  Older mobile builds request media anonymously and will receive 401.
+- **Protected attachments need build 2 or later**: since the deploy of
+  2026-10-28 the server sends an attachment only to a signed-in user (an
+  anonymous request gets 401). Build 2 (version 1.2.0) sends its session
+  token with media requests; mobile builds made before the attachment
+  authorization change (commit `37e425d`) request media anonymously and get
+  401.
 
 ## Continuous deployment (GitHub Actions)
 
@@ -250,8 +255,8 @@ internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/f
 
 The deploy job only runs when the repo variable **`DEPLOY_ENABLED` is `true`**.
 
-`.github/workflows/mobile-checks.yml` (a local commit on `react`, not pushed;
-it has never run on GitHub) runs on every push and pull request to `main` or
+`.github/workflows/mobile-checks.yml` (first pushed on 2026-10-28) runs on
+every push and pull request to `main` or
 `react`: `cd shared && npm ci --ignore-scripts && npm run typecheck && npm test` and
 `cd mobile && npm ci --ignore-scripts && npx --no -- tsc --noEmit`. It uses
 no secrets and deploys nothing.
@@ -309,10 +314,10 @@ server events confirm the whole stack is wired up end to end.
 
 The mobile app downloads new JavaScript from the server by itself
 (expo-updates, unsigned; CLAUDE.md → **OTA updates**). **Status
-(2026-10-27): NOT live.** Nothing is pushed or deployed, and no phone has an
-app build that contains expo-updates yet: see **First release** below. The
-update flow and both scripts were tested on the Mac only, against a local
-server (CLAUDE.md → **OTA updates** has the results).
+(2026-10-28): the server side is deployed, and build 2 is on `/app`.** A
+phone gets updates only once build 2 is installed on it (**First release**,
+step 3, below). No update is published yet. CLAUDE.md → **OTA updates** has
+the test results.
 
 Both scripts run on the Mac, from any directory, and reach the Pi over SSH
 (`PI` and `PI_PORT` override `alexander@35.226.215.209`, port `2222`).
@@ -384,6 +389,9 @@ gets the updates published after it.
 Deploys never touch `data/updates/` or `data/app/`.
 
 ### First release
+
+Steps 1 and 2 were done on 2026-10-28 (server commit `3fa5bc3`). Step 3 is
+not done yet.
 
 1. Push the `react` branch and deploy the server (see **TL;DR for
    agents**). The server then answers `/api/ota/manifest` (`204` until an

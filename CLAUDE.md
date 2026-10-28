@@ -103,11 +103,12 @@ the app has **diverged** from the Python original:
   while the app is closed, through a
   foreground service with its own socket (`/ws?mode=calls`). See **DM calls**
   below.
-- **OTA updates (in the code; NOT deployed)** — release builds of the mobile
-  app download new JavaScript from `cmd/server` by themselves (expo-updates,
-  unsigned), and `mobile/scripts/publish-update.sh` publishes an update with
-  one command. `/app` is the install page with the APK and IPA downloads.
-  See **OTA updates** below.
+- **OTA updates (deployed on 2026-10-28)** — release builds of the mobile
+  app, from build 2 (version 1.2.0) on, download new JavaScript from
+  `cmd/server` by themselves (expo-updates, unsigned), and
+  `mobile/scripts/publish-update.sh` publishes an update with one command.
+  `/app` is the install page with the APK and IPA downloads. A phone gets
+  updates only once build 2 is installed on it. See **OTA updates** below.
 - **Branding** — user-visible name is **"Alex Messages"**. The Go module
   remains `alexmessage`.
 
@@ -703,8 +704,11 @@ cards in the thread with a
 
 ## OTA updates (expo-updates, unsigned)
 
-**Status (2026-10-27): OTA updates are NOT live.** Nothing below is pushed
-or deployed, and no phone has an app build that contains expo-updates yet.
+**Status (2026-10-28): the server side is deployed, and build 2 is on
+`/app`.** The Pi runs `cmd/server` from commit `3fa5bc3`, which answers
+`/api/ota/manifest` and serves https://messages.alexanderjia.com/app with
+the APK and the IPA of build 2 (version 1.2.0). No update is published yet,
+and a phone gets updates only once build 2 is installed on it.
 Release builds of the app download new JavaScript from `cmd/server` by
 themselves. The operations (publishing an update, publishing a new app
 build, rolling back) are in `DEPLOY.md` → **Mobile app updates**.
@@ -718,8 +722,15 @@ never taken: expo-updates only takes code newer than the code it runs.
 `publish-app.sh android` and `publish-app.sh ios` built the APK and the IPA
 (version 1.2.0, build 2, the production update URL), and both scripts'
 uploads worked against a stand-in for `ssh` that ran the remote command on
-the Mac. NOT tested: the Pi itself (nginx, Cloudflare) and real phones,
-including an IPA signed by 万能签.
+the Mac. Tested on 2026-10-28 on the Pi, through Cloudflare and nginx: the
+manifest of a test update (runtime version 0.0.0, deleted afterwards) had
+https URLs, and its file downloaded with the phones' own `User-Agent`
+values (`okhttp/4.12.0` on Android, `AlexMessages/2 CFNetwork/… Darwin/…`
+on iOS) and matched the manifest's hash; the APK and the IPA downloaded
+from `/app` byte for byte as uploaded. Cloudflare answers 403 (error 1010)
+to some client `User-Agent` values, for example Python's `Python-urllib`,
+so test these routes with curl. NOT tested: real phones, including an IPA
+signed by 万能签.
 
 - **The app** (`mobile/`) contains `expo-updates` with Expo's defaults: every
   start of a release build asks `GET /api/ota/manifest` for the newest update
@@ -1075,7 +1086,7 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   check or a missing React build restores the old release, `data/` is
   byte-identical after a deploy and after a rollback, and a release that
   contains `data/` is refused.
-- **CI** — `.github/workflows/mobile-checks.yml` (never run on GitHub yet):
+- **CI** — `.github/workflows/mobile-checks.yml` (first pushed on 2026-10-28):
   on every push and pull request to `main`/`react`, `shared` typecheck +
   Vitest and `mobile` `tsc --noEmit`, each after `npm ci --ignore-scripts`.
   No secrets.
