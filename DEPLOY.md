@@ -201,6 +201,12 @@ internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/f
   which passes the same-origin check only while nginx keeps the `Host`
   header as above. A socket without an `Origin` header is accepted; only the
   Android ring service's call listener (OkHttp) sends none.
+- **Upload limit**: the HTTPS server block of
+  `/etc/nginx/sites-available/messages.alexanderjia.com` sets
+  `client_max_body_size 21m;` (since 2026-10-28). The app takes attachments
+  up to 20 MB plus 1 MB of form overhead. Without that line nginx answers 413
+  to every request body over 1 MB (nginx's default), and the request never
+  reaches the app.
 - **systemd units** (`/etc/systemd/system/`), all `User=alexander`,
   `WorkingDirectory=/home/alexander/alexmessage`, secrets in
   `EnvironmentFile=/etc/alexmessage/alexmessage.env` (`ADMIN_PASSWORD`,
