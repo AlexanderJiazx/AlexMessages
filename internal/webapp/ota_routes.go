@@ -294,7 +294,7 @@ func appDownloadFor(name string) *appDownload {
 		Path: "/app/" + name,
 		File: name,
 		Size: fmt.Sprintf("%.1f MB", float64(info.Size())/1e6),
-		Date: info.ModTime().UTC().Format("2 January 2006"),
+		Date: info.ModTime().UTC().Format("2 January 2006, 15:04 UTC"),
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -27,8 +28,8 @@ func writeUpdate(t *testing.T, name string, ios bool) {
 	dir := filepath.Join(db.DataDir, "updates", "1.0.0", name)
 	files := map[string]string{
 		"_expo/static/js/android/entry-" + name + ".hbc": "android bundle " + name,
-		"assets/0123abcd":                                "png bytes",
-		"expoConfig.json":                                `{"name":"Alex Messages","extra":{"defaultServerUrl":"https://example.com"}}`,
+		"assets/0123abcd": "png bytes",
+		"expoConfig.json": `{"name":"Alex Messages","extra":{"defaultServerUrl":"https://example.com"}}`,
 	}
 	meta := `{"version":0,"bundler":"metro","fileMetadata":{"android":{"bundle":"_expo/static/js/android/entry-` + name + `.hbc","assets":[{"path":"assets/0123abcd","ext":"png"}]}`
 	if ios {
@@ -219,11 +220,17 @@ func TestAppPageAndDownloads(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(db.DataDir, "app"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(db.DataDir, "app", "AlexMessages.apk"), []byte("PK apk"), 0o644); err != nil {
+	apk := filepath.Join(db.DataDir, "app", "AlexMessages.apk")
+	if err := os.WriteFile(apk, []byte("PK apk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	built := time.Date(2026, 10, 28, 0, 45, 0, 0, time.UTC)
+	if err := os.Chtimes(apk, built, built); err != nil {
 		t.Fatal(err)
 	}
 	page := get("/app").Body.String()
-	if !strings.Contains(page, `href="/app/AlexMessages.apk"`) || !strings.Contains(page, "No iPhone build is published yet.") {
+	if !strings.Contains(page, `href="/app/AlexMessages.apk"`) || !strings.Contains(page, "No iPhone build is published yet.") ||
+		!strings.Contains(page, "Version of 28 October 2026, 00:45 UTC") {
 		t.Fatalf("/app: %s", page)
 	}
 	rec := get("/app/AlexMessages.apk")
