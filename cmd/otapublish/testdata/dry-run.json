@@ -1,7 +1,0 @@
-{
-  "runtimes": {"ios": "fixture-ios-runtime", "android": "fixture-android-runtime"},
-  "export_dir": "export",
-  "expo_config": "expo-config.json",
-  "skip_npm": true,
-  "skip_deploy_check": true
-}

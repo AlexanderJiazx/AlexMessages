@@ -18,10 +18,7 @@ import (
 
 	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
-	"alexmessage/internal/debuglog"
 	"alexmessage/internal/httpx"
-	"alexmessage/internal/ota"
-	"alexmessage/internal/ota/census"
 )
 
 type server struct {
@@ -59,8 +56,6 @@ func NewEngine() *gin.Engine {
 
 	r.GET("/api/stats", handleStats)
 	r.POST("/api/purge_messages", handlePurgeMessages)
-
-	r.GET("/api/ota/installs", handleOTAInstalls)
 
 	registerDebugRoutes(r)
 
@@ -361,43 +356,7 @@ func handleDeleteUser(c *gin.Context) {
 	} // cascades messages/attachments/contacts via FK
 	db.DeleteUserUploads(userID)     // remove storage directory on disk
 	db.DeleteUserAvatarFiles(userID) // remove profile photo files on disk
-	// OTA install census rows that claim this user (OTAUpdatePlan.md, D8
-	// item 5). The account is already gone, so a failure is only reported.
-	cdb, err := census.Shared(censusPath(), false)
-	if err == nil && cdb != nil {
-		err = cdb.DeleteUser(userID)
-	}
-	if err != nil {
-		debuglog.Emit("admin", "error", "ota.census_delete_failed", "Census rows of a deleted account could not be removed", map[string]any{"user_id": userID, "err": err.Error()})
-	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
-// ---------- OTA install census ----------
-
-func censusPath() string {
-	return filepath.Join(ota.DirFromEnv(db.DataDir), census.FileName)
-}
-
-// handleOTAInstalls returns the OTA install census (OTAUpdatePlan.md, D8),
-// read-only, most recently seen first. Every field is an unauthenticated
-// claim of a phone; it is served as JSON (which escapes <, > and &), and any
-// page that shows it must render it as text.
-func handleOTAInstalls(c *gin.Context) {
-	if _, ok := currentAdmin(c); !ok {
-		return
-	}
-	installs := []census.Install{}
-	cdb, err := census.Shared(censusPath(), false)
-	if err == nil && cdb != nil {
-		installs, err = cdb.List()
-	}
-	if err != nil {
-		httpx.Error(c, http.StatusInternalServerError, "internal error")
-		return
-	}
-	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, gin.H{"installs": installs, "max_rows": census.MaxRows})
 }
 
 // ---------- global operations ----------

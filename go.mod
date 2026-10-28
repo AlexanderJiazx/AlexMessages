@@ -3,13 +3,11 @@ module alexmessage
 go 1.25.3
 
 require (
-	filippo.io/age v1.2.1
 	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/gorilla/websocket v1.5.3
 	golang.org/x/crypto v0.52.0
 	golang.org/x/net v0.54.0
-	golang.org/x/term v0.43.0
 	modernc.org/sqlite v1.51.0
 )
 

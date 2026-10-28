@@ -19,8 +19,8 @@
 # The stop → copy → start window is a few seconds, about what a restart costs.
 #
 # It never writes into data/: it only copies the database out of it, and it
-# refuses a release that contains data/. The OTA update store (data/ota) is
-# written only by bin/otactl, so a deploy or a rollback leaves it unchanged.
+# refuses a release that contains data/, so a deploy or a rollback leaves the
+# published app updates and downloads (data/updates, data/app) unchanged.
 #
 # Prerequisite: the SSH user can run `sudo -n systemctl stop|start|restart`
 # for the three units without a password.
@@ -96,15 +96,6 @@ fi
 rm -rf web/dist
 mkdir -p web
 mv "$release_stage/web/dist" web/dist
-# bin/otactl may be running (an operator's command over SSH), and Linux
-# refuses to write into a running executable ("Text file busy"). Install it
-# by rename: a running otactl keeps its old file, the next start gets the new.
-if [[ -f "$release_stage/bin/otactl" ]]; then
-  mkdir -p bin
-  install -m 755 "$release_stage/bin/otactl" bin/otactl.tmp
-  mv bin/otactl.tmp bin/otactl
-  rm -f "$release_stage/bin/otactl"
-fi
 cp -a "$release_stage/." .
 rm -rf "$release_stage"
 rm -f release.tgz

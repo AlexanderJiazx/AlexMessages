@@ -1,307 +1,308 @@
 package webapp
 
 import (
+	"bytes"
+	"crypto/md5"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"alexmessage/internal/db"
-	"alexmessage/internal/debuglog"
 	"alexmessage/internal/httpx"
-	"alexmessage/internal/ota"
-	"alexmessage/internal/ota/census"
 )
 
-// OTA updates of the mobile app (OTAUpdatePlan.md, D2): the Expo Updates
-// manifest endpoint, the update assets, the native-build policy, and the /app
-// install page with its downloads. None of these needs a session: neither
-// expo-updates nor a browser downloading an APK sends one. The server only
-// selects bytes that were signed on the publisher's Mac; it holds no key.
+// Over-the-air updates of the mobile app (expo-updates) and the /app install
+// page. mobile/scripts/publish-update.sh uploads the output of `npx expo
+// export` to data/updates/<runtime version>/<unix seconds>/, and every app
+// start asks /api/ota/manifest for the newest update of its platform and
+// runtime version (the app version). Updates are not signed: the app trusts
+// this server, as most Expo apps trust theirs. No route here needs a
+// session; expo-updates sends none.
 func registerOTARoutes(r *gin.Engine) {
 	r.GET("/api/ota/manifest", handleOTAManifest)
-	r.GET("/ota/assets/*name", handleOTAAsset)
-	r.HEAD("/ota/assets/*name", handleOTAAsset)
-	r.GET("/api/app/latest", handleAppLatest)
+	mountStatic(r, "/ota/files", updatesDir())
 	r.GET("/app", handleAppPage)
-	r.GET("/app/*file", handleAppFile)
-	r.HEAD("/app/*file", handleAppFile)
+	r.GET("/app/:file", handleAppFile)
+	r.HEAD("/app/:file", handleAppFile)
 }
 
-// otaStore is the update store: $OTA_DIR, or data/ota.
-func otaStore() *ota.Store {
-	return &ota.Store{Dir: ota.DirFromEnv(db.DataDir)}
+func updatesDir() string  { return filepath.Join(db.DataDir, "updates") }
+func appFilesDir() string { return filepath.Join(db.DataDir, "app") }
+
+// runtimeVersionRE keeps the runtime version a single plain directory name.
+var runtimeVersionRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// manifestAsset is one file of an update in the Expo Updates protocol.
+type manifestAsset struct {
+	Hash          string `json:"hash"` // base64url SHA-256, checked by the app
+	Key           string `json:"key"`
+	ContentType   string `json:"contentType"`
+	FileExtension string `json:"fileExtension"`
+	URL           string `json:"url"`
 }
 
-func otaCensusPath() string {
-	return filepath.Join(ota.DirFromEnv(db.DataDir), census.FileName)
+type manifest struct {
+	ID             string          `json:"id"`
+	CreatedAt      string          `json:"createdAt"`
+	RuntimeVersion string          `json:"runtimeVersion"`
+	LaunchAsset    manifestAsset   `json:"launchAsset"`
+	Assets         []manifestAsset `json:"assets"`
+	Metadata       struct{}        `json:"metadata"`
+	Extra          struct {
+		// The public app config, which expo-constants serves as
+		// Constants.expoConfig while the update runs.
+		ExpoClient json.RawMessage `json:"expoClient"`
+	} `json:"extra"`
 }
 
-// PruneOTACensus deletes census rows not seen for 90 days. cmd/server adds
-// it to the maintenance sweep.
-func PruneOTACensus() {
-	cdb, err := census.Shared(otaCensusPath(), false)
-	if err == nil && cdb != nil {
-		_, err = cdb.Prune(time.Now())
-	}
-	if err != nil {
-		log.Printf("[maintenance] census prune: %v", err)
-	}
-}
+// manifests caches each update's manifest per platform, with URLs relative
+// to the server: a published update never changes.
+var manifests sync.Map // "<runtime>/<update>/<platform>" → *manifest
 
-// eventBudget allows at most n events per window, so forged census headers
-// or a damaged store cannot flood the debug console.
-type eventBudget struct {
-	mu     sync.Mutex
-	n      int
-	window time.Duration
-	start  time.Time
-	used   int
-}
-
-func (b *eventBudget) allow() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	now := time.Now()
-	if now.Sub(b.start) >= b.window {
-		b.start, b.used = now, 0
-	}
-	if b.used >= b.n {
-		return false
-	}
-	b.used++
-	return true
-}
-
-var (
-	otaErrorBudget   = &eventBudget{n: 1, window: 10 * time.Minute}
-	censusFullBudget = &eventBudget{n: 1, window: time.Hour}
-	failureBudget    = &eventBudget{n: 30, window: time.Hour}
-)
-
-// otaStoreError reports a damaged update store or census, at most once per
-// 10 minutes.
-func otaStoreError(err error) {
-	if !otaErrorBudget.allow() {
-		return
-	}
-	log.Printf("[ota] %v", err)
-	debuglog.Emit("messages", "error", "ota.store_error", "The OTA update store could not be read", map[string]any{"err": err.Error()})
-}
-
-// otaRefuse answers an error that no cache may keep: Cloudflare caches 404s
-// by extension, and an asset or APK uploaded later must not stay hidden.
-func otaRefuse(c *gin.Context, status int, detail string) {
-	c.Header("Cache-Control", "no-store")
-	httpx.Error(c, status, detail)
-}
-
-// handleOTAManifest is the Expo Updates protocol v1 manifest endpoint, the
-// URL baked into every binary from build 2 on.
 func handleOTAManifest(c *gin.Context) {
 	h := c.Writer.Header()
 	h.Set("expo-protocol-version", "1")
 	h.Set("expo-sfv-version", "0")
 	h.Set("Cache-Control", "private, max-age=0, no-store")
 
-	req, err := ota.ParseManifestRequest(c.Request.Header)
+	platform := c.GetHeader("expo-platform")
+	runtimeVersion := c.GetHeader("expo-runtime-version")
+	if platform != "ios" && platform != "android" {
+		httpx.Error(c, http.StatusBadRequest, "expo-platform must be ios or android")
+		return
+	}
+	if !runtimeVersionRE.MatchString(runtimeVersion) {
+		httpx.Error(c, http.StatusBadRequest, "invalid expo-runtime-version")
+		return
+	}
+	m, err := newestManifest(runtimeVersion, platform)
 	if err != nil {
-		httpx.Error(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	// The kill switch (D9): every phone keeps what it runs.
-	if os.Getenv("OTA_DISABLED") == "1" {
-		c.Status(http.StatusNoContent)
-		return
-	}
-	store := otaStore()
-	sel, err := store.Select(req)
-	if errors.Is(err, ota.ErrNotInitialized) {
-		c.Status(http.StatusNoContent)
-		return
-	}
-	if err != nil {
-		otaStoreError(err)
+		log.Printf("[ota] %v", err)
 		httpx.Error(c, http.StatusInternalServerError, "update store error")
 		return
 	}
-	recordCensus(store, req)
-	if sel.Parts == nil {
-		c.Status(http.StatusNoContent)
+	if m == nil {
+		c.Status(http.StatusNoContent) // no update: the app keeps what it runs
 		return
 	}
-	body, contentType, err := ota.EncodeMultipart(sel.Parts, ota.NewBoundary())
+
+	// Asset URLs must be absolute; they point back at this server.
+	out := *m
+	base := httpx.Scheme(c.Request) + "://" + c.Request.Host
+	out.LaunchAsset.URL = base + m.LaunchAsset.URL
+	out.Assets = make([]manifestAsset, len(m.Assets))
+	for i, a := range m.Assets {
+		a.URL = base + a.URL
+		out.Assets[i] = a
+	}
+	body, err := json.Marshal(out)
 	if err != nil {
-		otaStoreError(err)
 		httpx.Error(c, http.StatusInternalServerError, "update store error")
 		return
 	}
-	c.Data(http.StatusOK, contentType, body)
+	boundary := randomBoundary()
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "--%s\r\ncontent-disposition: form-data; name=\"manifest\"\r\ncontent-type: application/json; charset=utf-8\r\n\r\n", boundary)
+	b.Write(body)
+	fmt.Fprintf(&b, "\r\n--%s--\r\n", boundary)
+	c.Data(http.StatusOK, "multipart/mixed; boundary="+boundary, b.Bytes())
 }
 
-// recordCensus upserts the census row of the requesting install (D8 item 1).
-// A failure is logged and never fails the update check.
-func recordCensus(store *ota.Store, req *ota.ManifestRequest) {
-	if req.ClientID == "" || req.EmbeddedUpdateID == "" {
-		return
-	}
-	cdb, err := census.Shared(filepath.Join(store.Dir, census.FileName), true)
-	if err != nil {
-		otaStoreError(err)
-		return
-	}
-	res, err := cdb.Record(census.Report{
-		ClientID:         req.ClientID,
-		Platform:         req.Platform,
-		Runtime:          req.Runtime,
-		CurrentUpdateID:  req.CurrentUpdateID,
-		EmbeddedUpdateID: req.EmbeddedUpdateID,
-		Channel:          req.Channel,
-		UserID:           req.UserID,
-		FailedUpdateIDs:  req.FailedUpdateIDs,
-		FatalError:       req.FatalError,
-	}, func() (bool, error) {
-		return store.IsRegisteredEmbedded(req.Platform, req.Runtime, req.EmbeddedUpdateID)
-	}, time.Now())
-	if err != nil {
-		otaStoreError(err)
-		return
-	}
-	if res.Full && censusFullBudget.allow() {
-		debuglog.Emit("messages", "warn", "ota.census_full", fmt.Sprintf("The install census holds %d rows; new installs are not recorded", census.MaxRows), nil)
-	}
-	if (len(res.NewFailedIDs) > 0 || res.NewFatalError) && failureBudget.allow() {
-		ctx := map[string]any{
-			"client_id":      req.ClientID,
-			"platform":       req.Platform,
-			"runtime":        req.Runtime,
-			"current_update": req.CurrentUpdateID,
-			"failed_updates": res.NewFailedIDs,
-			"am_uid":         req.UserID,
-		}
-		if res.NewFatalError {
-			ctx["fatal_error"] = req.FatalError
-		}
-		debuglog.Emit("messages", "error", "ota.client_failure", "An install reported a failed update (unauthenticated census data)", ctx)
-	}
+func randomBoundary() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
-// serveOTAFile serves an immutable download. The headers stop an SVG, HTML
-// or XML file from rendering on this origin; expo-updates ignores them.
-func serveOTAFile(c *gin.Context, path, name, contentType string) {
-	f, err := os.Open(path)
+// newestManifest is the manifest of the newest update published for the
+// runtime version, or nil when there is none or it has no bundle for the
+// platform. Updates are directories named by their publish time in unix
+// seconds; an upload in progress has a dot-prefixed name and is skipped.
+func newestManifest(runtimeVersion, platform string) (*manifest, error) {
+	entries, err := os.ReadDir(filepath.Join(updatesDir(), runtimeVersion))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		otaRefuse(c, http.StatusNotFound, "not found")
+		return nil, err
+	}
+	newest := int64(-1)
+	for _, e := range entries {
+		n, err := strconv.ParseInt(e.Name(), 10, 64)
+		if e.IsDir() && err == nil && n > newest && strconv.FormatInt(n, 10) == e.Name() {
+			newest = n
+		}
+	}
+	if newest < 0 {
+		return nil, nil
+	}
+	update := strconv.FormatInt(newest, 10)
+	key := runtimeVersion + "/" + update + "/" + platform
+	if m, ok := manifests.Load(key); ok {
+		return m.(*manifest), nil
+	}
+	m, err := readManifest(runtimeVersion, update, time.Unix(newest, 0), platform)
+	if err != nil {
+		return nil, fmt.Errorf("update %s/%s: %w", runtimeVersion, update, err)
+	}
+	if m != nil {
+		manifests.Store(key, m)
+	}
+	return m, nil
+}
+
+// readManifest builds a manifest from an update's metadata.json and
+// expoConfig.json, hashing each file it lists.
+func readManifest(runtimeVersion, update string, createdAt time.Time, platform string) (*manifest, error) {
+	dir := filepath.Join(updatesDir(), runtimeVersion, update)
+	metadata, err := os.ReadFile(filepath.Join(dir, "metadata.json"))
+	if err != nil {
+		return nil, err
+	}
+	var meta struct {
+		FileMetadata map[string]struct {
+			Bundle string `json:"bundle"`
+			Assets []struct {
+				Path string `json:"path"`
+				Ext  string `json:"ext"`
+			} `json:"assets"`
+		} `json:"fileMetadata"`
+	}
+	if err := json.Unmarshal(metadata, &meta); err != nil {
+		return nil, fmt.Errorf("metadata.json: %w", err)
+	}
+	files, ok := meta.FileMetadata[platform]
+	if !ok || files.Bundle == "" {
+		return nil, nil
+	}
+	expoConfig, err := os.ReadFile(filepath.Join(dir, "expoConfig.json"))
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(expoConfig) {
+		return nil, errors.New("expoConfig.json is not JSON")
+	}
+
+	describe := func(path, ext, contentType string) (manifestAsset, error) {
+		if !filepath.IsLocal(filepath.FromSlash(path)) {
+			return manifestAsset{}, fmt.Errorf("metadata.json names %q, outside the update", path)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(path)))
+		if err != nil {
+			return manifestAsset{}, err
+		}
+		sha := sha256.Sum256(b)
+		sum := md5.Sum(b)
+		return manifestAsset{
+			Hash:          base64.RawURLEncoding.EncodeToString(sha[:]),
+			Key:           hex.EncodeToString(sum[:]),
+			ContentType:   contentType,
+			FileExtension: ext,
+			URL:           "/ota/files/" + runtimeVersion + "/" + update + "/" + path,
+		}, nil
+	}
+
+	m := &manifest{
+		CreatedAt:      createdAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+		RuntimeVersion: runtimeVersion,
+	}
+	if m.LaunchAsset, err = describe(files.Bundle, ".bundle", "application/javascript"); err != nil {
+		return nil, err
+	}
+	m.Assets = []manifestAsset{}
+	for _, a := range files.Assets {
+		contentType := mime.TypeByExtension("." + a.Ext)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		asset, err := describe(a.Path, "."+a.Ext, contentType)
+		if err != nil {
+			return nil, err
+		}
+		m.Assets = append(m.Assets, asset)
+	}
+	m.Extra.ExpoClient = expoConfig
+	// The id is a UUID-shaped hash of the update's content, as in Expo's
+	// example server: the same export always gets the same id.
+	id := sha256.Sum256(append(metadata, expoConfig...))
+	x := hex.EncodeToString(id[:16])
+	m.ID = x[0:8] + "-" + x[8:12] + "-" + x[12:16] + "-" + x[16:20] + "-" + x[20:32]
+	return m, nil
+}
+
+// appFiles are the downloads of the /app page, which
+// mobile/scripts/publish-app.sh copies into data/app/.
+var appFiles = map[string]string{
+	"AlexMessages.apk": "application/vnd.android.package-archive",
+	"AlexMessages.ipa": "application/octet-stream",
+}
+
+// handleAppFile serves /app/AlexMessages.apk and /app/AlexMessages.ipa. The
+// names never change, so no browser or Cloudflare cache may keep a copy.
+func handleAppFile(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	name := c.Param("file")
+	contentType, ok := appFiles[name]
+	if !ok {
+		httpx.Error(c, http.StatusNotFound, "not found")
+		return
+	}
+	f, err := os.Open(filepath.Join(appFilesDir(), name))
+	if err != nil {
+		httpx.Error(c, http.StatusNotFound, "not found")
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		otaRefuse(c, http.StatusNotFound, "not found")
+		httpx.Error(c, http.StatusNotFound, "not found")
 		return
 	}
-	h := c.Writer.Header()
-	h.Set("Content-Type", contentType)
-	h.Set("Cache-Control", "public, max-age=31536000, immutable")
-	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Content-Security-Policy", "sandbox")
-	h.Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeContent(c.Writer, c.Request, name, info.ModTime(), f)
 }
 
-// handleOTAAsset serves /ota/assets/<sha256-b64url>.<ext>.
-func handleOTAAsset(c *gin.Context) {
-	name := strings.TrimPrefix(c.Param("name"), "/")
-	path, ok := otaStore().AssetFile(name)
-	if !ok {
-		otaRefuse(c, http.StatusBadRequest, "invalid asset name")
-		return
-	}
-	_, ext, _ := ota.ParseAssetName(name)
-	serveOTAFile(c, path, name, ota.AssetContentType(ext))
+// appDownload is one platform's download on the /app page.
+type appDownload struct {
+	Path, File, Size, Date string
 }
 
-// handleAppFile serves /app/android/AlexMessages-<version>-<build>.apk and
-// /app/ios/AlexMessages-<version>-<build>.ipa.
-func handleAppFile(c *gin.Context) {
-	platform, name, _ := strings.Cut(strings.TrimPrefix(c.Param("file"), "/"), "/")
-	path, ok := otaStore().NativeFile(platform, name)
-	if !ok {
-		otaRefuse(c, http.StatusNotFound, "not found")
-		return
-	}
-	serveOTAFile(c, path, name, ota.NativeContentType(platform))
-}
-
-// handleAppLatest is the native-build policy of both platforms (D10).
-func handleAppLatest(c *gin.Context) {
-	policy, err := otaStore().ReadPolicy()
-	if err != nil {
-		otaStoreError(err)
-		otaRefuse(c, http.StatusInternalServerError, "policy error")
-		return
-	}
-	c.Header("Cache-Control", "no-cache")
-	c.JSON(http.StatusOK, policy)
-}
-
-// currentPolicy is the native-build policy, or nil when policy.json cannot
-// be read or is invalid. A broken policy gates no one.
-func currentPolicy() *ota.Policy {
-	policy, err := otaStore().ReadPolicy()
-	if err != nil {
-		otaStoreError(err)
+func appDownloadFor(name string) *appDownload {
+	info, err := os.Stat(filepath.Join(appFilesDir(), name))
+	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
-	return policy
-}
-
-// appPageBuild is one platform's download on the /app page.
-type appPageBuild struct {
-	Version string
-	Build   int
-	Path    string
-	File    string
-	SHA256  string
-	SizeMB  string
-	Notes   string
-}
-
-func pageBuild(platform string, b *ota.NativeBuild) *appPageBuild {
-	if b == nil {
-		return nil
-	}
-	file := ota.NativeFileName(platform, b.Version, b.Build)
-	return &appPageBuild{
-		Version: b.Version,
-		Build:   b.Build,
-		Path:    "/app/" + platform + "/" + file,
-		File:    file,
-		SHA256:  b.SHA256,
-		SizeMB:  fmt.Sprintf("%.1f MB", float64(b.Size)/1e6),
-		Notes:   b.Notes,
+	return &appDownload{
+		Path: "/app/" + name,
+		File: name,
+		Size: fmt.Sprintf("%.1f MB", float64(info.Size())/1e6),
+		Date: info.ModTime().UTC().Format("2 January 2006"),
 	}
 }
 
 // handleAppPage is the install page for both platforms.
 func handleAppPage(c *gin.Context) {
-	policy, err := otaStore().ReadPolicy()
-	if err != nil {
-		otaStoreError(err)
-		otaRefuse(c, http.StatusInternalServerError, "policy error")
-		return
-	}
-	data := struct{ Android, IOS *appPageBuild }{
-		Android: pageBuild(ota.PlatformAndroid, policy.Android.Latest),
-		IOS:     pageBuild(ota.PlatformIOS, policy.IOS.Latest),
+	data := struct{ Android, IOS *appDownload }{
+		Android: appDownloadFor("AlexMessages.apk"),
+		IOS:     appDownloadFor("AlexMessages.ipa"),
 	}
 	h := c.Writer.Header()
 	h.Set("Cache-Control", "no-cache")
@@ -331,30 +332,25 @@ var appPage = template.Must(template.New("app").Parse(`<!doctype html>
   a.button:active { background: #355040; }
   ol { padding-left: 22px; margin: 12px 0 0; }
   li { margin: 6px 0; }
-  code { font: 12px/1.4 ui-monospace, Menlo, monospace; word-break: break-all; }
   .muted { color: #5C6660; font-size: 14px; }
-  .notes { white-space: pre-wrap; }
 </style>
 </head>
 <body>
 <main>
 <h1>Install Alex Messages</h1>
-<p class="muted">Messages, voice and video calls. Your messages are kept on the server, so reinstalling the app loses none of them.</p>
+<p class="muted">Messages, voice and video calls. Small updates reach the app by themselves: you need this page only to install the app, or when you are told that a new version needs installing.</p>
 
 <section>
 <h2>Android</h2>
 {{with .Android}}
-<p>Alex Messages {{.Version}} (build {{.Build}}), {{.SizeMB}}</p>
-{{if .Notes}}<p class="notes">{{.Notes}}</p>{{end}}
+<p>Version of {{.Date}}, {{.Size}}</p>
 <p><a class="button" href="{{.Path}}" download="{{.File}}">Download for Android</a></p>
 <ol>
-  <li>Tap <b>Download for Android</b> and wait until the download has finished: your Files app shows the file <code>{{.File}}</code> with its full size.</li>
-  <li>If your Alex Messages is older than version 1.2.0, uninstall it now (Settings → Apps → Alex Messages → Uninstall). Android refuses to install the new version over it, because the new version is signed with a new key.</li>
-  <li>Open the downloaded file. When Android asks, allow <b>Install unknown apps</b> for the app that opened it (your browser or file manager), go back, and tap <b>Install</b>.</li>
-  <li>Open Alex Messages and sign in.</li>
+  <li>Tap <b>Download for Android</b> and wait until the download has finished.</li>
+  <li>Open the downloaded file. When Android asks, allow <b>Install unknown apps</b> for the app that opened it (your browser or file manager), go back, and tap <b>Install</b>. It installs over the old app and keeps your sign-in.</li>
+  <li>Open Alex Messages. On a first install, sign in.</li>
   <li>Allow notifications, full-screen calls and background use when the app asks. Settings → Notifications in the app shows what is still missing.</li>
 </ol>
-<p class="muted">SHA-256 of {{.File}}:<br><code>{{.SHA256}}</code></p>
 {{else}}
 <p>No Android build is published yet.</p>
 {{end}}
@@ -363,21 +359,17 @@ var appPage = template.Must(template.New("app").Parse(`<!doctype html>
 <section>
 <h2>iPhone</h2>
 {{with .IOS}}
-<p>Alex Messages {{.Version}} (build {{.Build}}), {{.SizeMB}}</p>
-{{if .Notes}}<p class="notes">{{.Notes}}</p>{{end}}
+<p>Version of {{.Date}}, {{.Size}}</p>
 <p><a class="button" href="{{.Path}}" download="{{.File}}">Download for iPhone</a></p>
 <ol>
   <li>Open this page in Safari on the iPhone and tap <b>Download for iPhone</b>.</li>
-  <li>Open the downloaded file <code>{{.File}}</code> in 万能签, which signs it and installs it over the old app.</li>
-  <li>Open Alex Messages and sign in if it asks.</li>
+  <li>Open the downloaded file in 万能签, which signs it and installs it over the old app.</li>
+  <li>Open Alex Messages.</li>
 </ol>
-<p class="muted">SHA-256 of {{.File}}:<br><code>{{.SHA256}}</code></p>
 {{else}}
 <p>No iPhone build is published yet.</p>
 {{end}}
 </section>
-
-<p class="muted">To check a download on a computer, run <code>shasum -a 256 &lt;file&gt;</code> and compare the result with the SHA-256 above.</p>
 </main>
 </body>
 </html>

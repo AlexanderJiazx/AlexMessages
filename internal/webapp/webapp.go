@@ -35,8 +35,6 @@ func NewEngine() *gin.Engine {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
-	// X-AM-Client: the native-build hard gate and per-session client record.
-	r.Use(clientInfoMiddleware)
 
 	// The service worker must be served from the root scope so it can intercept
 	// push events for the whole app. We keep the source under static/.
@@ -92,13 +90,11 @@ func NewEngine() *gin.Engine {
 // client (which has no cookie jar) sends the same session token as
 // `Authorization: Bearer <token>` — /api/login returns it as session_token.
 func requireUser(c *gin.Context) (*db.User, bool) {
-	token := requestSessionToken(c)
-	user := auth.ResolveSession(token, "user")
+	user := auth.ResolveSession(requestSessionToken(c), "user")
 	if user == nil {
 		httpx.Error(c, http.StatusUnauthorized, "not authenticated")
 		return nil, false
 	}
-	c.Set(sessionTokenKey, token)
 	return user, true
 }
 

@@ -35,7 +35,6 @@ func main() {
 	if err := push.BootstrapVAPID(); err != nil {
 		log.Fatalf("vapid bootstrap: %v", err)
 	}
-	db.AddMaintenance(webapp.PruneOTACensus)
 	db.StartBackgroundMaintenance()
 
 	addr := envOr("HOST", "0.0.0.0") + ":" + envOr("PORT", "8765")

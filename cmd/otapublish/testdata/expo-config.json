@@ -1,1 +1,0 @@
-{"name":"Alex Messages","slug":"alex-messages","version":"1.2.0","runtimeVersion":{"policy":"fingerprint"},"ios":{"bundleIdentifier":"com.alexanderjia.messages","buildNumber":"2"},"android":{"package":"com.alexanderjia.messages","versionCode":2},"extra":{"defaultServerUrl":"https://messages.alexanderjia.com"},"sdkVersion":"57.0.0","platforms":["ios","android"]}

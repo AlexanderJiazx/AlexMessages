@@ -48,6 +48,15 @@ func SessionToken(c *gin.Context, allowQuery bool) string {
 	return ""
 }
 
+// Scheme is "https" when the client reached this server over HTTPS (see
+// secureRequest), else "http".
+func Scheme(r *http.Request) string {
+	if secureRequest(r) {
+		return "https"
+	}
+	return "http"
+}
+
 func secureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
@@ -72,11 +81,7 @@ func WebSocketOrigin(r *http.Request) bool {
 	if err != nil || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	scheme := "http"
-	if secureRequest(r) {
-		scheme = "https"
-	}
-	if strings.EqualFold(u.Host, r.Host) && u.Scheme == scheme {
+	if strings.EqualFold(u.Host, r.Host) && u.Scheme == Scheme(r) {
 		return true
 	}
 	for _, allowed := range strings.Split(os.Getenv("WS_ALLOWED_ORIGINS"), ",") {

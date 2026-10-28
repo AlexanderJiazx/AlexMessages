@@ -59,8 +59,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     scope       TEXT    NOT NULL DEFAULT 'user',   -- 'user' or 'admin'
     created_at  INTEGER NOT NULL,
     expires_at  INTEGER NOT NULL,
-    client          TEXT NOT NULL DEFAULT '',      -- the mobile app's X-AM-Client
-    client_seen_at  INTEGER,                       -- when client was last written
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -212,8 +210,6 @@ func InitDB() error {
 		{"calls", "channel", "ALTER TABLE calls ADD COLUMN channel TEXT NOT NULL DEFAULT ''"},
 		{"calls", "media", "ALTER TABLE calls ADD COLUMN media TEXT NOT NULL DEFAULT 'audio'"},
 		{"calls", "message_id", "ALTER TABLE calls ADD COLUMN message_id TEXT REFERENCES messages(id) ON DELETE CASCADE"},
-		{"sessions", "client", "ALTER TABLE sessions ADD COLUMN client TEXT NOT NULL DEFAULT ''"},
-		{"sessions", "client_seen_at", "ALTER TABLE sessions ADD COLUMN client_seen_at INTEGER"},
 	}
 	for _, m := range migrations {
 		if err := ensureColumn(m.table, m.column, m.ddl); err != nil {
@@ -512,13 +508,6 @@ func GetSession(token string) (*Session, error) {
 		return nil, nil
 	}
 	return &s, nil
-}
-
-// RecordSessionClient stores the mobile app's X-AM-Client value on a session
-// (OTAUpdatePlan.md, D8 item 2). The caller limits how often it writes.
-func RecordSessionClient(token, client string, seenAt int64) error {
-	_, err := pool.Exec("UPDATE sessions SET client = ?, client_seen_at = ? WHERE token = ?", client, seenAt, token)
-	return err
 }
 
 func DeleteSession(token string) error {

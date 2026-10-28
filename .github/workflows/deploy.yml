@@ -106,10 +106,7 @@ jobs:
         run: |
           mkdir -p bin
           # main.commit: each binary logs the commit it was built from.
-          # -trimpath leaves -ldflags out of the build info, so otactl
-          # version reads the commit from vcs.revision, which go build
-          # stamps from this checkout. otactl manages data/ota on the Pi.
-          for c in server admin meet otactl; do
+          for c in server admin meet; do
             GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
               go build -trimpath -ldflags="-s -w -X main.commit=$GITHUB_SHA" -o "bin/$c" "./cmd/$c"
           done
