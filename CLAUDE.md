@@ -103,13 +103,11 @@ the app has **diverged** from the Python original:
   while the app is closed, through a
   foreground service with its own socket (`/ws?mode=calls`). See **DM calls**
   below.
-- **OTA updates (server side and tools; NOT live)** — `cmd/server` serves
-  the Expo Updates protocol v1 manifest endpoint, the update files, the
-  `/app` install page and the native-build policy from the update store
-  `data/ota/`; `cmd/otactl` manages that store on the Pi and
-  `cmd/otapublish` signs and publishes from the publisher's Mac. Nothing is
-  deployed, the keys do not exist, and no app build contains expo-updates
-  yet: OTA updates do NOT work. See **OTA updates** below.
+- **OTA updates (in the code; NOT deployed)** — release builds of the mobile
+  app download new JavaScript from `cmd/server` by themselves (expo-updates,
+  unsigned), and `mobile/scripts/publish-update.sh` publishes an update with
+  one command. `/app` is the install page with the APK and IPA downloads.
+  See **OTA updates** below.
 - **Branding** — user-visible name is **"Alex Messages"**. The Go module
   remains `alexmessage`.
 
@@ -130,8 +128,7 @@ served through `httpx.NoListFS`, so a request for a directory returns 404
 instead of a file listing. Each `main` also calls
 `db.StartBackgroundMaintenance()`, a 10-minute sweep that deletes upload files
 older than 24 hours that no attachment references, prunes expired sessions,
-and caps the debug ring buffer; `cmd/server` adds the OTA census prune to it
-with `db.AddMaintenance`. Each `main` logs
+and caps the debug ring buffer. Each `main` logs
 `<server|admin|meet> built from commit <sha>` at start: `deploy.yml` sets
 `main.commit` with `-ldflags "-X main.commit=$GITHUB_SHA"`, and a build
 without the flag logs `unknown`.
@@ -143,9 +140,6 @@ cmd/
   server/main.go   entrypoint: bootstrap + serve user app
   admin/main.go    entrypoint: bootstrap + serve admin panel
   meet/main.go     entrypoint: bootstrap + serve Alex Meet
-  otactl/          the OTA update store's tool on the Pi (verifies, never signs)
-  otapublish/      the publisher's Mac tool: keys, signed OTA publish, native
-                   builds, audit, restore (never deployed)
 internal/
   db/        SQLite schema + every query helper; debug.go (ring buffer) + maintenance.go
   auth/      scrypt hashing, session tokens, admin bootstrap
@@ -157,9 +151,6 @@ internal/
   webapp/    the user app: engine + one file per route module
   adminapp/  the admin panel + adminapp/debug.go (debug-console read API)
   meet/      Alex Meet (state.go, ws.go, routes.go, volctoken.go)
-  ota/       OTA update store, manifest selection, signature checks, policy;
-             ota/census (install census), ota/sign (signing: never in a
-             server binary), ota/otatest (test fixtures)
 deploy/      remote_deploy.sh (runs on the Pi for every deploy) + its Python test
 shared/      @alexmessages/shared — framework-agnostic TS core (see shared/README.md)
 web/         React web client (Vite + React 18 + TS)          (see web/README.md)
@@ -175,9 +166,8 @@ The webapp route files: `pages.go`, `auth_routes.go`, `me.go`, `account.go`
 `transcribe.go` (voice dictation proxy), `calls.go` (DM calls: state machine +
 signaling), `call_listener.go` (the call listener socket that rings a closed
 Android app) and `ice.go` (STUN/TURN servers for calls), plus `avatar.go`
-(profile photos), `linkpreview.go` (link previews), `ota_routes.go` (OTA
-updates: manifest, update files, `/app`, native-build policy) and
-`client_info.go` (the mobile app's `X-AM-Client` header and the hard gate).
+(profile photos), `linkpreview.go` (link previews) and `ota_routes.go`
+(OTA updates of the mobile app, and the `/app` install page).
 
 ## Clients
 
@@ -278,6 +268,11 @@ Android from one codebase, plus `expo start --web`.
   the process lives, `store.onNotify` posts a per-conversation notification,
   and taps route back to that conversation.
 - `src/audio.ts` — `useVoiceRecorder` (expo-audio) for dictation + voice notes.
+- `src/updates.ts` — over-the-air updates (expo-updates): applies a
+  downloaded update when the app returns after 15 minutes away; the Settings
+  footer's "built-in code" / "update of …" label. `scripts/publish-update.sh`
+  publishes an update, `scripts/publish-app.sh` a new app build (see **OTA
+  updates**).
 - `src/call/` — DM calls: `CallHost` (opens the `app/call.tsx` full-screen
   route, call sounds, the floating tile), `CallScreen`, `platform.native.ts`
   (react-native-webrtc behind the shared `CallPlatform`), `CallVideo`
@@ -706,134 +701,95 @@ cards in the thread with a
    progress.
 7. Group calls are Alex Meet's job (below), not DM calls'.
 
-## OTA updates (Phases 1–2 of `OTAUpdatePlan.md`: server and tools)
+## OTA updates (expo-updates, unsigned)
 
-**Status (2026-10-25): OTA updates do NOT work.** The server side and the
-tools below are in local commits only (not pushed, not deployed). The keys
-do not exist (Phase 3), and no app build contains expo-updates (Phases
-4–6), so `otapublish ota` stops at its runtime step and `otapublish native`
-cannot build a release. The tools have run only in tests, against a
-temporary directory standing in for the Pi. The operations (the tools'
-commands, emergency commands, kill switch, publishing, audit, restore,
-keys, leaf renewal) are in `DEPLOY.md` → **OTA updates of the mobile app**.
+**Status (2026-10-27): OTA updates are NOT live.** Nothing below is pushed
+or deployed, and no phone has an app build that contains expo-updates yet.
+Release builds of the app download new JavaScript from `cmd/server` by
+themselves. The operations (publishing an update, publishing a new app
+build, rolling back) are in `DEPLOY.md` → **Mobile app updates**.
+Tested on 2026-10-27 against a local `cmd/server`, in the iOS Simulator and
+in the Android emulator: a release build ran its built-in code, downloaded
+a published update at one start and ran it from the next start, and, back
+from the background, downloaded a newer update and applied it at the next
+return without a restart (for that test, the running update waited 10 s
+instead of 15 minutes). An update published before the app was built is
+never taken: expo-updates only takes code newer than the code it runs.
+`publish-app.sh android` and `publish-app.sh ios` built the APK and the IPA
+(version 1.2.0, build 2, the production update URL), and both scripts'
+uploads worked against a stand-in for `ssh` that ran the remote command on
+the Mac. NOT tested: the Pi itself (nginx, Cloudflare) and real phones,
+including an IPA signed by 万能签.
 
-- **Update store** `data/ota/` (`OTA_DIR` overrides it; `ota.DirFromEnv`).
-  Layout and file formats: `internal/ota/store.go` and `DEPLOY.md`. The
-  server only reads it; `bin/otactl` is its only writer.
-  Without `data/ota/FORMAT` the store counts as absent and every manifest
-  request gets 204. Deploys never touch it: `deploy/remote_deploy.sh`
-  refuses a release that contains `data/`.
-- **`internal/ota`**: store reads (channel pointers in state
-  `update | rollback | halted | test_unsigned`, registered runtimes,
-  `revoked.txt`, the signed `manifest`/`rollback` bytes with their `.sig`
-  and `.leaf` files),
-  `Store.Select` (the manifest logic of plan D2: the beta pointer only when
-  `Expo-Extra-Params` has `am_channel="beta"` and a beta pointer exists; a
-  revoked id blocks only a pointer in state `update`), the multipart writer
-  (part headers are written in lowercase, because iOS reads
-  `expo-signature` case-sensitively), RFC 8941 parsing (`expo-signature`,
-  `Expo-Extra-Params`, `Expo-Recent-Failed-Update-IDs`), and
-  certificate-chain verification with expo-updates' rules (`VerifyChain`,
-  `VerifySignature`). `update.go` holds the checks that `otactl` and
-  `otapublish` share: the strict parser of the manifests `otapublish`
-  writes, the `rollBackToEmbedded` directive, `info.json`, and
-  `VerifyUpdateFiles` (an update's files and both signatures against the
-  root). A beta pointer in state `test_unsigned` (`until`, `previous`)
-  serves the unsigned manifest `test/<id>/manifest.json` until `until`
-  (`otactl test-unsigned`, plan step 6.4; `Store.SelectAt`).
-- **`internal/ota/sign`** signs manifests and issues certificates. Only
-  `cmd/otapublish` and tests import it. `TestServerBinariesNeverImportSigning`
-  fails if `cmd/server`, `cmd/admin`, `cmd/meet` or `cmd/otactl` depends on
-  it, on the test fixtures in `internal/ota/otatest`, or on `filippo.io/age`;
-  `TestNoPrivateKeysTracked` fails on a tracked PEM private key or a tracked
-  `.key`, `.p12`, `.pfx`, `.jks` or `.keystore` file (both in
-  `internal/ota/sign/sign_test.go`).
-- **Routes** (`internal/webapp/ota_routes.go`, no login):
-  `GET /api/ota/manifest` (every answer carries `expo-protocol-version: 1`,
-  `expo-sfv-version: 0` and `Cache-Control: private, max-age=0, no-store`;
-  400 for bad headers; 204 when `OTA_DISABLED=1`, when there is no store, or
-  when nothing applies; otherwise a multipart `manifest` or `directive` part
-  plus a `certificate_chain` part holding the leaf named in the `.leaf`
-  file), `GET`/`HEAD /ota/assets/<sha256-b64url>.<ext>`,
-  `GET /api/app/latest`, `GET /app` (the install page), and
-  `GET`/`HEAD /app/<android|ios>/AlexMessages-<version>-<build>.<apk|ipa>`.
-  The server never sends `expo-manifest-filters` or
-  `expo-server-defined-headers`. Its 400 and 404 answers carry
-  `Cache-Control: no-store`, because Cloudflare caches 404s by extension.
-- **Install census** (`internal/ota/census`, `data/ota/census.db`, a SQLite
-  file of its own): every manifest request with `EAS-Client-ID` and
-  `Expo-Embedded-Update-ID` updates that install's row. A new row needs an
-  embedded id registered in `runtimes/` and fewer than 5,000 rows. A new
-  failed update id or fatal error emits the debug event `ota.client_failure`
-  (at most 30 per hour). Every field is an unauthenticated claim. `cmd/admin`
-  serves it at `GET /api/ota/installs`. `POST /api/me/delete` and the admin
-  user delete remove the rows whose `am_uid` is that user, and
-  `GET /api/me/export` includes them as `ota_installs`. The maintenance
-  sweep of `cmd/server` deletes rows unseen for 90 days.
-- **`X-AM-Client`** (`internal/webapp/client_info.go`), sent by app builds
-  from build 2 on: `v=1;platform=android;version=1.2.0;build=2;runtime=<fp>;update=<uuid|embedded>;channel=<production|beta>`
-  (the Android ring service sends `v=1;platform=android;build=2;component=ring`).
-  REST calls send it as a header; the `/ws` upgrade sends it as the
-  `client=` query parameter. On an authenticated request it is stored on
-  the session (`sessions.client`, `sessions.client_seen_at`): when it
-  changed, else at most once per 10 minutes, and never the ring service's
-  value. A missing or malformed value is never gated and stores nothing, so
-  the web client and the builds before 2 are unaffected.
-- **Native-build policy** `data/ota/native/policy.json`: per platform
-  `min_build`, `hard_gate` and `latest {version, build, url, sha256, size,
-  notes}`. With a valid `X-AM-Client`, the WS `init` carries
-  `client_policy {state: ok | update_available | update_required, latest}`
-  (the soft gate). Only while `hard_gate` is true for the platform and the
-  build is below `min_build` (the hard gate): REST calls under `/api/`
-  answer 426 (except `/api/app/`, `/api/ota/`, `/api/debug/report` and
-  `/api/logout`), and `/ws` and the call listener close with **4426** before
-  the 4401 check. A policy file that cannot be read or is invalid gates
-  nobody.
-- **`cmd/otactl`** (cross-compiled into `bin/` by `deploy.yml`; runs on the
-  Pi): the only writer of `data/ota/`. It holds no key: `ingest` verifies an
-  upload in `incoming/<publishId>/` completely (chains, asset hashes, both
-  signatures of every update, write-once bytes) before it moves anything;
-  `activate` / `promote` / `halt` / `rollback-embedded` / `restore-pointer`
-  / `test-unsigned` switch pointers; `revoke`, `register-runtime`, `policy`,
-  `repair-asset`; read-only `status`, `census`, `runtimes`, `doctor`,
-  `inventory`, `version`; `emergency` (the restricted key's forced command:
-  one word of `halt`, `rollback-embedded`, `status`). It finds the store
-  without the shell's help: `--ota`, else `$OTA_DIR`, else `../data/ota`
-  next to its executable when that sits in `bin/` (the Pi), else
-  `./data/ota`; so `OTA_DIR` must stay unset on the Pi (SSH sessions never
-  read the units' environment file). Every changing command holds
-  `data/ota/.lock` and appends a JSON line to `data/ota/log/actions.log`.
-  Every command except `init` and `version` exits with status 3 while the
-  store has no `FORMAT` file; `otapublish` reads only that status as "no
-  update store yet" (`otactlNoStore`), and any other failure as an error.
-  `promote` reads `alexmessage.db` read-only (an admin's app session must
-  report the update; no `ota.crash`/`ota.error` report may name it).
-- **`cmd/otapublish`** (runs on the publisher's Mac; never deployed; the only
-  binary that imports `internal/ota/sign` and `filippo.io/age`): `keys init-root |
-  issue-leaf | upload-certs | show`, `ota` (D6: 18 steps; `--dry-run` runs
-  steps 1–12; `--fixture` replaces steps with prepared data;
-  `--profile drill` uses throwaway keys and a local store), `promote`,
-  `republish`, `resign-active`, `status`, `native` (D10: unsigned Gradle
-  release build, unsigned `xcodebuild archive` packed into an IPA,
-  `zipalign` + `apksigner` with the release keystore, the artifact checks
-  in `artifacts.go` that read the APK's binary XML/resources (`axml.go`)
-  and the IPA's plists (`plist.go`), `build.json` in
-  `<archive>/builds/native-N-<UTC>/`, `--no-upload`, `--upload-only`),
-  `audit [--record]` and `restore-pi`. Every keyed command and every
-  publish runs in two stages: stage 1 checks the commit out into a clean
-  git worktree, builds otapublish there with the commit stamped in, and runs
-  it with `--in-worktree`. The archive (`~/AlexMessagesReleases`,
-  `$AM_RELEASES_DIR`) is authoritative for the write-once files; the Pi for
-  the pointers, `revoked.txt` and `policy.json` (layout in `DEPLOY.md`).
-  **Claude never runs a keyed command (`keys …`, `ota` without
-  `--dry-run`, `republish`, `resign-active`, `native`) through its own
-  command tool**: Claude starts it in the user's Terminal panel, where the
-  user types the passphrase or password. Claude may run `ota --dry-run`,
-  `status` and `audit` itself.
-- **`.github/workflows/mobile-checks.yml`** (never run on GitHub yet): on
-  every push and pull request to `main`/`react`, the two guard tests above,
-  `shared` typecheck + Vitest and `mobile` `tsc --noEmit`, each after
-  `npm ci --ignore-scripts`. No secrets.
+- **The app** (`mobile/`) contains `expo-updates` with Expo's defaults: every
+  start of a release build asks `GET /api/ota/manifest` for the newest update
+  of its platform and runtime version, downloads it in the background
+  (`checkAutomatically: ON_LOAD`, `fallbackToCacheTimeout: 0`), and runs it
+  from the next start. `mobile/app.json`: `version` 1.2.0, `runtimeVersion`
+  policy `appVersion` (the runtime version is `expo.version`), `updates.url`
+  `https://messages.alexanderjia.com/api/ota/manifest`. Updates are not
+  signed: the app trusts the server it reaches over HTTPS, as most Expo apps
+  do. `mobile/app.config.js` replaces `updates.url` with `AM_UPDATES_URL`
+  when that is set, for test builds against a local server.
+  `src/updates.ts`: `useUpdatesOnReturn` (called in `session.tsx`) also
+  applies a downloaded update when the app comes back after at least 15
+  minutes in the background (never during a call), and otherwise asks the
+  server again at that moment; `runningCodeLabel` is the Settings footer's
+  "Alex Messages 1.2.0 · built-in code" or "· update of Oct 27 at 8:32 PM"
+  (the update's publish time, in the phone's locale).
+  Debug builds (`npm run ios`, `npm run android`) load their JavaScript
+  from Metro and never use updates ("development build").
+- **Versions**: native build N is version `1.N.0` with `android.versionCode`
+  N and `ios.buildNumber` "N" (build 1 was 1.0.0, without expo-updates;
+  build 2 is 1.2.0, the first with it). An update reaches only the apps
+  whose version equals the version it was published under, so an update
+  never runs on native code it was not built for. A change to native code
+  (a new native module or config plugin, a native setting in `app.json`, a
+  change under `mobile/modules/`) needs the next version and a new build.
+- **Server** (`internal/webapp/ota_routes.go`, no login; expo-updates sends
+  no session): `GET /api/ota/manifest` reads `expo-platform` (`ios` or
+  `android`) and `expo-runtime-version`; 400 for a bad value, 204 when there
+  is no update, else 200 `multipart/mixed` with one `manifest` part (Expo
+  Updates protocol v1, part headers in lowercase). Every answer carries
+  `expo-protocol-version: 1`, `expo-sfv-version: 0` and
+  `Cache-Control: private, max-age=0, no-store`. The update served is the
+  newest directory `data/updates/<runtime version>/<unix seconds>/` (an
+  all-digit name; a dot-prefixed name is an upload in progress and is
+  skipped) that has a bundle for the platform. It holds the output of
+  `npx expo export` (`metadata.json`, `_expo/static/js/<platform>/…`,
+  `assets/`) plus `expoConfig.json` (`npx expo config --type public`),
+  which the manifest carries as `extra.expoClient` (expo-constants reads
+  `Constants.expoConfig` from it while an update runs). The manifest `id`
+  is a UUID-shaped SHA-256 of those two files and `createdAt` is the
+  directory name. Asset URLs are absolute (`httpx.Scheme` + `Host`, so
+  https behind the TLS proxy) and point at `GET /ota/files/<runtime
+  version>/<unix seconds>/<path>`, which serves `data/updates/`. Each
+  update's manifest is built once per platform and kept in memory: a
+  published update never changes.
+- **Publishing**: `mobile/scripts/publish-update.sh` exports both platforms
+  and copies the export over SSH (`PI`, `PI_PORT`; default
+  `alexander@35.226.215.209`, port 2222) into
+  `~/alexmessage/data/updates/<version>/.<unix seconds>`, then renames it to
+  `<unix seconds>`. `OTA_LOCAL=<data dir>` publishes into a local server's
+  `data/` instead. Deploys never touch `data/` (`deploy/remote_deploy.sh`
+  refuses a release that contains it).
+- **Rolling back**: expo-updates only takes an update newer than the one it
+  runs, so deleting the newest update directory does not undo it on phones
+  that already downloaded it. To undo an update, publish the old code again
+  (`git revert` the bad commit, run the script): the republished copy is
+  the newest.
+- **App downloads**: `GET /app` is the install page (Android and iPhone
+  steps); `GET`/`HEAD /app/AlexMessages.apk` and `/app/AlexMessages.ipa`
+  serve the files in `data/app/` (`Cache-Control: no-store`, because the
+  names never change and Cloudflare caches `.apk` by extension).
+  `mobile/scripts/publish-app.sh android|ios` runs `expo prebuild --clean`
+  and a release build (`gradlew assembleRelease`; an unsigned `xcodebuild
+  archive` packed into an IPA for 万能签) and copies the file there over
+  SSH (`APP_LOCAL=<data dir>` copies it into a local server's `data/`).
+  Android release builds are signed with the debug keystore of Expo's
+  Android template (`android/app/debug.keystore`, the same file after every
+  prebuild), so a new APK installs over the old app and keeps its data.
+- Tests: `internal/webapp/ota_routes_test.go`.
 
 ## Alex Meet (cmd/meet, internal/meet)
 
@@ -1047,14 +1003,6 @@ Environment variables (same semantics as the Python version):
 - `OPENROUTER_API_KEY` — required for `POST /api/transcribe` to reach a real
   model (absent in tests). `OPENROUTER_TRANSCRIBE_MODEL` and
   `OPENROUTER_BASE_URL` override the model and endpoint.
-- `OTA_DIR` — the OTA update store (default `data/ota`); read by
-  `cmd/server` and `cmd/admin` (the census), so set both to the same value.
-  Leave it unset on the Pi: `bin/otactl` over SSH never reads the units'
-  environment file and finds the store next to its own executable.
-  `OTA_DISABLED=1` — the OTA kill switch: `/api/ota/manifest` answers 204 to
-  every request (see **OTA updates**).
-- `AM_RELEASES_DIR` — `otapublish`'s release archive on the Mac (default
-  `~/AlexMessagesReleases`; `--archive` overrides both).
 
 `go vet ./...` and `go build ./...` should both stay clean.
 
@@ -1091,12 +1039,8 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   `internal/webapp/transcribe_test.go`, `internal/webapp/calls_test.go`,
   `internal/webapp/call_listener_test.go`, `internal/webapp/review_test.go`,
   `internal/meet/volctoken_test.go`, `internal/meet/routes_test.go`,
-  `internal/debuglog/debuglog_test.go`, the OTA tests
-  `internal/ota/{sfv,verify,store,manifest,client,update}_test.go`,
-  `internal/ota/census/census_test.go`, `internal/ota/sign/sign_test.go`,
-  `internal/webapp/ota_routes_test.go`, `internal/db/session_client_test.go`,
-  `internal/adminapp/ota_test.go`, `cmd/otactl/{otactl,gate}_test.go`,
-  `cmd/otapublish/*_test.go`): DB layer (DM state, read receipts,
+  `internal/debuglog/debuglog_test.go`,
+  `internal/webapp/ota_routes_test.go`): DB layer (DM state, read receipts,
   attachment dims, paging, debug filters/prune), link-preview SSRF guard,
   image-dimension extraction, transcribe format/model mapping + upstream
   handling, VolcEngine token wire format, debug ingest rate-limiter; the DM
@@ -1118,31 +1062,23 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   cutoffs; concurrent DM-state upserts; WAL and the message sequence
   surviving a purge or a migration; `BEGIN IMMEDIATE` waiting out another
   writer; orphan upload cleanup; a revoked cookie reaching Alex Meet's guest
-  gate. OTA: SFV parsing; the certificate-chain rules of expo-updates; the
-  store formats and atomic writes; every manifest answer (each 204 path,
-  `OTA_DISABLED`, the directive, 400s, the exact multipart bytes and a
-  signature that verifies against the root); asset and download headers,
-  Range and HEAD; census limits; the `X-AM-Client` record and both gates
-  (REST 426, WS 4426, `client_policy` in `init`); census rows covered by
-  account deletion and export; the session-column migration; the import
-  guard that keeps `internal/ota/sign` and age out of the binaries deployed
-  to the Pi, and the private-key guard. The OTA tools: every `otactl`
-  command against a temporary store (ingest verification, pointer
-  switching, emergency, the promote gate on a temporary database), and every
-  `otapublish` command against a fake Pi (a temporary directory; fake `ssh`,
-  `gh`, `npm`, `npx`, `gradlew`, `pod`, `xcodebuild`, `zipalign` and
-  `apksigner` scripts; the real `otactl`; the real webapp engine over
-  `httptest`; throwaway keys and injected passphrases), and the APK and IPA
-  readers against real `aapt2`, `apksigner` and `plutil` output
-  (`cmd/otapublish/testdata/native`).
+  gate. OTA updates: the manifest of the newest update (an upload in
+  progress skipped, the asset hashes, `extra.expoClient`, https URLs behind
+  the TLS proxy), 204 when there is no update, 400 for bad headers, a
+  `metadata.json` naming a file outside its update refused, and the `/app`
+  page and downloads.
   `go test ./...` — DB tests point the package-level path vars at a temp
   dir.
 - **deploy** — `python3 deploy/remote_deploy_test.py` runs
   `deploy/remote_deploy.sh` against scratch directories with fake `sudo`,
   `curl` and `sleep`: the React build is replaced whole, a failed health
   check or a missing React build restores the old release, `data/` is
-  byte-identical after a deploy and after a rollback, a release that
-  contains `data/` is refused, and `bin/otactl` is installed by rename.
+  byte-identical after a deploy and after a rollback, and a release that
+  contains `data/` is refused.
+- **CI** — `.github/workflows/mobile-checks.yml` (never run on GitHub yet):
+  on every push and pull request to `main`/`react`, `shared` typecheck +
+  Vitest and `mobile` `tsc --noEmit`, each after `npm ci --ignore-scripts`.
+  No secrets.
 - **shared** — `cd shared && npm test` (Vitest, 92 tests in 6 files): store
   reducers (optimistic send → delivered → read, edits, replies, unread),
   socket reconnect/queue, api error mapping, format helpers, WAV encoding,
@@ -1363,11 +1299,7 @@ partners, thread history, unread counts), the server closes the socket with
 1011 (`init failed`) instead of sending a partial `init`, and the client
 reconnects. HTTPS cookies carry Secure, including requests forwarded by
 loopback nginx with `X-Forwarded-Proto: https`; direct localhost HTTP remains
-usable. Before the 4401 check, the main-app `/ws` and the call listener close
-with **4426** a mobile build that the OTA hard gate refuses (its
-`X-AM-Client` build is below `min_build` while `hard_gate` is on; see **OTA
-updates**). The gate is off by default, and a socket without `X-AM-Client`
-is never gated.
+usable.
 
 ### Identity, DMs, per-user DM state, lazy history
 
@@ -1384,8 +1316,7 @@ persisted `client_id` prevents duplicate messages on Retry. The DB schema
 migrates added columns (`users.avatar`, `attachments.width/height`,
 `dm_state.force_unread`, `dm_state.last_read_position`,
 `dm_state.cleared_position`, `messages.edited_at`, `messages.position`,
-`messages.client_id`, `calls.channel`, `calls.media`, `calls.message_id`,
-`sessions.client`, `sessions.client_seen_at`) on
+`messages.client_id`, `calls.channel`, `calls.media`, `calls.message_id`) on
 startup via `ensureColumn`, tolerant of the three binaries racing the same
 ALTER. A one-time migration, recorded as `message_positions_v1` in the
 `schema_migrations` table, back-fills `messages.position` and the DM
@@ -1417,11 +1348,13 @@ Lives under `data/` (gitignored), created on first run:
 - `data/avatars/<user_id>_<token>.<ext>` — profile photos; replaced on change,
   removed on account deletion.
 - `data/vapid_private.pem` / `data/vapid_public.txt` — VAPID key pair.
-- `data/ota/` — the OTA update store (`OTA_DIR` overrides it), including the
-  install census `data/ota/census.db`. It does not exist until `bin/otactl
-  init` creates it (on the Pi: release day, Phase 6 of `OTAUpdatePlan.md`);
-  without it the manifest endpoint answers 204. Deploys never write into
-  `data/`.
+- `data/updates/<app version>/<unix seconds>/` — the published OTA updates
+  of the mobile app (`mobile/scripts/publish-update.sh` writes them; see
+  **OTA updates**). Without it the manifest endpoint answers 204.
+- `data/app/AlexMessages.apk` / `data/app/AlexMessages.ipa` — the app
+  downloads of the `/app` page (`mobile/scripts/publish-app.sh` writes them).
+
+Deploys never write into `data/`.
 
 Alex Meet rooms are in-memory only — a meet-server restart ends all meetings.
 
@@ -1439,14 +1372,12 @@ callee is visible, see **DM calls**)/`ping`; server sends `init`/`message`
 `call_signal`/`call_resume` (client) and `call_outgoing`/`call_incoming`/
 `call_ringing`/`call_accepted`/`call_signal`/`call_resumed`/`call_ended`/
 `call_error` (server) — see **DM calls**. `/ws?mode=calls` is the call
-listener socket (ringing only; see **DM calls**). A mobile build from build 2
-on adds `client=<X-AM-Client value>` to the `/ws` upgrade; its `init` then
-carries `client_policy`, and the OTA hard gate closes it with 4426 (see **OTA
-updates**). The Alex Meet control-plane protocol is documented above.
+listener socket (ringing only; see **DM calls**). The Alex Meet
+control-plane protocol is documented above.
 
-OTA routes (no login): `GET /api/ota/manifest`, `GET`/`HEAD /ota/assets/…`,
-`GET /api/app/latest`, `GET /app`, `GET`/`HEAD /app/<android|ios>/…`
-(`internal/webapp/ota_routes.go`); admin: `GET /api/ota/installs`.
+OTA routes (no login; `internal/webapp/ota_routes.go`):
+`GET /api/ota/manifest`, `GET /ota/files/…`, `GET /app`, and
+`GET`/`HEAD /app/AlexMessages.apk` / `/app/AlexMessages.ipa`.
 
 Notable additions for the TS clients: `POST /api/transcribe` (dictation proxy
 to OpenRouter) and the `session_token` field on `POST /api/login` (bearer auth

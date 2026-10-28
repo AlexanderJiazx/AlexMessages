@@ -25,6 +25,9 @@ src/
                         app; bearer token in expo-secure-store (AsyncStorage on
                         web); AppState → store.setForeground; Android dev
                         remaps localhost → 10.0.2.2
+  updates.ts            over-the-air updates (expo-updates): applies a
+                        downloaded update when the app returns after 15
+                        minutes away; the Settings footer's code label
   notify.ts             local notifications (expo-notifications); taps route
                         back to the conversation — the managed-Expo analogue of
                         the legacy Android MessagingService
@@ -111,6 +114,29 @@ npm run web          # react-native-web build in the browser
 
 For a device build against a local backend, start the Go server on `:8765`
 first (`ADMIN_PASSWORD=… PORT=8765 go run ./cmd/server` from the repo root).
+
+## Updates and new app builds
+
+Release builds download new JavaScript from the server by themselves
+(expo-updates; root CLAUDE.md → **OTA updates**, DEPLOY.md → **Mobile app
+updates**). Debug builds (`npm run ios`, `npm run android`) load it from
+Metro and never use updates.
+
+```bash
+scripts/publish-update.sh        # the current JavaScript → every phone on this app version
+scripts/publish-app.sh android   # release APK → /app (raise the version in app.json first)
+scripts/publish-app.sh ios       # unsigned IPA → /app (raise the version in app.json first)
+```
+
+To try updates against a local server in the iOS Simulator (an Android
+release build refuses plain-http URLs), set both
+`AM_UPDATES_URL=http://localhost:8765/api/ota/manifest` and
+`EXPO_PUBLIC_AM_SERVER=http://localhost:8765`, then run
+`npx expo prebuild --platform ios --clean` and
+`npx expo run:ios --configuration Release`, and publish with
+`OTA_LOCAL=<repo root>/data scripts/publish-update.sh` (same two variables
+set). Run `npx expo prebuild --platform ios --clean` again without them
+afterwards: the update URL is written into `ios/` at prebuild.
 
 ## Calls
 
