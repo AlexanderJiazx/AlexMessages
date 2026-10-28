@@ -1,11 +1,13 @@
 import React from "react";
 import { Alert, Pressable, Text, View } from "react-native";
 import { Stack, useRouter, type Href } from "expo-router";
+import Constants from "expo-constants";
 import { useChatState, useSession } from "../../src/session";
 import { colors } from "../../src/theme";
 import { Avatar } from "../../src/components/Avatar";
 import { Icon } from "../../src/components/Icon";
 import { Group, Row, SettingsPage, styles } from "../../src/components/SettingsList";
+import { runningCodeLabel } from "../../src/updates";
 
 /**
  * Settings root — an iOS Settings-style inset-grouped list: the profile
@@ -94,8 +96,10 @@ export default function SettingsScreen() {
               <Row title="Log Out" destructive center onPress={confirmLogout} last />
             </Group>
 
-            <Text style={styles.colophon}>
-              Alex Messages · {serverUrl.replace(/^https?:\/\//, "").replace(/\/+$/, "")}
+            <Text style={styles.colophon} testID="settings-colophon">
+              Alex Messages {Constants.expoConfig?.version} · {runningCodeLabel()}
+              {"\n"}
+              {serverUrl.replace(/^https?:\/\//, "").replace(/\/+$/, "")}
             </Text>
           </>
         )}

@@ -38,6 +38,7 @@ import { ensureNotificationPermission, presentMessageNotification } from "./noti
 import { callPlatform } from "./call/platform";
 import { attachSystemCalls, notifyIncomingCall, notifyMissedCall } from "./call/system";
 import { CallRinger, hasRingService } from "../modules/call-ringer";
+import { useUpdatesOnReturn } from "./updates";
 
 /** Upload part reader for Expo's fetch (see `ApiClientOptions.readFile`). */
 const readLocalFile =
@@ -284,6 +285,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     store.setForeground(AppState.currentState === "active");
     return () => sub.remove();
   }, [store]);
+
+  useUpdatesOnReturn(store);
 
   // Back on screen: notifications may have been allowed or turned off in the
   // system settings, or Android may have stopped the ring service.
