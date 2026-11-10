@@ -54,8 +54,8 @@ src/
   components/
     DMList.tsx          pinned/recent conversation rows + swipe/long-press actions
     ConversationView.tsx
-    MessageList.tsx     inverted FlatList; keys on store.version so live
-                        updates always re-render
+    MessageList.tsx     inverted FlatList; rows keyed by messageKey(m), so a
+                        bubble survives its optimistic → confirmed id change
     Bubble.tsx          bubble: reply refs, (edited) tag, media, long-press menu
     Composer.tsx        pill composer: text, attachments, dictate button
     DictationBar.tsx    ChatGPT-style dictation bar (waveform/timer/stop/send-audio/send)
@@ -66,11 +66,11 @@ src/
                         on Android
     SwiftUI.tsx, JetpackCompose.tsx  platform-split @expo/ui primitives
                         (real on iOS / Android respectively, stubs elsewhere)
-    Sheet.tsx           shared bottom-sheet card pattern
     attachments.tsx     image/video/audio/GIF/file rendering
     ImageViewer.tsx     fullscreen image viewer
     CallEntry.tsx       finished-call card in the thread ("Call again")
-    Avatar.tsx, Icon.tsx, Toasts.tsx
+    Avatar.tsx, Icon.tsx
+    Toasts.tsx          ToastHost: the one toast stack, mounted at the root
 assets/icons/           Android vector drawables (the call dropdown's icons)
 modules/                local Expo modules
   native-menu/          iOS (Swift): UIKit context menus, glass menu button,
@@ -128,6 +128,12 @@ scripts/publish-app.sh android   # release APK → /app (raise the version in ap
 scripts/publish-app.sh ios       # unsigned IPA → /app (raise the version in app.json first)
 ```
 
+`publish-update.sh` refuses to run while `mobile/` or `shared/` has
+uncommitted files, runs the `shared/` and `mobile/` typechecks and the
+`shared/` tests first, and stores the commit in the update (`commit.txt`).
+Both scripts upload with a SHA-256 check on the Pi
+(`scripts/lib-upload.sh`, tested by `scripts/test-upload.sh`).
+
 To try updates against a local server in the iOS Simulator (an Android
 release build refuses plain-http URLs), set both
 `AM_UPDATES_URL=http://localhost:8765/api/ota/manifest` and
@@ -168,8 +174,8 @@ call screen over the lock screen). While it runs, a silent "Ready for calls"
 notification stays in the notification shade. Settings → Notifications →
 **Ring when the app is closed** (default on) turns it off. Signing out stops
 the service, and so does an app start that ends on the login screen (no
-stored token, or the startup `GET /api/me` fails; any failure of that request,
-a network error included, signs the user out). The service needs
+stored token, or the startup `GET /api/me` answers 401 or 403; a network
+error or a server error keeps the user signed in, and the app reconnects). The service needs
 notifications to be allowed; when notifications, full-screen calls, or the
 battery-optimization exemption are off, the same page shows a button that
 opens the matching system setting.

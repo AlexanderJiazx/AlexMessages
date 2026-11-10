@@ -21,6 +21,7 @@ import {
   useGenericKeyboardHandler,
   useKeyboardState,
 } from "react-native-keyboard-controller";
+import { useFocusEffect } from "expo-router";
 import { nameFor } from "@alexmessages/shared";
 import { toast, useChatState, useSession } from "../session";
 import { dismissForChannel } from "../notify";
@@ -76,16 +77,28 @@ export function ConversationView({
   const voiceTall = useSharedValue(0);
   const keyboardUp = useKeyboardVisible(!ios);
 
-  // Mark the channel active for read receipts; clear its notification.
+  // The conversation on screen is the active one (read receipts, sends,
+  // its notification cleared) — selected whenever its screen gains focus,
+  // not only when it mounts: with two conversations stacked (a thread
+  // opened from a contact card over another thread), going back to the one
+  // beneath must select it again, or the composer would have no channel.
+  // A modal sheet over the thread doesn't change it (the store keeps its
+  // reply and staged files).
+  useFocusEffect(
+    useCallback(() => {
+      if (store.state.activeChannel !== channel) store.switchChannel(channel);
+      void dismissForChannel(channel);
+    }, [channel, store])
+  );
   // In the narrow layout, leaving the screen deselects the channel so new
-  // messages stop auto-marking read (the list becomes the "not viewing" state).
-  useEffect(() => {
-    if (store.state.activeChannel !== channel) store.switchChannel(channel);
-    void dismissForChannel(channel);
-    return () => {
+  // messages stop auto-marking read (the list becomes the "not viewing"
+  // state) — unless the screen it uncovers has already selected its own.
+  useEffect(
+    () => () => {
       if (showBack && store.state.activeChannel === channel) store.switchChannel(null);
-    };
-  }, [channel, store, showBack]);
+    },
+    [channel, store, showBack]
+  );
 
   const peerName = nameFor(s.users, store.peerOf(channel));
   // iOS: the native viewer (modules/native-menu), flying out of the bubble's
@@ -167,7 +180,7 @@ export function ConversationView({
     }),
     [keyboardOffset]
   );
-  const keyboardHeight = useKeyboardState((k) => (k.isVisible ? k.height : 0));
+  const keyboardHeight = useKeyboardHeight();
   const topSlack = ios ? Math.max(0, keyboardHeight - keyboardOffset) : 0;
 
   const stream = (
@@ -188,6 +201,7 @@ export function ConversationView({
       pointerEvents="box-none"
     >
       <Composer
+        channel={channel}
         peerName={peerName}
         voiceTall={voiceTall}
         sideInset={edgeInset}
@@ -243,7 +257,9 @@ export function ConversationView({
           <View style={styles.bannerWrap} pointerEvents="none">
             <GlassSurface style={styles.banner}>
               <View style={styles.bannerDot} />
-              <Text style={styles.bannerText}>Reconnecting…</Text>
+              <Text style={styles.bannerText} maxFontSizeMultiplier={1.6}>
+                Reconnecting…
+              </Text>
             </GlassSurface>
           </View>
         )}
@@ -314,7 +330,7 @@ function ComposerDragArea({ children }: { children: React.ReactNode }) {
  *
  * A drag moves the keyboard under the finger, frame by frame (onInteractive).
  */
-function useKeyboardLift(gestureOffset: number, wide: SharedValue<number>): SharedValue<number> {
+function useKeyboardLiftIOS(gestureOffset: number, wide: SharedValue<number>): SharedValue<number> {
   const height = useSharedValue(0);
   const accessory = useSharedValue(gestureOffset);
   useEffect(() => {
@@ -358,6 +374,28 @@ function useKeyboardLift(gestureOffset: number, wide: SharedValue<number>): Shar
   );
   return height;
 }
+
+/** Android: the KeyboardAvoidingView moves the composer; nothing is lifted. */
+function useNoKeyboardLift(): SharedValue<number> {
+  return useSharedValue(0);
+}
+
+function useKeyboardHeightIOS(): number {
+  return useKeyboardState((k) => (k.isVisible ? k.height : 0));
+}
+
+function useNoKeyboardHeight(): number {
+  return 0;
+}
+
+// react-native-keyboard-controller's hooks need its KeyboardProvider, which
+// is mounted on iOS only (app/_layout.tsx); on Android they log a warning on
+// every render. The platform never changes at runtime, so picking the hook
+// once here keeps the hook order stable.
+const useKeyboardLift: (gestureOffset: number, wide: SharedValue<number>) => SharedValue<number> = ios
+  ? useKeyboardLiftIOS
+  : useNoKeyboardLift;
+const useKeyboardHeight: () => number = ios ? useKeyboardHeightIOS : useNoKeyboardHeight;
 
 /** Android only: the KeyboardAvoidingView path drops the bottom inset while typing. */
 function useKeyboardVisible(enabled: boolean): boolean {
@@ -417,7 +455,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 7,
-    height: 30,
+    // A minimum: larger text sizes grow the chip instead of clipping it.
+    minHeight: 30,
+    paddingVertical: 4,
     paddingHorizontal: 12,
     borderRadius: 15,
   },

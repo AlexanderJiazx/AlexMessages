@@ -15,13 +15,39 @@ appId: com.alexanderjia.messages
 - inputText: "${output.TARGET}"
 # iOS keeps the soft keyboard up, covering the newest bubble — dismiss it
 # only when the keyboard is actually open (Android's injected text never
-# opens it, and a stray dismiss would pop the screen instead).
+# opens it, and a stray dismiss would pop the screen instead). Maestro's
+# typing on iOS can drop the soft keyboard and bring it back mid-input
+# (CLAUDE.md → Maestro typing on iOS); settle before and after the dismissal
+# so Send is tapped where it rests, not on the keyboard or while the
+# composer slides.
+- waitForAnimationToEnd
 - runFlow:
     when:
       visible: "return"
     commands:
       - hideKeyboard
+- waitForAnimationToEnd
 - tapOn: "Send"
+# hideKeyboard swipes, and this screen dismisses the keyboard interactively
+# (as Messages does): a short swipe brings the keyboard back, and the tap
+# can land while the composer slides. Tap again only while the text is still
+# in the composer, checked once the screen has settled; a blind retry would
+# hit the microphone button that replaces Send once the text is gone.
+- waitForAnimationToEnd
+- runFlow:
+    when:
+      visible:
+        id: "composer-input"
+        text: "${output.TARGET}"
+    commands:
+      - tapOn:
+          text: "Send"
+          optional: true
+# Sent means the composer gave the text up (a match on the composer's own
+# text would otherwise pass the next check without a send).
+- assertNotVisible:
+    id: "composer-input"
+    text: "${output.TARGET}"
 - runFlow:
     when:
       visible: "return"
@@ -36,12 +62,27 @@ appId: com.alexanderjia.messages
 - tapOn:
     id: "composer-input"
 - inputText: "${output.REPLY}"
+- waitForAnimationToEnd
 - runFlow:
     when:
       visible: "return"
     commands:
       - hideKeyboard
+- waitForAnimationToEnd
 - tapOn: "Send"
+- waitForAnimationToEnd
+- runFlow:
+    when:
+      visible:
+        id: "composer-input"
+        text: "${output.REPLY}"
+    commands:
+      - tapOn:
+          text: "Send"
+          optional: true
+- assertNotVisible:
+    id: "composer-input"
+    text: "${output.REPLY}"
 - runFlow:
     when:
       visible: "return"
@@ -58,11 +99,13 @@ appId: com.alexanderjia.messages
     id: "edit-input"
 - eraseText
 - inputText: "${output.EDITED}"
+- waitForAnimationToEnd
 - runFlow:
     when:
       visible: "return"
     commands:
       - hideKeyboard
+- waitForAnimationToEnd
 - tapOn: "Save"
 - assertVisible: ".*${output.EDITED}.*"
 - assertVisible: "Edited"

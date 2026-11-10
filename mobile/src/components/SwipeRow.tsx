@@ -13,8 +13,7 @@ import Animated, {
 import * as Haptics from "expo-haptics";
 import type { SFSymbol } from "sf-symbols-typescript";
 import { colors, type } from "../theme";
-import type { IconName } from "./Icon";
-import { Glyph } from "./DictationBar";
+import { SymbolIcon, type IconName } from "./Icon";
 
 /** One swipe button. The first action on a side is the outermost one and
  *  is what a full swipe triggers. */
@@ -31,6 +30,9 @@ const ACTION_W = 76;
 /** A swipe past this share of the row width arms the full-swipe action. */
 const FULL = 0.55;
 const SPRING = { damping: 26, stiffness: 260, mass: 0.9 };
+/** Closing never springs past zero: an overshoot would flash the other
+ *  side's buttons at the row's edge (Messages settles without a bounce). */
+const CLOSE_SPRING = { ...SPRING, overshootClamping: true };
 
 /** Only one row is open at a time (like Messages); the list closes it on scroll. */
 let closeOpen: (() => void) | null = null;
@@ -65,7 +67,7 @@ export function SwipeRow({
   const trailW = trailing.length * ACTION_W;
 
   const close = useCallback(() => {
-    tx.value = withSpring(0, SPRING);
+    tx.value = withSpring(0, CLOSE_SPRING);
     armed.value = withTiming(0, { duration: 150 });
     armedTarget.value = 0;
     setOpen(false);
@@ -83,6 +85,9 @@ export function SwipeRow({
   const onBegin = useCallback(() => {
     if (closeOpen && closeOpen !== closeRef.current) closeOpen();
     closeOpen = closeRef.current;
+    // The tap-to-close cover goes up as soon as the row moves: a tap while
+    // it still slides open closes it instead of opening the conversation.
+    setOpen(true);
   }, []);
 
   const tick = useCallback(() => {
@@ -138,7 +143,7 @@ export function SwipeRow({
         tx.value = withSpring(-trailW, SPRING);
         runOnJS(settle)(true);
       } else {
-        tx.value = withSpring(0, SPRING);
+        tx.value = withSpring(0, CLOSE_SPRING);
         runOnJS(settle)(false);
       }
     });
@@ -253,7 +258,7 @@ function ActionButton({
         accessibilityLabel={action.label}
       >
         <Animated.View style={[styles.btnContent, contentStyle]}>
-          <Glyph sf={action.sf} ion={action.ion} size={19} color={colors.surface} />
+          <SymbolIcon sf={action.sf} ion={action.ion} size={19} color={colors.surface} />
           <Text style={styles.btnLabel} numberOfLines={1}>
             {action.label}
           </Text>

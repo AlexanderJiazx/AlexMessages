@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   findNodeHandle,
-  Image,
   Linking,
   Platform,
   Pressable,
@@ -11,6 +10,7 @@ import {
   View,
 } from "react-native";
 import { useAudioPlayer, useAudioPlayerStatus, type AudioPlayer } from "expo-audio";
+import { Image } from "expo-image";
 import { useVideoPlayer, VideoView } from "expo-video";
 import {
   attachmentKind,
@@ -102,10 +102,14 @@ function ImageAttachment({ a, onPress }: { a: Attachment; onPress: (tag: number 
           <Text style={styles.imgErrText}>Couldn't load image</Text>
         </View>
       ) : (
+        // expo-image with a memory cache draws an image it already holds on
+        // the first frame, so a row that scrolls back into the list (or a
+        // reopened thread) never flashes the spinner under it.
         <Image
           source={api.mediaSource(a.url)}
           style={{ width: dw, height: dh }}
-          resizeMode="cover"
+          contentFit="cover"
+          cachePolicy="memory-disk"
           onLoad={() => setState("ok")}
           onError={() => setState("err")}
         />
@@ -361,23 +365,42 @@ function AudioFileAttachment({ a, mine }: { a: Attachment; mine: boolean }) {
 function FileAttachment({ a, mine }: { a: Attachment; mine: boolean }) {
   const uri = useAttachmentUrl(a.url);
   const { api } = useSession();
+  // Downloading before the share sheet opens can take a while: the icon
+  // turns into a spinner, and taps meanwhile are ignored (one download).
+  const [opening, setOpening] = useState(false);
+  const busy = useRef(false);
   const openFile = async () => {
+    if (busy.current) return;
+    busy.current = true;
+    setOpening(true);
     try {
       if (Platform.OS === "web") { await Linking.openURL(uri); return; }
       const source = api.mediaSource(a.url);
       const dest = new File(Paths.cache, a.name.replace(/[\\/:]/g, "_") || "attachment");
       const file = await File.downloadFileAsync(source.uri, dest, {headers: source.headers, idempotent: true});
       await Sharing.shareAsync(file.uri, {mimeType: a.mime});
-    } catch { toast("Couldn't open the file", true); }
+    } catch {
+      toast("Couldn't open the file", true);
+    } finally {
+      busy.current = false;
+      setOpening(false);
+    }
   };
+  const tint = mine ? colors.surface : colors.sageDeep;
   return (
     <Pressable
       style={[styles.file, mine && styles.fileMine]}
       onPress={() => void openFile()}
       accessibilityLabel={`Open file ${a.name}`}
+      accessibilityRole="button"
+      accessibilityState={{ busy: opening }}
     >
       <View style={[styles.fileIco, mine && styles.fileIcoMine]}>
-        <Icon name="document-outline" size={16} color={mine ? colors.surface : colors.sageDeep} />
+        {opening ? (
+          <ActivityIndicator size="small" color={tint} />
+        ) : (
+          <Icon name="document-outline" size={16} color={tint} />
+        )}
       </View>
       <View style={styles.fileMeta}>
         <Text style={[styles.fileName, mine && styles.fileTextMine]} numberOfLines={1}>
@@ -426,7 +449,7 @@ const styles = StyleSheet.create({
     paddingLeft: 3,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(27,36,31,0.55)",
+    backgroundColor: colors.scrim,
   },
   voice: {
     flexDirection: "row",

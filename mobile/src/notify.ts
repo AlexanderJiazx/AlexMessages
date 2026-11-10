@@ -84,10 +84,25 @@ export async function ensureNotificationPermission(): Promise<boolean> {
   return req.granted;
 }
 
+/** Whether notifications may show. Never asks: the app asks once, after
+ *  sign-in (session.tsx), not when the first message arrives mid-chat. */
+async function notificationsGranted(): Promise<boolean> {
+  return (await Notifications.getPermissionsAsync()).granted;
+}
+
+/** Takes down every notification this app posted (sign-out). */
+export async function dismissAllNotifications(): Promise<void> {
+  try {
+    await Notifications.dismissAllNotificationsAsync();
+  } catch {
+    /* noop */
+  }
+}
+
 /** Posts a local notification for an incoming message. */
 export async function presentMessageNotification(n: NotifyEvent): Promise<void> {
   try {
-    if (!(await ensureNotificationPermission())) return;
+    if (!(await notificationsGranted())) return;
     await Notifications.scheduleNotificationAsync({
       identifier: n.channel, // one active notification per conversation
       content: {
@@ -108,7 +123,7 @@ const callNotificationId = (channel: string) => `call:${channel}`;
 /** Posts the banner for a call ringing while the app is in the background. */
 export async function presentCallNotification(n: NotifyEvent): Promise<void> {
   try {
-    if (!(await ensureNotificationPermission())) return;
+    if (!(await notificationsGranted())) return;
     await Notifications.scheduleNotificationAsync({
       identifier: callNotificationId(n.channel),
       content: {

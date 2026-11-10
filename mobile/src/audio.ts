@@ -76,7 +76,12 @@ export interface VoiceRecorder {
   durationMillis: number;
   /** Normalized level 0..1 from the most recent metering sample. */
   level: number;
-  start(): Promise<boolean>;
+  /**
+   * "started"; "failed" (no permission, or the recorder failed); or
+   * "cancelled" when cancel() came while it was starting — then nothing
+   * records and the microphone is released.
+   */
+  start(): Promise<"started" | "failed" | "cancelled">;
   /** Stops and returns { uri, mime, ext } or null on failure/too-short. */
   stop(): Promise<{ uri: string; mime: string; ext: string } | null>;
   cancel(): Promise<void>;
@@ -100,17 +105,33 @@ export function useVoiceRecorder(): VoiceRecorder {
     setLevel(norm);
   }, [db, state.isRecording]);
 
-  const start = async (): Promise<boolean> => {
+  // Bumped by cancel(): a start() that was waiting (on the permission
+  // prompt, the audio session, the recorder) when the user cancelled must
+  // not go on to open the microphone.
+  const attempt = useRef(0);
+
+  const start = async (): Promise<"started" | "failed" | "cancelled"> => {
+    const mine = ++attempt.current;
+    const cancelled = () => attempt.current !== mine;
     try {
       const perm = await AudioModule.requestRecordingPermissionsAsync();
-      if (!perm.granted) return false;
+      if (cancelled()) return "cancelled";
+      if (!perm.granted) return "failed";
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      if (cancelled()) {
+        await enablePlayback();
+        return "cancelled";
+      }
       await recorder.prepareToRecordAsync();
+      if (cancelled()) {
+        await enablePlayback();
+        return "cancelled";
+      }
       recorder.record();
       startedRef.current = Date.now();
-      return true;
+      return "started";
     } catch {
-      return false;
+      return cancelled() ? "cancelled" : "failed";
     }
   };
 
@@ -129,8 +150,11 @@ export function useVoiceRecorder(): VoiceRecorder {
   };
 
   const cancel = async (): Promise<void> => {
+    attempt.current++;
     try {
-      if (state.isRecording) await recorder.stop();
+      // The recorder's own flag, not the last render's state: a recording
+      // that began after that render is stopped too.
+      if (recorder.isRecording || state.isRecording) await recorder.stop();
       await enablePlayback();
     } catch {
       /* noop */

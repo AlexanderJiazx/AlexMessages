@@ -23,5 +23,5 @@ appId: com.alexanderjia.messages
 - tapOn: "Data"
 - assertVisible: "Export my data"
 - runFlow: subflows/nav-back.yaml
-- tapOn: "Done"
+- runFlow: subflows/close-sheet.yaml
 - assertVisible: "Messages"

@@ -12,6 +12,7 @@
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "primaryColor": "#4F7A5E",
     "scheme": "alexmessages",
     "ios": {
       "supportsTablet": true,
@@ -45,6 +46,13 @@
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-status-bar",
+        {
+          "style": "dark"
+        }
+      ],
+      "./plugins/withAndroidLightTheme",
       [
         "expo-build-properties",
         {

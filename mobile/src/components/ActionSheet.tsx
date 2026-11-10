@@ -8,6 +8,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, radius, shadow } from "../theme";
 
 export interface SheetOption {
@@ -54,6 +55,9 @@ export function showActionSheet(cfg: SheetConfig) {
 /** Mount once near the app root — renders the Android bottom sheet on demand. */
 export function ActionSheetHost() {
   const [cfg, setCfg] = useState<SheetConfig | null>(null);
+  // Clear of the navigation bar (gesture handle or buttons): the Modal
+  // draws under it (navigationBarTranslucent, edge to edge).
+  const insets = useSafeAreaInsets();
   useEffect(() => {
     presenter = setCfg;
     return () => {
@@ -64,10 +68,17 @@ export function ActionSheetHost() {
   const close = () => setCfg(null);
   const cancelLabel = cfg.cancelLabel ?? "Cancel";
   return (
-    <Modal transparent animationType="slide" visible onRequestClose={close} statusBarTranslucent>
+    <Modal
+      transparent
+      animationType="slide"
+      visible
+      onRequestClose={close}
+      statusBarTranslucent
+      navigationBarTranslucent
+    >
       <View style={styles.fill}>
         <Pressable style={styles.backdrop} onPress={close} accessibilityLabel="Dismiss" />
-        <View style={styles.card}>
+        <View style={[styles.card, { paddingBottom: insets.bottom + 12 }]}>
           {!!cfg.title && <Text style={styles.title}>{cfg.title}</Text>}
           {!!cfg.message && (
             <Text style={styles.message} numberOfLines={2}>
@@ -122,7 +133,6 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: radius.l,
     borderTopRightRadius: radius.l,
     paddingTop: 12,
-    paddingBottom: 30,
     paddingHorizontal: 10,
     ...shadow.float,
   },

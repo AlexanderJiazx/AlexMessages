@@ -34,11 +34,15 @@ two ways, rewrite it before sending.
   palette (`src/theme.ts`) — don't flatten the distinction.
 - Wide layouts (iPad / `npm run web`) switch `app/chat.tsx` to a two-pane
   rail + conversation above the `720` breakpoint.
-- Modal screens **must** wrap their root in `SafeAreaView edges={["top","bottom"]}`
-  — without it the header renders under the Android status bar (edge-to-edge)
-  and the close control is unreachable to users and UiAutomator. The one
-  exception is the call screen, which pads with `useSafeAreaInsets()`
-  instead (see **Calls** below).
+- Modal screens draw their header with the native stack header (title, and
+  the close control: Cancel / Done in `Stack.Toolbar` on iOS, the Material up
+  arrow on Android — `SHEET_HEADER` in `app/_layout.tsx`, and
+  `app/settings/_layout.tsx`). The native header already clears the status
+  bar, so the screen's root `SafeAreaView` takes `edges={["bottom"]}`; a top
+  edge under the header pads by the status bar a second time. A modal without
+  a native header must use `edges={["top","bottom"]}`, or its content renders
+  under the Android status bar (edge-to-edge). The call screen pads with
+  `useSafeAreaInsets()` instead (see **Calls** below).
 - Menus go through `src/components/NativeMenu.tsx`: `LongPressMenu` (the
   iMessage-style system context menu — the view lifts out beside its menu),
   `GlassMenuButton` (a native glass button whose menu morphs out of it, e.g.
@@ -93,6 +97,22 @@ two ways, rewrite it before sending.
   Adding a Swift file to the local module needs `pod install`, because the Pods
   project lists the module's source files. New module classes are picked up
   from `expo-module.config.json`.
+- **Highlightable rows inside scroll views pass
+  `unstable_pressDelay={ROW_PRESS_DELAY}`** (`src/theme.ts`, 130 ms), the
+  analogue of UIKit's `delaysContentTouches`: a scroll or a swipe never
+  flashes the pressed highlight, and a quick tap still highlights. Used by the
+  DM list rows, Settings rows, the Settings profile card and New Message rows.
+- **Remote images use `expo-image` with `cachePolicy="memory-disk"`**
+  (`Avatar`, image attachments), not React Native's `Image`: RN decodes
+  asynchronously on every mount, so an avatar in a newly opened sheet showed
+  its color circle for a frame or two, and a thread image that scrolled back
+  into the list flashed its spinner. expo-image draws an image it holds in
+  memory on the first frame.
+- **`SwipeRow`** puts its tap-to-close cover over the row as soon as a swipe
+  starts (not when it settles open), so a tap during the open animation closes
+  the row instead of opening the conversation. Closing uses a spring with
+  `overshootClamping`: an overshoot past zero flashed the other side's
+  buttons at the row's edge for about 10 frames.
 - **Never wrap list rows or bubbles in SwiftUI hosts** (`Host`/`RNHostView`).
   Every SwiftUI hosting view re-renders on each scroll frame (it observes
   ancestor geometry) and sizes itself asynchronously — one per bubble made
@@ -107,9 +127,24 @@ two ways, rewrite it before sending.
   first row.
 - Native menus have no Cancel row: Maestro flows close them through
   `e2e/subflows/dismiss-menu.yaml` (Cancel on Android, outside tap on iOS).
-- `MessageList` keys its `useMemo` on `store.version` (not the history array)
-  — the store mutates history in place, so identity-keyed memos go stale and
-  new messages don't render. Keep `version` in the deps.
+- The shared store never mutates a history array or a message object: every
+  change replaces both (copy-on-write), so `MessageList` memoizes its rows on
+  the channel's history array itself. List rows are keyed by
+  `messageKey(m)` (from `@alexmessages/shared`), which stays the same when an
+  optimistic message is confirmed and its `id` becomes the server's — keying
+  by `m.id` remounted the bubble on delivery.
+- The conversation on screen selects its channel on focus
+  (`useFocusEffect` in `ConversationView`), not on mount: a thread uncovered
+  by Back (two threads stacked) must become the active channel again, or
+  sends from it have no channel. Leaving the narrow route deselects it.
+- Toasts: one `ToastHost` in `app/_layout.tsx` (`src/components/Toasts.tsx`).
+  On iOS it renders in a `FullWindowOverlay` while a toast is up, so toasts
+  show over the modal sheets and the call screen; it rises above the
+  keyboard while the keyboard is up. Don't mount another toast view in a
+  screen (it would show every toast twice).
+- `NativeMenu` reports a tap by the entry's id (`MenuAction.id`, default:
+  the label), never by its position: a menu can stay open while its list
+  changes underneath it.
 - **`MessageList` is an inverted FlatList** (the standard chat list). Rows
   are built oldest → newest, then reversed, so row 0 (the newest message)
   sits at the bottom: a thread opens on its newest message with nothing to
@@ -171,7 +206,10 @@ two ways, rewrite it before sending.
 - The composer input has a fixed `lineHeight` of 21 (a whole number of
   points): with the font's natural ~20.3pt line UIKit rounds the content
   height up while layout rounds the view to a third of a point, so a single
-  line became scrollable. It grows to six lines (`maxHeight`), then scrolls.
+  line became scrollable. Under a larger text size React Native scales the
+  line height by the font scale, so `Composer` sets it to
+  `round(21 × scale) / scale` (each scaled line is still a whole number of
+  points) and sizes `maxHeight` to six scaled lines; past six it scrolls.
 - iOS keyboard handling is `react-native-keyboard-controller`. The
   `KeyboardProvider` in `app/_layout.tsx` is iOS-only (on Android it takes over
   window insets even when disabled). In `ConversationView`, the custom hook
@@ -197,7 +235,11 @@ two ways, rewrite it before sending.
   The list is translated, never
   resized; the part lifted off the top stays reachable via `topSlack`, applied
   as `contentInset.bottom` on the flipped list (the screen top). Android keeps
-  `KeyboardAvoidingView`.
+  `KeyboardAvoidingView`. The app draws edge to edge on Android
+  (`edgeToEdgeEnabled`), so the keyboard never resizes the window there, in
+  spite of `adjustResize`: every `KeyboardAvoidingView` needs a `behavior` on
+  Android too, or the keyboard covers what is under it (the login form's
+  Sign In button was covered until 2026-10-29).
   Back (`app/conversation.tsx`), iOS only: with the keyboard up, a Back tap
   holds the pop (`beforeRemove` + `preventDefault`) until the keyboard has
   started to hide, then re-dispatches it. The hold goes through
@@ -219,7 +261,31 @@ two ways, rewrite it before sending.
   `UIViewControllerBasedStatusBarAppearance` on (the image viewer needs it),
   React Native's StatusBar module throws (a red box on iOS). Set the style on
   every screen: once one screen sets it, Android gives the light style to
-  screens that don't.
+  screens that don't. Before the first screen draws (the launch screen and
+  the boot gate), the style comes from the `expo-status-bar` config plugin
+  in `app.json` (`style: "dark"`: Android's `windowLightStatusBar`, iOS's
+  `UIStatusBarStyle`); without it Android drew white icons over the white
+  launch screen. On iOS the style crossfades over 0.4 s whenever it changes
+  (react-native-screens wraps the update in a UIView animation): opening
+  and closing the call screen fades the clock with the slide, as UIKit's
+  own modal transitions do. `statusBarAnimation` affects only hiding and
+  showing the status bar, never a style change.
+- The app has one, light design on both platforms. iOS gets it from
+  `userInterfaceStyle: "light"` (`UIUserInterfaceStyle`). Android gets it
+  from `plugins/withAndroidLightTheme.js`: the activity theme's parent is
+  `Theme.AppCompat.Light.NoActionBar` instead of the template's DayNight,
+  so a phone in dark mode no longer draws React Native's `Alert` dialogs
+  (and the window background) dark, and `colorAccent` is `colorPrimary`
+  (`app.json → primaryColor`, the sage), so dialog buttons, the text cursor
+  and selection handles are sage, not AppCompat's teal. `expo-system-ui` is
+  deliberately not installed: it calls `setDefaultNightMode` after the
+  activity's theme is already applied, so the dialogs stayed dark with it
+  (seen on 2026-10-29). Prebuild's "android: userInterfaceStyle: Install
+  expo-system-ui" note is therefore expected.
+- The boot gate (`app/index.tsx`) waits for the Ionicons font
+  (`loadIconFont` in `src/components/Icon.tsx`) as well as for the session:
+  an icon drawn before its font loads stays empty until the load ends, and
+  on an Android cold start the first screen showed no icons for ~100 ms.
 - `@expo/ui` must stay autolinked on Android: expo-router's own Android code
   imports it, and excluding it (`expo.autolinking.android.exclude` in
   `package.json`) crashed the app at launch with "Cannot find native module

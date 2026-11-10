@@ -39,13 +39,17 @@ interface Clip {
 export const VoicePanel = forwardRef<
   VoicePanelHandle,
   {
+    /** The conversation the recording belongs to: a voice message is sent
+     *  there even if the user has moved to another one meanwhile. */
+    channel: string;
     phase: VoicePhase;
     onPhase: (p: VoicePhase) => void;
     onExit: () => void;
     onTranscribed: (text: string) => void;
   }
->(function VoicePanel({ phase, onPhase, onExit, onTranscribed }, ref) {
+>(function VoicePanel({ channel, phase, onPhase, onExit, onTranscribed }, ref) {
   const { api, store } = useSession();
+  const channelAtStart = useRef(channel).current;
   const rec = useVoiceRecorder();
   const recRef = useRef(rec);
   recRef.current = rec;
@@ -57,8 +61,8 @@ export const VoicePanel = forwardRef<
   const status = useAudioPlayerStatus(player);
 
   useEffect(() => {
-    void rec.start().then((ok) => {
-      if (!ok) {
+    void rec.start().then((r) => {
+      if (r === "failed") {
         toast("Microphone unavailable", true);
         onExit();
       }
@@ -83,12 +87,18 @@ export const VoicePanel = forwardRef<
     [player],
   );
 
-  // Each metering sample becomes one waveform bar.
+  // One waveform bar every 100 ms, on a fixed tick: sampling only when the
+  // level changed froze the waveform through silence (the level stays put).
+  const levelRef = useRef(rec.level);
+  levelRef.current = rec.level;
   useEffect(() => {
     if (!rec.isRecording) return;
-    samples.current.push(Math.max(0.04, rec.level));
-    bump((x) => x + 1);
-  }, [rec.level, rec.isRecording]);
+    const t = setInterval(() => {
+      samples.current.push(Math.max(0.04, levelRef.current));
+      bump((x) => x + 1);
+    }, 100);
+    return () => clearInterval(t);
+  }, [rec.isRecording]);
 
   useEffect(() => {
     if (status.didJustFinish) {
@@ -130,12 +140,18 @@ export const VoicePanel = forwardRef<
     player.pause();
     setBusy("send");
     const name = `voice-message.${clip.ext}`;
-    const ok = await store.uploadAttachment({ uri: clip.uri, name, type: clip.mime }, name);
-    if (!ok) {
+    // Uploaded without staging, then sent on its own: files staged in the
+    // composer stay staged, and nothing lands in another conversation.
+    const att = await store.uploadAttachment({ uri: clip.uri, name, type: clip.mime }, name, { stage: false });
+    if (!att) {
       setBusy(null);
       return;
     }
-    store.sendMessage("");
+    if (!store.sendMessage("", [att], channelAtStart)) {
+      toast("Couldn't send the voice message", true);
+      setBusy(null);
+      return;
+    }
     onExit();
   };
 
@@ -383,10 +399,10 @@ const styles = StyleSheet.create({
     borderRadius: 19,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(196,72,63,0.12)",
+    backgroundColor: colors.dangerWash,
   },
   stopBtnPressed: {
-    backgroundColor: "rgba(196,72,63,0.24)",
+    backgroundColor: colors.dangerWashPressed,
   },
   stopSquare: {
     width: 13,
@@ -400,14 +416,14 @@ const styles = StyleSheet.create({
     borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(27,36,31,0.06)",
+    backgroundColor: colors.fill,
   },
   durChip: {
     height: 28,
     paddingHorizontal: 11,
     borderRadius: 14,
     justifyContent: "center",
-    backgroundColor: "rgba(27,36,31,0.06)",
+    backgroundColor: colors.fill,
   },
   durText: {
     ...type.subhead,

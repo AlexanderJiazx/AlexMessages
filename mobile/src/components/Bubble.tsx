@@ -241,11 +241,14 @@ function ReplyQuote({
 }) {
   const s = useChatState();
   const meId = s.me?.id;
+  // A reply to one's own message names no one twice ("You replied to
+  // yourself", not "You replied to you").
+  const self = author !== null && target.user_id === author;
   const who = (uid: number | null) =>
     uid === meId ? "you" : nameFor(s.users, uid);
   const label = mine
-    ? `You replied to ${who(target.user_id)}`
-    : `${nameFor(s.users, author)} replied to ${who(target.user_id)}`;
+    ? `You replied to ${self ? "yourself" : who(target.user_id)}`
+    : `${nameFor(s.users, author)} replied to ${self ? "themselves" : who(target.user_id)}`;
   const preview = (
     target.text ||
     (target.attachments?.[0] ? `Attachment: ${target.attachments[0].name}` : "")
@@ -444,7 +447,7 @@ const styles = StyleSheet.create({
   code: {
     fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
     fontSize: 15,
-    backgroundColor: "rgba(27,36,31,0.08)",
+    backgroundColor: colors.fillStrong,
   },
   codeMine: {
     backgroundColor: "rgba(255,255,255,0.18)",
@@ -496,7 +499,7 @@ const styles = StyleSheet.create({
     paddingRight: 12,
     paddingLeft: 10,
     borderRadius: 14,
-    backgroundColor: "rgba(27,36,31,0.05)",
+    backgroundColor: colors.fillFaint,
   },
   quoteRowMine: {
     backgroundColor: "rgba(79,122,94,0.12)",

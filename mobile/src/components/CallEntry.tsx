@@ -93,7 +93,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.sageSoft,
   },
   iconMissed: {
-    backgroundColor: "#FBECEA",
+    backgroundColor: colors.dangerTint,
   },
   text: {
     flexShrink: 1,

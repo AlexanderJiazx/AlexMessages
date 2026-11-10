@@ -1,5 +1,6 @@
 import React from "react";
 import { Modal, Pressable, StyleSheet, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Image } from "expo-image";
 import { Icon } from "./Icon";
 import { colors } from "../theme";
@@ -14,8 +15,11 @@ export function ImageViewer({
   onClose: () => void;
 }) {
   const { api } = useSession();
+  // The Modal draws under the status bar (statusBarTranslucent), so the
+  // close button sits below the device's real top inset.
+  const insets = useSafeAreaInsets();
   return (
-    <Modal visible={!!url} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible={!!url} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
       <View style={styles.root}>
         <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Close" />
         {url && (
@@ -26,7 +30,12 @@ export function ImageViewer({
             accessibilityLabel="Full size image"
           />
         )}
-        <Pressable style={styles.close} onPress={onClose} accessibilityLabel="Close image" hitSlop={10}>
+        <Pressable
+          style={[styles.close, { top: insets.top + 12, right: insets.right + 20 }]}
+          onPress={onClose}
+          accessibilityLabel="Close image"
+          hitSlop={10}
+        >
           <Icon name="close" size={22} color={colors.surface} />
         </Pressable>
       </View>
@@ -37,7 +46,7 @@ export function ImageViewer({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: "rgba(10,12,11,0.92)",
+    backgroundColor: colors.viewerBackdrop,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -54,12 +63,10 @@ const styles = StyleSheet.create({
   },
   close: {
     position: "absolute",
-    top: 56,
-    right: 24,
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "rgba(255,255,255,0.14)",
+    backgroundColor: colors.viewerButton,
     alignItems: "center",
     justifyContent: "center",
   },

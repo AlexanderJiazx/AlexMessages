@@ -34,7 +34,7 @@ export default function DataPage() {
       <Group footer="A copy of your account, contacts, and full message history as a JSON file.">
         <Row
           icon="download"
-          iconBg="#5B7FA6"
+          iconBg={colors.iconSlate}
           title="Export my data"
           onPress={busy ? undefined : () => void doExport()}
           accessory={busy ? <ActivityIndicator size="small" color={colors.muted} /> : undefined}

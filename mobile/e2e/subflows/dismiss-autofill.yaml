@@ -1,0 +1,12 @@
+appId: com.alexanderjia.messages
+---
+# Android's autofill may offer to save the password to Google Password
+# Manager after a sign-in. The sheet is the system's, so it can outlive the
+# app (clearState doesn't close it). Close it without answering: "Never"
+# would block the app for good.
+- runFlow:
+    when:
+      visible: "Save password to Google Password Manager"
+    commands:
+      - tapOn:
+          id: "android:id/closeButton"

@@ -6,7 +6,6 @@ import { useSession } from "../session";
 import { fontDisplay } from "../theme";
 import { Avatar } from "../components/Avatar";
 import { Icon, type IconName } from "../components/Icon";
-import { Toasts } from "../components/Toasts";
 import { CallVideo } from "./CallVideo";
 
 /** The call screen's dark sage backdrop (the web call view's colors). */
@@ -175,7 +174,6 @@ export function CallScreen({
           </Pressable>
         </View>
       )}
-      <Toasts bottom={insets.bottom + 150} />
     </View>
   );
 }

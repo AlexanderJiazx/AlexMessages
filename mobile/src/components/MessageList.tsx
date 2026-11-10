@@ -12,7 +12,7 @@ import {
   type NativeSyntheticEvent,
 } from "react-native";
 import { useRouter } from "expo-router";
-import { fmtStampLabel, type ChatMessage } from "@alexmessages/shared";
+import { fmtStampLabel, messageKey, type ChatMessage } from "@alexmessages/shared";
 import { useChatState, useSession } from "../session";
 import { colors, type } from "../theme";
 import { Bubble } from "./Bubble";
@@ -25,6 +25,7 @@ import { GlassMenuButton } from "./NativeMenu";
 import { NoScrollEdgeEffects } from "./ScrollEdge";
 import { CALL_GREEN } from "../call/CallScreen";
 
+const NO_MESSAGES: ChatMessage[] = [];
 /** Consecutive messages from one sender within this window form a group. */
 const GROUP_GAP_S = 5 * 60;
 /** Leading icons of the call button's Android dropdown. */
@@ -72,34 +73,37 @@ export function MessageList({
   const { store } = useSession();
   const listRef = useRef<FlatList<Row>>(null);
 
-  // History arrays are mutated in place by the store — store.version bumps on
-  // every emit, so memo deps key off it rather than object identity.
-  const version = store.version;
-  const msgs = useMemo(() => s.history[channel] || [], [channel, s.history, version]);
+  // The store replaces a channel's history array (and the message objects in
+  // it) on every change, so the array's identity is a valid memo key.
+  const msgs = s.history[channel] || NO_MESSAGES;
+  const hasMore = !!s.historyHasMore[channel];
 
   // Display rows, built oldest → newest, then reversed for the inverted list
-  // (row 0 sits at the bottom).
+  // (row 0 sits at the bottom). Rows are keyed by messageKey(m), which stays
+  // the same when a sent message is confirmed and its id changes to the
+  // server's, so the bubble isn't remounted on delivery.
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = [];
     const real = msgs;
-    if (s.historyHasMore[channel]) out.push({ kind: "loading", id: "loading-older" });
+    if (hasMore) out.push({ kind: "loading", id: "loading-older" });
     for (let i = 0; i < real.length; i++) {
       const m = real[i];
       const prev = real[i - 1];
       const next = real[i + 1];
       const gapPrev = prev ? (m.created_at || 0) - (prev.created_at || 0) : Infinity;
       const stamp = !prev || gapPrev >= STAMP_GAP_S || dayOf(prev) !== dayOf(m);
-      if (stamp) out.push({ kind: "stamp", id: `stamp-${m.id}`, label: fmtStampLabel(m.created_at) });
+      const key = messageKey(m);
+      if (stamp) out.push({ kind: "stamp", id: `stamp-${key}`, label: fmtStampLabel(m.created_at) });
       const joinsPrev = !stamp && !!prev && sameRun(prev, m);
       const nextStamp =
         !next ||
         (next.created_at || 0) - (m.created_at || 0) >= STAMP_GAP_S ||
         dayOf(next) !== dayOf(m);
       const joinsNext = !nextStamp && !!next && sameRun(m, next);
-      out.push({ kind: "msg", id: m.id, m, first: !joinsPrev, last: !joinsNext });
+      out.push({ kind: "msg", id: key, m, first: !joinsPrev, last: !joinsNext });
     }
     return out.reverse();
-  }, [msgs, channel, s.historyHasMore, version]);
+  }, [msgs, hasMore]);
 
   const window = useWindowDimensions();
   const [listW, setListW] = useState(0);
@@ -110,9 +114,9 @@ export function MessageList({
   // (as in Messages). Incoming messages follow on their own while you're at
   // the bottom (maintainVisibleContentPosition's autoscroll below).
   const lastMsg = msgs[msgs.length - 1];
-  const lastSeenId = useRef<string | undefined>(lastMsg?.id);
+  const lastSeenId = useRef<string | undefined>(lastMsg && messageKey(lastMsg));
   useEffect(() => {
-    const id = lastMsg?.id;
+    const id = lastMsg && messageKey(lastMsg);
     if (id === lastSeenId.current) return;
     lastSeenId.current = id;
     if (lastMsg && s.me && lastMsg.user_id === s.me.id) {
@@ -300,12 +304,15 @@ export function Topbar({
         <GlassSurface interactive style={styles.capsule}>
           <Avatar user={peer} size={32} />
           <View style={styles.capsuleText}>
-            <Text style={styles.capsuleName} numberOfLines={1}>
+            <Text style={styles.capsuleName} numberOfLines={1} maxFontSizeMultiplier={1.2}>
               {name}
             </Text>
-            <Text style={[styles.capsuleStatus, online && styles.capsuleStatusOn]}>
-              {online ? "Online" : "Offline"}
-            </Text>
+            <View style={styles.statusRow}>
+              <View style={[styles.statusDot, online && styles.statusDotOn]} />
+              <Text style={styles.capsuleStatus} maxFontSizeMultiplier={1.2} numberOfLines={1}>
+                {online ? "Online" : "Offline"}
+              </Text>
+            </View>
           </View>
           <Icon name="chevron-forward" size={13} color={colors.faint} />
         </GlassSurface>
@@ -384,7 +391,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    height: 46,
+    // A minimum, so larger text sizes grow the capsule instead of clipping
+    // it; the texts cap their scaling (maxFontSizeMultiplier) so it stays
+    // inside the fixed TOPBAR_H header.
+    minHeight: 46,
+    paddingVertical: 3,
     borderRadius: 23,
     paddingLeft: 7,
     paddingRight: 12,
@@ -403,8 +414,19 @@ const styles = StyleSheet.create({
     color: colors.muted,
     marginTop: -1,
   },
-  capsuleStatusOn: {
-    color: colors.sage,
-    fontWeight: "600",
+  statusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  // The same presence dot as the DM list and the contact card.
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.faint,
+  },
+  statusDotOn: {
+    backgroundColor: colors.online,
   },
 });

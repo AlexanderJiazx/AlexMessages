@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import {
   Platform,
   Pressable,
@@ -19,6 +20,13 @@ import type { IconName } from "./Icon";
 
 /** One menu entry — rendered as a native UIMenu item on iOS. */
 export interface MenuAction {
+  /**
+   * Identifies the entry when the native menu reports a tap. Defaults to
+   * the label. Give an entry whose effect changes with state (Pin / Unpin)
+   * a label or id that changes with it, so a menu left open across the
+   * change can't run the other action.
+   */
+  id?: string;
   label: string;
   /** SF Symbol shown beside the label on iOS. */
   systemImage?: SFSymbol;
@@ -36,10 +44,17 @@ const nativeContextMenus = Platform.OS === "ios";
 /** The glass menu button (and SwiftUI pull-downs) need iOS 26. */
 const nativeMenus = Platform.OS === "ios" && glassSupported;
 
-/** Menu entries for the UIKit views; the index is the action id. */
+const actionId = (a: MenuAction) => a.id ?? a.label;
+
+/**
+ * Menu entries for the UIKit views. Each carries a stable id (not its
+ * position): the menu can stay open while the list behind it re-renders
+ * (an entry added or removed), and a tap must still run the entry the user
+ * saw, or nothing if that entry is gone.
+ */
 function toItems(actions: MenuAction[]): NativeMenuItem[] {
-  return actions.map((a, i) => ({
-    id: String(i),
+  return actions.map((a) => ({
+    id: actionId(a),
     title: a.label,
     systemImage: a.systemImage,
     destructive: a.destructive,
@@ -47,7 +62,7 @@ function toItems(actions: MenuAction[]): NativeMenuItem[] {
 }
 
 function pressById(actions: MenuAction[], id: string) {
-  actions[Number(id)]?.onPress();
+  actions.find((a) => actionId(a) === id)?.onPress();
 }
 
 function MenuItems({ actions }: { actions: MenuAction[] }) {
@@ -55,7 +70,7 @@ function MenuItems({ actions }: { actions: MenuAction[] }) {
     <>
       {actions.map((a) => (
         <Button
-          key={a.label}
+          key={actionId(a)}
           label={a.label}
           systemImage={a.systemImage}
           role={a.destructive ? "destructive" : undefined}
@@ -101,22 +116,9 @@ export function LongPressMenu({
   if (disabled) return <View style={style}>{children}</View>;
   if (!nativeContextMenus) {
     return (
-      <Pressable
-        style={style}
-        onLongPress={() =>
-          showActionSheet({
-            title,
-            options: actions.map((a) => ({
-              label: a.label,
-              destructive: a.destructive,
-              onPress: a.onPress,
-            })),
-          })
-        }
-        delayLongPress={500}
-      >
+      <SheetOnLongPress actions={actions} title={title} style={[fill && { alignSelf: "stretch" }, style]}>
         {children}
-      </Pressable>
+      </SheetOnLongPress>
     );
   }
   return (
@@ -129,6 +131,55 @@ export function LongPressMenu({
     >
       {children}
     </NativeContextMenu>
+  );
+}
+
+/**
+ * Android / web: a long press opens the action sheet. It is a gesture-handler
+ * long press, not a wrapping Pressable: the children are pressables
+ * themselves (a DM row, a pinned tile, an image, a link), and the innermost
+ * pressable owns the touch, so a wrapping Pressable's onLongPress never
+ * fired and the hold ended as a tap on the child. The native recognizer
+ * sees the hold whatever is inside, and once it fires it cancels the
+ * child's touch, so no tap follows.
+ */
+function SheetOnLongPress({
+  actions,
+  title,
+  style,
+  children,
+}: {
+  actions: MenuAction[];
+  title?: string;
+  style?: StyleProp<ViewStyle>;
+  children: React.ReactElement;
+}) {
+  const latest = useRef({ actions, title });
+  latest.current = { actions, title };
+  const gesture = useMemo(
+    () =>
+      Gesture.LongPress()
+        .minDuration(500) // React Native's default delayLongPress
+        .runOnJS(true)
+        .onStart(() => {
+          const { actions: list, title: heading } = latest.current;
+          showActionSheet({
+            title: heading,
+            options: list.map((a) => ({
+              label: a.label,
+              destructive: a.destructive,
+              onPress: a.onPress,
+            })),
+          });
+        }),
+    []
+  );
+  return (
+    <GestureDetector gesture={gesture}>
+      <View style={style} collapsable={false}>
+        {children}
+      </View>
+    </GestureDetector>
   );
 }
 
@@ -243,7 +294,7 @@ function DropdownButton({
             const tint = a.destructive ? colors.danger : colors.ink;
             return (
               <Compose.DropdownMenuItem
-                key={a.label}
+                key={actionId(a)}
                 onClick={() => {
                   setOpen(false);
                   a.onPress();

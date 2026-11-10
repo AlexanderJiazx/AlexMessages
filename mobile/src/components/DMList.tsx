@@ -15,12 +15,13 @@ import {
   nameFor,
 } from "@alexmessages/shared";
 import { useChatState, useSession } from "../session";
-import { colors, glassSupported, radius, type } from "../theme";
+import { colors, glassSupported, radius, ROW_PRESS_DELAY, type } from "../theme";
 import { Avatar } from "./Avatar";
 import { Icon } from "./Icon";
 import { LongPressMenu, type MenuAction } from "./NativeMenu";
 import { EdgeFade, GlassIconButton, GlassSurface } from "./Glass";
 import { closeOpenSwipeRow, SwipeRow, type SwipeAction } from "./SwipeRow";
+import { EdgeBlur } from "../../modules/native-menu";
 
 const BAR_H = 56;
 
@@ -64,6 +65,11 @@ export function DMList({
   const pinned = q ? [] : items.filter((it) => store.dmStateFor(it.channel).pinned);
   const recent = q ? items : items.filter((it) => !store.dmStateFor(it.channel).pinned);
 
+  const edgeOpacity = scrollY.interpolate({
+    inputRange: [0, 18],
+    outputRange: [0, 1],
+    extrapolate: "clamp",
+  });
   const inlineTitleOpacity = scrollY.interpolate({
     inputRange: [28, 48],
     outputRange: [0, 1],
@@ -149,8 +155,22 @@ export function DMList({
         }
       />
 
-      {/* Floating bar: content dissolves under it, controls are glass. */}
-      <EdgeFade edge="top" height={BAR_H + 18} />
+      {/* Floating bar: content dissolves under it, controls are glass. The
+          same edge treatment as the conversation: a blur on iOS 26+, a fade
+          elsewhere. It reaches 18pt below the bar, where the large title
+          sits at rest, so it fades in only once content scrolls under the
+          bar (as UIKit's scroll edge effect does); at rest the title stays
+          sharp. */}
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.topBlur, { height: BAR_H + 18, opacity: edgeOpacity }]}
+      >
+        {glassSupported ? (
+          <EdgeBlur edge="top" maxRadius={12} pointerEvents="none" style={StyleSheet.absoluteFill} />
+        ) : (
+          <EdgeFade edge="top" height={BAR_H + 18} />
+        )}
+      </Animated.View>
       <View style={styles.bar} pointerEvents="box-none">
         <Pressable
           onPress={onOpenSettings}
@@ -240,7 +260,7 @@ function useSwipeActions(channel: string, name: string) {
       label: "Pin",
       sf: "pin.fill",
       ion: "pin",
-      color: "#D99A2B",
+      color: colors.pinAction,
       onPress: () => void store.togglePin(channel, true),
     },
   ];
@@ -293,6 +313,7 @@ function DmRow({
             pressed && !active && styles.rowPressed,
           ]}
           onPress={onPress}
+          unstable_pressDelay={ROW_PRESS_DELAY}
           accessibilityRole="button"
           accessibilityLabel={`Conversation with ${name}${unread ? ", unread" : ""}`}
         >
@@ -391,6 +412,12 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.bg,
   },
+  topBlur: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+  },
   bar: {
     position: "absolute",
     top: 0,
@@ -439,9 +466,11 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     marginBottom: 10,
     paddingHorizontal: 10,
-    height: 38,
+    // A minimum: larger text sizes grow the field instead of clipping it.
+    minHeight: 38,
+    paddingVertical: 4,
     borderRadius: glassSupported ? 19 : 11,
-    backgroundColor: "rgba(118,128,112,0.13)",
+    backgroundColor: colors.searchFill,
   },
   searchInput: {
     flex: 1,
@@ -490,7 +519,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bg,
   },
   rowPressed: {
-    backgroundColor: "#EAE8E1",
+    backgroundColor: colors.rowPressed,
   },
   rowActive: {
     backgroundColor: colors.sageTint,
@@ -512,7 +541,7 @@ const styles = StyleSheet.create({
     width: 14,
     height: 14,
     borderRadius: 7,
-    backgroundColor: "#4CB86E",
+    backgroundColor: colors.online,
     borderWidth: 2.5,
     borderColor: colors.bg,
   },

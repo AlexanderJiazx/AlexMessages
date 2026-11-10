@@ -8,6 +8,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
 import Animated, {
@@ -34,6 +35,7 @@ import { Glyph, VoicePanel, type VoicePanelHandle, type VoicePhase } from "./Dic
 import { GlassSurface } from "./Glass";
 import { GlassMenuButton, type MenuAction } from "./NativeMenu";
 import { CALL_BLOCKS_MEDIA, isCallLive } from "../media";
+import { draftFor, saveDraft, setComposerWork } from "../drafts";
 
 const PILL_MIN = 44;
 const PILL_VOICE = 64;
@@ -47,7 +49,9 @@ const PILL_VOICE = 64;
  */
 const INPUT_LINE = 21;
 /** The input grows to six full lines, then scrolls. */
-const INPUT_MAX = 6 * INPUT_LINE + 22;
+const INPUT_LINES = 6;
+/** The input's vertical padding (11 above, 11 below). */
+const INPUT_PAD_V = 22;
 /** Links the input to ConversationView's KeyboardGestureArea. */
 export const COMPOSER_INPUT_ID = "composer-input";
 /**
@@ -81,12 +85,15 @@ const REC_EXIT_MS = 120;
  * GlassContainer so they merge while overlapping.
  */
 export function Composer({
+  channel,
   peerName,
   voiceTall,
   sideInset = 12,
   kbUpInset,
   kbWide,
 }: {
+  /** The conversation this composer writes to (and keeps a draft for). */
+  channel: string;
   peerName: string;
   /** Gap between the glass and the screen's left and right edges. */
   sideInset?: number;
@@ -99,10 +106,28 @@ export function Composer({
 }) {
   const s = useChatState();
   const { store, api } = useSession();
-  const [text, setText] = useState("");
+  // The draft is kept per conversation (src/drafts.ts), so it survives
+  // leaving the thread and coming back, and an over-the-air reload.
+  const [text, setText] = useState(() => draftFor(channel));
+  useEffect(() => saveDraft(channel, text), [channel, text]);
   const [voice, setVoice] = useState<VoicePhase | null>(null);
   const voiceRef = useRef<VoicePanelHandle>(null);
   const [uploading, setUploading] = useState<string | null>(null);
+  // A recording or an upload would be lost to a reload: updates wait.
+  const workToken = useRef({}).current;
+  useEffect(() => {
+    setComposerWork(workToken, !!voice || !!uploading);
+    return () => setComposerWork(workToken, false);
+  }, [workToken, voice, uploading]);
+
+  // Dynamic Type scales the input's line height; the cap stays six lines,
+  // and each line a whole number of points (see INPUT_LINE).
+  const { fontScale } = useWindowDimensions();
+  const scaledLine = Math.round(INPUT_LINE * fontScale);
+  const inputSizing = {
+    lineHeight: scaledLine / fontScale,
+    maxHeight: INPUT_LINES * scaledLine + INPUT_PAD_V,
+  };
 
   const hasContent = !!(text.trim() || s.pendingAtt.length);
   const canSend = hasContent && !voice;
@@ -110,9 +135,10 @@ export function Composer({
   const doSend = useCallback(() => {
     if (!canSend) return;
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    store.sendMessage(text);
-    setText("");
-  }, [canSend, store, text]);
+    // The text is cleared only once the store took the message; otherwise
+    // it stays in the field to try again.
+    if (store.sendMessage(text, undefined, channel)) setText("");
+  }, [canSend, store, text, channel]);
 
   const uploadOne = useCallback(
     async (file: { uri: string; name: string; type: string; size?: number }) => {
@@ -127,24 +153,51 @@ export function Composer({
     [s.maxUpload, store]
   );
 
+  /**
+   * How many more files this message may carry (the server's limit, less
+   * what is staged), or 0 after telling the user it is full. Picks beyond
+   * the room are dropped with one toast.
+   */
+  const room = useCallback((): number => {
+    if (!store.canAttachMore()) {
+      toast(`A message can carry at most ${store.state.maxAttachments} files`, true);
+      return 0;
+    }
+    return store.state.maxAttachments - store.state.pendingAtt.length;
+  }, [store]);
+  const fitToRoom = useCallback(
+    <T,>(picked: T[]): T[] => {
+      const left = store.state.maxAttachments - store.state.pendingAtt.length;
+      if (picked.length > left) {
+        toast(`A message can carry at most ${store.state.maxAttachments} files. ${picked.length - Math.max(0, left)} not added.`, true);
+      }
+      return picked.slice(0, Math.max(0, left));
+    },
+    [store]
+  );
+
   const pickFromLibrary = useCallback(async () => {
+    const limit = room();
+    if (!limit) return;
     const res = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ["images", "videos", "livePhotos"],
       allowsMultipleSelection: true,
+      selectionLimit: limit,
       quality: 0.9,
     });
     if (res.canceled) return;
-    for (const asset of res.assets) {
+    for (const asset of fitToRoom(res.assets)) {
       const name = asset.fileName || `photo-${Date.now()}.jpg`;
       const mime = asset.mimeType || (asset.type === "video" ? "video/mp4" : "image/jpeg");
       await uploadOne({ uri: asset.uri, name, type: mime, size: asset.fileSize ?? undefined });
     }
-  }, [uploadOne]);
+  }, [room, fitToRoom, uploadOne]);
 
   const pickDocument = useCallback(async () => {
+    if (!room()) return;
     const res = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true });
     if (res.canceled) return;
-    for (const asset of res.assets) {
+    for (const asset of fitToRoom(res.assets)) {
       await uploadOne({
         uri: asset.uri,
         name: asset.name,
@@ -152,7 +205,7 @@ export function Composer({
         size: asset.size ?? undefined,
       });
     }
-  }, [uploadOne]);
+  }, [room, fitToRoom, uploadOne]);
 
   const attachActions: MenuAction[] = [
     { label: "Photo Library", systemImage: "photo.on.rectangle", onPress: () => void pickFromLibrary() },
@@ -254,7 +307,7 @@ export function Composer({
         <View style={styles.uploading}>
           <GlassSurface style={styles.uploadingChip}>
             <ActivityIndicator size="small" color={colors.sage} />
-            <Text style={styles.uploadingText} numberOfLines={1}>
+            <Text style={styles.uploadingText} numberOfLines={1} maxFontSizeMultiplier={1.6}>
               Uploading {uploading}…
             </Text>
           </GlassSurface>
@@ -311,7 +364,9 @@ export function Composer({
             </View>
           </Animated.View>
           <GlassSurface interactive style={[styles.pill, capsule && styles.pillCapsule]}>
-            {replyTo && !voice && (
+            {/* Shown while recording too: a voice message sent from here
+                is a reply to it, as a typed one would be. */}
+            {replyTo && (
               <View style={styles.replyBar}>
                 <View style={styles.replyAccent} />
                 <View style={styles.flex}>
@@ -342,7 +397,7 @@ export function Composer({
               >
                 {s.pendingAtt.map((a, i) => (
                   <PendingAtt
-                    key={i}
+                    key={a.url}
                     a={a}
                     apiUrl={api.url(a.url)}
                     onRemove={() => store.removePendingAtt(i)}
@@ -357,7 +412,7 @@ export function Composer({
                 pointerEvents={voice ? "none" : "auto"}
               >
                 <TextInput
-                  style={styles.input}
+                  style={[styles.input, inputSizing]}
                   placeholder={s.activeChannel ? `Message ${peerName}` : "Message"}
                   placeholderTextColor={colors.muted}
                   value={text}
@@ -384,7 +439,7 @@ export function Composer({
                   <Pressable
                     style={styles.micBtn}
                     onPress={startVoice}
-                    accessibilityLabel="Dictate"
+                    accessibilityLabel="Record voice message"
                     accessibilityRole="button"
                     hitSlop={6}
                   >
@@ -396,6 +451,7 @@ export function Composer({
                 <Animated.View style={StyleSheet.absoluteFill} exiting={FadeOut.duration(140)}>
                   <VoicePanel
                     ref={voiceRef}
+                    channel={channel}
                     phase={voice}
                     onPhase={setVoice}
                     onExit={() => setVoice(null)}
@@ -467,7 +523,13 @@ function PendingAtt({
           </View>
         </View>
       )}
-      <Pressable style={styles.pendingX} onPress={onRemove} accessibilityLabel="Remove" hitSlop={8}>
+      <Pressable
+        style={styles.pendingX}
+        onPress={onRemove}
+        accessibilityLabel={`Remove ${a.name}`}
+        accessibilityRole="button"
+        hitSlop={8}
+      >
         <Icon name="close" size={11} color={colors.surface} />
       </Pressable>
     </View>
@@ -523,13 +585,11 @@ const styles = StyleSheet.create({
   input: {
     flex: 1,
     ...type.body,
-    lineHeight: INPUT_LINE,
     color: colors.ink,
     paddingLeft: 16,
     paddingRight: 6,
-    paddingTop: 11,
-    paddingBottom: 11,
-    maxHeight: INPUT_MAX,
+    paddingTop: INPUT_PAD_V / 2,
+    paddingBottom: INPUT_PAD_V / 2,
   },
   sendBtn: {
     width: 34,
@@ -586,7 +646,7 @@ const styles = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 12,
-    backgroundColor: "rgba(27,36,31,0.08)",
+    backgroundColor: colors.fillStrong,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -632,7 +692,7 @@ const styles = StyleSheet.create({
     width: 20,
     height: 20,
     borderRadius: 10,
-    backgroundColor: "rgba(27,36,31,0.75)",
+    backgroundColor: colors.scrimStrong,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -645,7 +705,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     paddingHorizontal: 14,
-    height: 34,
+    // A minimum: larger text sizes grow the chip instead of clipping it.
+    minHeight: 34,
+    paddingVertical: 6,
     borderRadius: 17,
     maxWidth: 280,
   },

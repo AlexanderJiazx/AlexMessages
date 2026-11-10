@@ -6,7 +6,13 @@ appId: com.alexanderjia.messages
 - assertVisible: "Username"
 - tapOn: "Username"
 - inputText: "tester"
-- hideKeyboard
+# Android's hideKeyboard is a Back press when no keyboard is up (it closed
+# the sheet); only the iOS keyboard shows "return".
+- runFlow:
+    when:
+      visible: "return"
+    commands:
+      - hideKeyboard
 - tapOn: "Open conversation"
 - assertVisible:
     id: "composer-input"

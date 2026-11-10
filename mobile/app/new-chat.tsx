@@ -2,20 +2,20 @@ import React, { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { PublicUser } from "@alexmessages/shared";
 import { useChatState, useSession } from "../src/session";
-import { colors, type } from "../src/theme";
+import { colors, ROW_PRESS_DELAY, type } from "../src/theme";
 import { Avatar } from "../src/components/Avatar";
 import { Icon } from "../src/components/Icon";
-import { GlassIconButton } from "../src/components/Glass";
 
 /**
  * New-message sheet: a "To:" field that takes any username, with known
@@ -65,16 +65,18 @@ export default function NewChat() {
     .sort((a, b) => (a.display_name || a.username).localeCompare(b.display_name || b.username));
 
   return (
-    <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
-      <View style={styles.nav}>
-        <View style={styles.navSide} />
-        <Text style={styles.navTitle} accessibilityRole="header">
-          New Message
-        </Text>
-        <View style={[styles.navSide, { alignItems: "flex-end" }]}>
-          <GlassIconButton icon="close" label="Close" onPress={() => router.back()} size={40} />
-        </View>
-      </View>
+    <SafeAreaView style={styles.root} edges={["bottom"]}>
+      {/* The native header (app/_layout.tsx) holds the title. On iOS its
+          Cancel closes the sheet, as Done closes Settings and the contact
+          card; Android closes it with the header's up arrow (and its
+          toolbar would need image icons). */}
+      {Platform.OS === "ios" && (
+        <Stack.Toolbar placement="right">
+          <Stack.Toolbar.Button onPress={() => router.back()} accessibilityLabel="Cancel">
+            Cancel
+          </Stack.Toolbar.Button>
+        </Stack.Toolbar>
+      )}
 
       <View style={styles.toCard}>
         <Text style={styles.toLabel}>To:</Text>
@@ -87,6 +89,13 @@ export default function NewChat() {
           }}
           autoCapitalize="none"
           autoCorrect={false}
+          // A recipient, not a sign-in field: without these, Android's
+          // autofill offers the saved Alex Messages password here. "no"
+          // alone isn't enough: Android 14+ still starts a fill request on
+          // an unimportant text field.
+          autoComplete="off"
+          importantForAutofill="noExcludeDescendants"
+          textContentType="none"
           autoFocus
           placeholder="username"
           placeholderTextColor={colors.faint}
@@ -139,6 +148,7 @@ function PersonRow({ u, last, onPress }: { u: PublicUser; last: boolean; onPress
     <Pressable
       style={({ pressed }) => [styles.person, pressed && styles.pressed]}
       onPress={onPress}
+      unstable_pressDelay={ROW_PRESS_DELAY}
       accessibilityRole="button"
       accessibilityLabel={`Message ${u.display_name || u.username}`}
     >
@@ -160,27 +170,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.grouped,
   },
-  nav: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 10,
-  },
-  navSide: {
-    width: 64,
-  },
-  navTitle: {
-    flex: 1,
-    textAlign: "center",
-    ...type.headline,
-    color: colors.ink,
-  },
   toCard: {
     flexDirection: "row",
     alignItems: "center",
     marginHorizontal: 16,
-    marginTop: 6,
+    marginTop: 12,
     paddingLeft: 16,
     paddingRight: 6,
     height: 52,
@@ -233,7 +227,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   pressed: {
-    backgroundColor: "rgba(27,36,31,0.06)",
+    backgroundColor: colors.fill,
   },
   person: {
     flexDirection: "row",

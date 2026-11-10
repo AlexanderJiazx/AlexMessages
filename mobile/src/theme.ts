@@ -30,6 +30,31 @@ export const colors = {
   /** iOS grouped-table background + separator. */
   grouped: "#F1EFE8",
   separator: "rgba(27,36,31,0.12)",
+  /** Presence: the "online" dot and label, everywhere a user's status shows. */
+  online: "#4CB86E",
+  /** A plain list row while pressed. */
+  rowPressed: "#EAE8E1",
+  /** The swipe "Pin" action (the amber Messages uses). */
+  pinAction: "#D99A2B",
+  /** Settings row icon tiles. */
+  iconCoral: "#D6694A",
+  iconSlate: "#5B7FA6",
+  /** Ink washes: quiet fills for chips and round buttons on paper. */
+  fillFaint: "rgba(27,36,31,0.05)",
+  fill: "rgba(27,36,31,0.06)",
+  fillStrong: "rgba(27,36,31,0.08)",
+  /** Ink scrims: a play button over a video, the ✕ badge on a thumbnail. */
+  scrim: "rgba(27,36,31,0.55)",
+  scrimStrong: "rgba(27,36,31,0.75)",
+  /** Search fields and the login server chip. */
+  searchFill: "rgba(118,128,112,0.13)",
+  /** Danger washes: the recorder's stop button, a failed call card. */
+  dangerWash: "rgba(196,72,63,0.12)",
+  dangerWashPressed: "rgba(196,72,63,0.24)",
+  dangerTint: "#FBECEA",
+  /** Android image viewer: backdrop and its round close button. */
+  viewerBackdrop: "rgba(10,12,11,0.92)",
+  viewerButton: "rgba(255,255,255,0.14)",
 };
 
 export const radius = {
@@ -92,3 +117,10 @@ function safe(fn: () => boolean): boolean {
 
 /** Wide layout breakpoint — rail + chat side by side above this width. */
 export const WIDE_BREAKPOINT = 720;
+
+/** Press delay (ms) for highlightable rows inside scroll views. UIKit holds a
+ *  touch in scrolling content for 150 ms before highlighting the cell
+ *  (`delaysContentTouches`), so a scroll or a swipe never flashes it; a
+ *  quick tap still highlights on release. Pressable's equivalent is
+ *  `unstable_pressDelay`. */
+export const ROW_PRESS_DELAY = 130;

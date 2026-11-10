@@ -8,7 +8,7 @@ import { Group, PwField, Row, SettingsPage } from "../../src/components/Settings
 export default function AccountPage() {
   const { api, logout } = useSession();
   const s = useChatState();
-  const me = s.me!;
+  const me = s.me;
   const [pw, setPw] = useState({ cur: "", next: "", confirm: "" });
   const [pwMsg, setPwMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [deleteSheet, setDeleteSheet] = useState(false);
@@ -84,6 +84,10 @@ export default function AccountPage() {
     );
   };
 
+  // Signed out (Log Out, Delete Account, an expired session): the sheet is
+  // on its way out and renders nothing on its last frames.
+  if (!me) return null;
+
   return (
     <SettingsPage>
       <Group header="Account Info">
@@ -136,7 +140,13 @@ export default function AccountPage() {
 
       {deleteSheet && (
         <Group header="Confirm With Your Password">
-          <PwField placeholder="Password" value={deletePw} onChange={setDeletePw} auto="current-password" />
+          <PwField
+            placeholder="Password"
+            value={deletePw}
+            onChange={setDeletePw}
+            auto="current-password"
+            autoFocus
+          />
           <Row
             title="Delete Account"
             destructive

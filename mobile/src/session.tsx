@@ -22,6 +22,7 @@ import React, {
   useSyncExternalStore,
 } from "react";
 import { AppState, Platform } from "react-native";
+import { useNavigationContainerRef } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { File as FsFile } from "expo-file-system";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -34,7 +35,9 @@ import {
   type NotifyEvent,
   type ToastEvent,
 } from "@alexmessages/shared";
-import { ensureNotificationPermission, presentMessageNotification } from "./notify";
+import { dismissAllNotifications, ensureNotificationPermission, presentMessageNotification } from "./notify";
+import { resetToLogin } from "./nav";
+import { clearDrafts, persistDrafts, restoreDrafts } from "./drafts";
 import { callPlatform } from "./call/platform";
 import { attachSystemCalls, notifyIncomingCall, notifyMissedCall } from "./call/system";
 import { CallRinger, hasRingService } from "../modules/call-ringer";
@@ -207,18 +210,29 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // The calls bridge follows this store for its whole life.
   useEffect(() => attachSystemCalls(store), [store]);
 
+  const navRef = useNavigationContainerRef();
+  // Signing out never waits on the network: this device forgets the session
+  // at once, and the server is told in the background (the request gives
+  // up after ApiClient's 20 s limit). The login screen replaces every screen
+  // and sheet first, so nothing stays open over it; screens that read
+  // `me` still render once with it gone while they animate away, and return
+  // nothing then.
   logoutRef.current = async () => {
-    try {
-      await api.logout();
-    } catch {
-      /* best effort */
-    }
+    const token = api.token;
+    resetToLogin(navRef);
+    setPhase("login");
     syncRingService(false);
     store.reset();
     debugRef.current?.reset();
     api.setToken(null);
+    clearDrafts();
+    // The signed-out user's message and call notifications go with them.
+    void dismissAllNotifications();
+    if (token) {
+      const signOut = new ApiClient({ baseUrl: api.baseUrl, token });
+      void signOut.logout().catch(() => {});
+    }
     await kv.del(TOKEN_KEY);
-    setPhase("login");
   };
 
   // Boot: hydrate prefs + persisted server/token, then either connect or
@@ -226,7 +240,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      await hydratePrefs();
+      await Promise.all([hydratePrefs(), restoreDrafts()]);
       const ring = prefStorage.getItem(RING_PREF) !== "0";
       if (!cancelled) setRingPref(ring);
       // iOS Keychain items survive uninstall; AsyncStorage does not. A missing
@@ -243,32 +257,45 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // Every path to the login screen stops the ring service: it keeps its
       // own copy of the session, and would otherwise ring calls that the
       // signed-out app can't answer.
+      // The stored drafts belong to the account that was signed in; the next
+      // account to sign in on this phone must not see them.
       if (!token) {
         syncRingService(false);
+        clearDrafts();
         if (!cancelled) setPhase("login");
         return;
       }
       api.setToken(token);
       try {
         await api.getMe();
-      } catch {
-        syncRingService(false);
-        await kv.del(TOKEN_KEY);
-        api.setToken(null);
-        if (!cancelled) setPhase("login");
-        return;
+      } catch (e) {
+        // Only the server rejecting the session signs out. Without a network
+        // (or with the server restarting, or ApiClient's 20 s limit hit) the
+        // app opens signed in and the socket keeps retrying; a session that
+        // turns out to be revoked still signs out through its close 4401.
+        const status = (e as { status?: number }).status;
+        if (status === 401 || status === 403) {
+          syncRingService(false);
+          // The stored drafts belong to the account that was signed in; the
+          // next account to sign in on this phone must not see them.
+          clearDrafts();
+          void dismissAllNotifications();
+          await kv.del(TOKEN_KEY);
+          api.setToken(null);
+          if (!cancelled) setPhase("login");
+          return;
+        }
       }
       if (cancelled) return;
       store.connect();
       setPhase("ready");
-      if (hasRingService && ring) {
-        // Calls ring through notifications. Asks while Android still shows
-        // the prompt (it stops after the user denies it twice); after that,
-        // Settings → Notifications sends the user to the system settings.
-        void ensureNotificationPermission().finally(() => syncRingService(ring));
-      } else {
-        syncRingService(ring);
-      }
+      // Messages and calls notify through the OS, so the permission is asked
+      // here and after sign-in, never in the middle of a chat. Android keeps
+      // showing the prompt until the user denies it twice; after that,
+      // Settings → Notifications sends the user to the system settings.
+      void ensureNotificationPermission()
+        .catch(() => false)
+        .finally(() => syncRingService(ring));
     })();
     return () => {
       cancelled = true;
@@ -281,6 +308,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const sub = AppState.addEventListener("change", (s) => {
       store.setForeground(s === "active");
+      // Save the drafts every time the app leaves the foreground: the system
+      // may kill a backgrounded app without warning.
+      if (s !== "active") void persistDrafts().catch(() => {});
     });
     store.setForeground(AppState.currentState === "active");
     return () => sub.remove();
@@ -308,10 +338,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         await kv.set(TOKEN_KEY, token);
         store.connect();
         setPhase("ready");
-        if (hasRingService && ringWhenClosed) {
-          // The ring service rings through notifications (Android 13+ asks).
-          void ensureNotificationPermission().finally(() => syncRingService(true));
-        }
+        // Asked right after sign-in (see boot); the Android ring service
+        // rings through notifications, so it starts once that is answered.
+        void ensureNotificationPermission()
+          .catch(() => false)
+          .finally(() => syncRingService(ringWhenClosed));
         return null;
       } catch (e) {
         const status = (e as { status?: number }).status;

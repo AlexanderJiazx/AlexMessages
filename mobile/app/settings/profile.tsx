@@ -10,11 +10,11 @@ import { Group, Row, SettingsPage, styles } from "../../src/components/SettingsL
 export default function ProfilePage() {
   const { api, store } = useSession();
   const s = useChatState();
-  const me = s.me!;
-  const [name, setName] = useState(me.display_name || "");
-  const [bio, setBio] = useState(me.bio || "");
+  const me = s.me;
+  const [name, setName] = useState(me?.display_name || "");
+  const [bio, setBio] = useState(me?.bio || "");
   const [busy, setBusy] = useState(false);
-  const dirty = name.trim() !== (me.display_name || "") || bio.trim() !== (me.bio || "");
+  const dirty = name.trim() !== (me?.display_name || "") || bio.trim() !== (me?.bio || "");
 
   const pickAvatar = useCallback(async () => {
     const res = await ImagePicker.launchImageLibraryAsync({
@@ -75,6 +75,10 @@ export default function ProfilePage() {
       setBio(store.state.me?.bio || "");
     }
   };
+
+  // Signed out (an expired session ends with close 4401): the sheet is on
+  // its way out and renders nothing on its last frames.
+  if (!me) return null;
 
   return (
     <SettingsPage>

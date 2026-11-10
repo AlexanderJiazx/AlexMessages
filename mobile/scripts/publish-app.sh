@@ -19,7 +19,10 @@
 # target.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib-upload.sh
+source "$here/lib-upload.sh"
+cd "$here/.."
 platform="${1:-}"
 if [[ "$platform" != android && "$platform" != ios ]]; then
   echo "usage: $0 android|ios" >&2
@@ -68,6 +71,6 @@ if [[ -n "${APP_LOCAL:-}" ]]; then
 fi
 
 pi="${PI:-alexander@35.226.215.209}"
-ssh -p "${PI_PORT:-2222}" "$pi" \
-  "set -e; d=alexmessage/data/app; mkdir -p \$d; cat > \$d/.$file; mv \$d/.$file \$d/$file" < "$out/$file"
+upload_verified "$out/$file" "alexmessage/data/app/.$file" \
+  "mv alexmessage/data/app/.$file alexmessage/data/app/$file"
 echo "Published $file to $pi."

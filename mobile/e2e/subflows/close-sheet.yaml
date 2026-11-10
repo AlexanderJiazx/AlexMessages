@@ -1,0 +1,14 @@
+appId: com.alexanderjia.messages
+---
+# Closes a modal sheet: iOS from the header's Cancel / Done (each sheet has
+# one), Android from the header's up arrow.
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Cancel|Done"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "Navigate up"

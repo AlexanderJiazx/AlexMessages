@@ -5,6 +5,8 @@ appId: com.alexanderjia.messages
 # password "password123" (alice/bob/testuser1/tester).
 - clearState
 - launchApp
+# A save-password sheet left over from an earlier run covers the app.
+- runFlow: dismiss-autofill.yaml
 # Host chip shows the normalized URL (10.0.2.2 on Android emulators);
 # the first render can be slow while Metro serves the bundle.
 - extendedWaitUntil:
@@ -12,11 +14,26 @@ appId: com.alexanderjia.messages
     timeout: 30000
 - tapOn:
     id: "login-username"
+# An Android device signed in to Google may offer a saved password in a
+# sheet that covers the form; dismiss it so the typing reaches the field.
+- runFlow:
+    when:
+      visible: "Google Password Manager"
+    commands:
+      - tapOn: "Cancel"
+      - tapOn:
+          id: "login-username"
 - inputText: "alice"
 - tapOn:
     id: "login-password"
 - inputText: "password123"
-- hideKeyboard
+# On Android hideKeyboard acts as Back when no keyboard is up, which closes
+# the app; only the iOS keyboard shows a "return" key.
+- runFlow:
+    when:
+      visible: "return"
+    commands:
+      - hideKeyboard
 # Either the explicit tap submits, or the keyboard's return key already did.
 - tapOn:
     id: "login-submit"
@@ -25,5 +42,6 @@ appId: com.alexanderjia.messages
 - tapOn:
     text: "Not Now"
     optional: true
+- runFlow: dismiss-autofill.yaml
 - assertVisible: "Messages"
 - assertVisible: "Conversation with Bob.*"

@@ -7,7 +7,6 @@ import { useSession } from "../src/session";
 import { colors } from "../src/theme";
 import { afterKeyboardCloses } from "../src/keyboard";
 import { ConversationView } from "../src/components/ConversationView";
-import { Toasts } from "../src/components/Toasts";
 
 /** Pushed conversation screen — the narrow-layout chat surface. */
 export default function ConversationScreen() {
@@ -59,7 +58,6 @@ export default function ConversationScreen() {
         onBack={onBack}
         onOpenProfile={onOpenProfile}
       />
-      <Toasts />
     </View>
   );
 }

@@ -7,6 +7,7 @@ import { Stack } from "expo-router";
 import { SessionProvider } from "../src/session";
 import { configureNotifications } from "../src/notify";
 import { ActionSheetHost } from "../src/components/ActionSheet";
+import { ToastHost } from "../src/components/Toasts";
 import { CallHost } from "../src/call/CallHost";
 import { CALL_BG } from "../src/call/CallScreen";
 import { colors } from "../src/theme";
@@ -51,13 +52,16 @@ export default function RootLayout() {
                   name="settings"
                   options={{ presentation: "modal" }}
                 />
+                {/* On iOS every sheet closes from its native header's
+                    right button (Settings and the contact card: Done; New
+                    Message: Cancel); on Android from the up arrow. */}
                 <Stack.Screen
                   name="new-chat"
-                  options={{ presentation: "modal" }}
+                  options={{ presentation: "modal", title: "New Message", ...SHEET_HEADER }}
                 />
                 <Stack.Screen
                   name="profile"
-                  options={{ presentation: "modal" }}
+                  options={{ presentation: "modal", title: "", ...SHEET_HEADER }}
                 />
                 {/* Over everything, modals included; a call ends with a
                     button, never a swipe. */}
@@ -73,6 +77,7 @@ export default function RootLayout() {
               </Stack>
             </CallHost>
             <ActionSheetHost />
+            <ToastHost />
           </SessionProvider>
         </SafeAreaProvider>
       </KeyboardTracking>
@@ -89,6 +94,19 @@ function KeyboardTracking({ children }: { children: React.ReactNode }) {
   if (Platform.OS !== "ios") return <>{children}</>;
   return <KeyboardProvider>{children}</KeyboardProvider>;
 }
+
+/** The native header of the root-stack sheets (Settings has its own stack,
+ *  app/settings/_layout.tsx, styled the same). */
+const SHEET_HEADER = {
+  headerShown: true,
+  // iOS closes the sheet with the header's Cancel / Done (Stack.Toolbar,
+  // iOS only); Android with the Material up arrow, as Settings does.
+  headerBackVisible: Platform.OS !== "ios",
+  headerTintColor: colors.sageDeep,
+  headerTitleStyle: { color: colors.ink },
+  headerShadowVisible: false,
+  headerStyle: { backgroundColor: colors.grouped },
+} as const;
 
 const NO_EDGE_EFFECTS = {
   top: "hidden",

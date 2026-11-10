@@ -1,9 +1,9 @@
 import React from "react";
-import { Alert, Pressable, Text, View } from "react-native";
+import { Alert, Platform, Pressable, Text, View } from "react-native";
 import { Stack, useRouter, type Href } from "expo-router";
 import Constants from "expo-constants";
 import { useChatState, useSession } from "../../src/session";
-import { colors } from "../../src/theme";
+import { colors, ROW_PRESS_DELAY } from "../../src/theme";
 import { Avatar } from "../../src/components/Avatar";
 import { Icon } from "../../src/components/Icon";
 import { Group, Row, SettingsPage, styles } from "../../src/components/SettingsList";
@@ -33,11 +33,15 @@ export default function SettingsScreen() {
 
   return (
     <>
-      <Stack.Toolbar placement="right">
-        <Stack.Toolbar.Button variant="done" onPress={() => router.back()} accessibilityLabel="Done">
-          Done
-        </Stack.Toolbar.Button>
-      </Stack.Toolbar>
+      {/* On iOS Done closes the sheet; Android closes it with the header's
+          up arrow (and its toolbar would need image icons). */}
+      {Platform.OS === "ios" && (
+        <Stack.Toolbar placement="right">
+          <Stack.Toolbar.Button variant="done" onPress={() => router.back()} accessibilityLabel="Done">
+            Done
+          </Stack.Toolbar.Button>
+        </Stack.Toolbar>
+      )}
       <SettingsPage>
         {me && (
           <>
@@ -45,6 +49,7 @@ export default function SettingsScreen() {
               <Pressable
                 style={({ pressed }) => [styles.meCard, pressed && styles.pressed]}
                 onPress={() => open("/settings/profile")}
+                unstable_pressDelay={ROW_PRESS_DELAY}
                 accessibilityRole="button"
                 accessibilityLabel="Profile"
               >
@@ -70,13 +75,13 @@ export default function SettingsScreen() {
               />
               <Row
                 icon="notifications"
-                iconBg="#D6694A"
+                iconBg={colors.iconCoral}
                 title="Notifications"
                 onPress={() => open("/settings/notifications")}
               />
               <Row
                 icon="server"
-                iconBg="#5B7FA6"
+                iconBg={colors.iconSlate}
                 title="Data"
                 onPress={() => open("/settings/data")}
                 last={!s.isAdmin}

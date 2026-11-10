@@ -2,7 +2,6 @@ import React, { useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -79,10 +78,9 @@ export default function LoginScreen() {
 
   return (
     <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
+      {/* Android draws edge to edge, so the keyboard no longer resizes the
+          window (adjustResize): the view pads itself there too. */}
+      <KeyboardAvoidingView style={styles.flex} behavior="padding">
         <ScrollView
           contentContainerStyle={styles.scroll}
           keyboardShouldPersistTaps="handled"
@@ -289,7 +287,7 @@ const styles = StyleSheet.create({
     width: 7,
     height: 7,
     borderRadius: 4,
-    backgroundColor: "#4CB86E",
+    backgroundColor: colors.online,
   },
   serverText: {
     ...type.footnote,
@@ -298,7 +296,7 @@ const styles = StyleSheet.create({
   },
   segment: {
     flexDirection: "row",
-    backgroundColor: "rgba(118,128,112,0.14)",
+    backgroundColor: colors.searchFill,
     borderRadius: 10,
     padding: 2,
     marginBottom: 14,

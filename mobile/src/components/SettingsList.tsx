@@ -1,6 +1,16 @@
 import React from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { colors, type } from "../theme";
+import {
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { useHeaderHeight } from "expo-router/react-navigation";
+import { colors, ROW_PRESS_DELAY, type } from "../theme";
 import { Icon, type IconName } from "./Icon";
 
 /**
@@ -9,17 +19,36 @@ import { Icon, type IconName } from "./Icon";
  * header owns the title, back button, and large-title collapse.
  */
 export function SettingsPage({ children }: { children: React.ReactNode }) {
-  return (
+  const headerHeight = useHeaderHeight();
+  const page = (
     <ScrollView
       style={styles.root}
       contentContainerStyle={styles.content}
       // Lets the native header inset the content and collapse the large title.
       contentInsetAdjustmentBehavior="automatic"
+      // iOS: insets the content by the keyboard and scrolls the focused field
+      // above it, as UIKit's own settings lists do.
+      automaticallyAdjustKeyboardInsets
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="interactive"
     >
       {children}
     </ScrollView>
+  );
+  if (Platform.OS !== "android") return page;
+  // Android draws edge to edge, so the keyboard never resizes the window:
+  // the padding shrinks the list, and Android's ScrollView then scrolls the
+  // focused field above the keyboard. The view measures itself from the top
+  // of the screen below the native header, so the header's height is its
+  // offset (without it the padding falls short by that much).
+  return (
+    <KeyboardAvoidingView
+      style={styles.root}
+      behavior="padding"
+      keyboardVerticalOffset={headerHeight}
+    >
+      {page}
+    </KeyboardAvoidingView>
   );
 }
 
@@ -81,6 +110,7 @@ export function Row({
   return (
     <Pressable
       onPress={onPress}
+      unstable_pressDelay={ROW_PRESS_DELAY}
       disabled={!onPress || disabled}
       style={({ pressed }) => [styles.row, pressed && onPress && styles.pressed]}
       // Static rows (values, switches) keep their children individually accessible.
@@ -123,11 +153,13 @@ export function PwField({
   value,
   onChange,
   auto,
+  autoFocus,
 }: {
   placeholder: string;
   value: string;
   onChange: (v: string) => void;
   auto: "current-password" | "new-password";
+  autoFocus?: boolean;
 }) {
   return (
     <View style={styles.rowSep}>
@@ -140,6 +172,7 @@ export function PwField({
         onChangeText={onChange}
         autoComplete={auto}
         textContentType={auto === "new-password" ? "newPassword" : "password"}
+        autoFocus={autoFocus}
       />
     </View>
   );
@@ -158,7 +191,7 @@ export const styles = StyleSheet.create({
     paddingBottom: 48,
   },
   pressed: {
-    backgroundColor: "rgba(27,36,31,0.06)",
+    backgroundColor: colors.fill,
   },
   group: {
     marginTop: 22,

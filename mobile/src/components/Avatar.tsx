@@ -1,5 +1,6 @@
 import React from "react";
-import { Image, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import { Image } from "expo-image";
 import { colorFor, initialsFor, type PublicUser } from "@alexmessages/shared";
 import { colors } from "../theme";
 import { useSession } from "../session";
@@ -27,10 +28,14 @@ export function Avatar({ user, size = 40 }: { user: UserLike | null | undefined;
       ]}
     >
       {uri ? (
+        // expo-image with a memory cache: a photo already shown elsewhere
+        // (the list, then a sheet) draws on its first frame instead of
+        // flashing the color circle while React Native's Image decodes.
         <Image
           source={{ uri }}
+          cachePolicy="memory-disk"
           style={{ width: size, height: size, borderRadius: size / 2 }}
-          accessibilityLabel={`${user?.display_name} avatar`}
+          accessibilityLabel={`${user?.display_name || user?.username || "User"} avatar`}
         />
       ) : (
         <Text style={[styles.initials, { fontSize: size * (initials.length > 1 ? 0.38 : 0.44) }]}>

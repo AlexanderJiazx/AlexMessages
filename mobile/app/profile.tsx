@@ -1,13 +1,12 @@
 import React from "react";
-import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Stack, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { nameFor } from "@alexmessages/shared";
 import { useChatState, useSession } from "../src/session";
 import { colors, type, WIDE_BREAKPOINT } from "../src/theme";
 import { Avatar } from "../src/components/Avatar";
 import { Icon, type IconName } from "../src/components/Icon";
-import { GlassIconButton } from "../src/components/Glass";
 
 /** Read-only peer profile — an iOS contact card: hero, actions, details. */
 export default function ProfileScreen() {
@@ -28,22 +27,39 @@ export default function ProfileScreen() {
   const { width } = useWindowDimensions();
   const wide = width >= WIDE_BREAKPOINT;
 
+  const navigation = useNavigation();
   const message = () => {
     if (!valid) return;
+    // The screen under this card (it is a modal on the root stack).
+    const st = navigation.getState() as
+      | { index: number; routes: { name: string; params?: { channel?: string } }[] }
+      | undefined;
+    const below = st ? st.routes[st.index - 1] : undefined;
     store.openDM(uid);
     const channel = store.state.activeChannel;
     router.back();
-    if (!wide && channel) {
-      // Narrow → pushed conversation; wide selects in place via store state.
+    // Narrow → the conversation; wide selects in place via store state. A
+    // card opened from that very thread just closes back onto it, instead
+    // of stacking a second copy of the thread.
+    const threadBelow = below?.name === "conversation" && below.params?.channel === channel;
+    if (!wide && channel && !threadBelow) {
+      // Small delay so the sheet dismisses before the push.
       setTimeout(() => router.push({ pathname: "/conversation", params: { channel } }), 60);
     }
   };
 
   return (
-    <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
-      <View style={styles.nav}>
-        <GlassIconButton icon="close" label="Close" onPress={() => router.back()} size={40} />
-      </View>
+    <SafeAreaView style={styles.root} edges={["bottom"]}>
+      {/* The native header (app/_layout.tsx). On iOS Done closes the card,
+          as it closes Settings; Android closes it with the header's up
+          arrow (and its toolbar would need image icons). */}
+      {Platform.OS === "ios" && (
+        <Stack.Toolbar placement="right">
+          <Stack.Toolbar.Button variant="done" onPress={() => router.back()} accessibilityLabel="Done">
+            Done
+          </Stack.Toolbar.Button>
+        </Stack.Toolbar>
+      )}
       <ScrollView contentContainerStyle={styles.body}>
         <View style={styles.hero}>
           <Avatar user={u} size={112} />
@@ -144,13 +160,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.grouped,
   },
-  nav: {
-    alignItems: "flex-end",
-    paddingHorizontal: 14,
-    paddingTop: 12,
-  },
   body: {
     paddingHorizontal: 16,
+    paddingTop: 8,
     paddingBottom: 40,
   },
   hero: {
@@ -178,7 +190,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.faint,
   },
   dotOn: {
-    backgroundColor: "#4CB86E",
+    backgroundColor: colors.online,
   },
   statusText: {
     ...type.subhead,

@@ -1,12 +1,12 @@
-import React, { useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import { StyleSheet, Text, useWindowDimensions, View } from "react-native";
-import { Redirect, useRouter } from "expo-router";
+import { Redirect, useFocusEffect, useNavigationContainerRef, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { onOpenChannelRequest, useChatState, useSession } from "../src/session";
 import { colors, type, WIDE_BREAKPOINT } from "../src/theme";
+import { showConversation } from "../src/nav";
 import { DMList } from "../src/components/DMList";
 import { ConversationView } from "../src/components/ConversationView";
-import { Toasts } from "../src/components/Toasts";
 
 /**
  * Chat home — the adaptive surface:
@@ -20,10 +20,21 @@ export default function ChatHome() {
   const { width } = useWindowDimensions();
   const wide = width >= WIDE_BREAKPOINT;
 
+  // One push per tap: a second tap (or a double tap) on a row while the
+  // first push is still on its way would stack the same thread twice. The
+  // lock opens again once this screen has focus again (the user came back).
+  const pushing = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      pushing.current = false;
+    }, [])
+  );
   const openChannel = useCallback(
     (channel: string) => {
+      if (!wide && pushing.current) return;
       store.switchChannel(channel);
       if (!wide) {
+        pushing.current = true;
         router.push({ pathname: "/conversation", params: { channel } });
       }
     },
@@ -31,16 +42,22 @@ export default function ChatHome() {
   );
 
   // Notification taps → open that conversation (a tap that started the
-  // app waits in notify.ts until the session is ready).
+  // app waits in notify.ts until the session is ready). A channel this
+  // account is not part of (left over from another account) is ignored.
+  // Open sheets close first, so the thread isn't pushed above them; during
+  // a live call nothing moves (the call screen or its tile stays where it
+  // is), and the thread is only selected.
+  const navRef = useNavigationContainerRef();
   useEffect(() => {
     if (phase !== "ready") return;
     return onOpenChannelRequest((channel) => {
+      if (store.peerOf(channel) == null) return;
       store.openChannelExternal(channel);
-      if (!wide) {
-        router.push({ pathname: "/conversation", params: { channel } });
-      }
+      const call = store.state.call;
+      if (call && call.phase !== "ended") return;
+      showConversation(navRef, channel, !wide);
     });
-  }, [phase, store, router, wide]);
+  }, [phase, store, navRef, wide]);
 
   const onNewDm = useCallback(
     () => router.push({ pathname: "/new-chat", params: { wide: wide ? "1" : "0" } }),
@@ -69,7 +86,10 @@ export default function ChatHome() {
           </View>
           <View style={styles.main}>
             {s.activeChannel && store.channelExists(s.activeChannel) ? (
+              // Keyed: a draft, a reply, or a recording stays with its
+              // own conversation instead of carrying over to the next one.
               <ConversationView
+                key={s.activeChannel}
                 channel={s.activeChannel}
                 showBack={false}
                 fullBleed={false}
@@ -85,7 +105,6 @@ export default function ChatHome() {
             )}
           </View>
         </View>
-        <Toasts />
       </SafeAreaView>
     );
   }
@@ -100,7 +119,6 @@ export default function ChatHome() {
         onNewDm={onNewDm}
         onOpenSettings={onOpenSettings}
       />
-      <Toasts />
     </SafeAreaView>
   );
 }
