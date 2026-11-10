@@ -4,6 +4,7 @@ import { store } from "../client";
 import { useChatState } from "../hooks";
 import { Avatar } from "./Avatar";
 import { Icon } from "./icons";
+import { useEscapeLayer } from "../layers";
 
 /** Left rail: "Messages" title, compose button, pinned + normal DM list,
  *  and the bottom account trigger that opens Settings. */
@@ -36,8 +37,8 @@ export function Rail({
         >
           <Icon name="compose" size={18} sw={1.8} />
         </button>
-        <button className="rail-close" aria-label="Close" onClick={onClose}>
-          ✕
+        <button className="rail-close" aria-label="Close" title="Close" onClick={onClose}>
+          <Icon name="x" size={16} sw={2} />
         </button>
       </div>
 
@@ -71,7 +72,7 @@ export function Rail({
           <Avatar uid={me?.id} />
         </span>
         <span className="rail-account-meta">
-          <b>{me ? me.display_name || me.username : "—"}</b>
+          <b dir="auto">{me ? me.display_name || me.username : "—"}</b>
           <span>{me ? `@${me.username}` : ""}</span>
         </span>
         <span className="rail-account-cog" aria-hidden="true">
@@ -107,8 +108,10 @@ function DmRow({
       >
         <Avatar uid={item.peerId} />
         <div className="who">
-          <b>{nameFor(s.users, item.peerId)}</b>
-          <span className="sub">{preview}</span>
+          <b dir="auto">{nameFor(s.users, item.peerId)}</b>
+          <span className="sub" dir="auto">
+            {preview}
+          </span>
         </div>
         <span
           className="unread-dot"
@@ -120,6 +123,8 @@ function DmRow({
         ref={btnRef}
         className="dm-menu-btn"
         aria-label="Conversation actions"
+        aria-haspopup="true"
+        aria-expanded={menuOpen}
         title="Actions"
         onClick={(e) => {
           e.stopPropagation();
@@ -148,6 +153,14 @@ function DmMenu({
   const ref = useRef<HTMLDivElement>(null);
   const st = store.dmStateFor(channel);
   const unread = store.isUnread(channel);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
+  // Escape closes this menu only (and gives focus back to its button).
+  useEscapeLayer(true, () => {
+    closeRef.current();
+    anchor?.focus();
+  });
 
   useEffect(() => {
     const el = ref.current;
@@ -162,50 +175,48 @@ function DmMenu({
     if (mr.bottom > window.innerHeight - 8) {
       el.style.top = `${r.top - mr.height - 8}px`;
     }
+    el.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+    const close = () => closeRef.current();
     const away = (e: MouseEvent) => {
-      if (!el.contains(e.target as Node)) onClose();
+      const t = e.target as Node;
+      // The anchor toggles the menu itself: closing here too would let its
+      // click open the menu again.
+      if (el.contains(t) || anchor.contains(t)) return;
+      close();
     };
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+    const scroll = (e: Event) => {
+      if (!el.contains(e.target as Node)) close();
     };
     document.addEventListener("mousedown", away);
-    document.addEventListener("keydown", esc);
-    window.addEventListener("resize", onClose);
-    document.addEventListener("scroll", onClose, true);
+    window.addEventListener("resize", close);
+    document.addEventListener("scroll", scroll, true);
     return () => {
       document.removeEventListener("mousedown", away);
-      document.removeEventListener("keydown", esc);
-      window.removeEventListener("resize", onClose);
-      document.removeEventListener("scroll", onClose, true);
+      window.removeEventListener("resize", close);
+      document.removeEventListener("scroll", scroll, true);
     };
-  }, [anchor, onClose]);
+  }, [anchor]);
+
+  const pick = (fn: () => void) => () => {
+    onClose();
+    anchor?.focus({ preventScroll: true });
+    fn();
+  };
 
   return (
     <div className="dm-menu" ref={ref}>
-      <button
-        onClick={() => {
-          onClose();
-          void store.togglePin(channel, !st.pinned);
-        }}
-      >
+      <button onClick={pick(() => void store.togglePin(channel, !st.pinned))}>
         {st.pinned ? "Unpin" : "Pin"} conversation
       </button>
       <button
-        onClick={() => {
-          onClose();
+        onClick={pick(() => {
           if (unread) void store.markRead(channel);
           else void store.markUnread(channel);
-        }}
+        })}
       >
         {unread ? "Mark as read" : "Mark as unread"}
       </button>
-      <button
-        className="danger"
-        onClick={() => {
-          onClose();
-          void store.deleteDm(channel);
-        }}
-      >
+      <button className="danger" onClick={pick(() => void store.deleteDm(channel))}>
         Delete for me
       </button>
     </div>

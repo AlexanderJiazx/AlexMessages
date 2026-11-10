@@ -6,6 +6,7 @@ import { useChatState } from "../hooks";
 import { Avatar } from "./Avatar";
 import { Icon, type IconName } from "./icons";
 import { enablePushFlow, disablePushFlow, pushSupported } from "../push";
+import { useEscapeLayer, useFocusTrap } from "../layers";
 
 type TabId = "profile" | "account" | "notifications" | "data" | "admin";
 
@@ -33,14 +34,18 @@ export function SettingsModal({
     ...(s.isAdmin ? [{ id: "admin" as TabId, label: "Admin", icon: "lock" as IconName }] : []),
   ];
 
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const shown = open && !!s.me;
+  useEscapeLayer(shown, onClose);
+  // Opened after the dialog, so Escape closes the photo menu first.
+  useEscapeLayer(shown && avatarMenu, () => {
+    setAvatarMenu(false);
+    camRef.current?.focus();
+  });
+  useFocusTrap(dialogRef, shown);
   useEffect(() => {
-    if (!open) return;
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", esc);
-    return () => document.removeEventListener("keydown", esc);
-  }, [open, onClose]);
+    if (!open) setAvatarMenu(false);
+  }, [open]);
 
   useEffect(() => {
     if (!avatarMenu) return;
@@ -81,7 +86,15 @@ export function SettingsModal({
   const me = s.me;
 
   return (
-    <div className="modal settings-modal on" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div
+      ref={dialogRef}
+      className="modal settings-modal on"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Settings"
+      tabIndex={-1}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
       <div className="settings-card">
         <button className="settings-close iconbtn" aria-label="Close" title="Close" onClick={onClose}>
           <Icon name="x" size={14} sw={2} />
@@ -93,6 +106,7 @@ export function SettingsModal({
               <button
                 key={t.id}
                 className={`settings-tab${t.id === tab ? " active" : ""}`}
+                aria-current={t.id === tab ? "page" : undefined}
                 onClick={() => setTab(t.id)}
               >
                 <Icon name={t.icon} size={17} />

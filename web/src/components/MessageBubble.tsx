@@ -9,13 +9,20 @@ import {
   isVoiceMessage,
   nameFor,
 } from "@shared/format";
-import type { ChatMessage } from "@shared/store";
+import { messageKey, type ChatMessage } from "@shared/store";
 import { store, toast } from "../client";
 import { useChatState } from "../hooks";
 import { renderBodyNodes } from "../format-ui";
 import { Avatar } from "./Avatar";
 import { Icon } from "./icons";
 import { VoiceMessage } from "./VoiceMessage";
+import { isImeComposing, onActivateKey } from "../layers";
+
+/** Taps reveal a message's actions where there is no hover to show them. */
+const TAP_REVEAL_QUERY = "(hover: none), (max-width: 920px)";
+const LONG_PRESS_MS = 500;
+/** Targets that keep their own tap behavior (links, players, buttons…). */
+const INTERACTIVE = "a, button, input, textarea, audio, video, img, [role=button], .actions";
 
 /**
  * One message row: avatar slot, header (name + time), bubble (reply-ref,
@@ -28,12 +35,17 @@ export function MessageBubble({
   allMsgs,
   onOpenProfile,
   onImageClick,
+  revealed = false,
+  onReveal,
 }: {
   m: ChatMessage;
   prev: ChatMessage | null;
   allMsgs: ChatMessage[];
   onOpenProfile: (uid: number) => void;
   onImageClick: (src: string) => void;
+  /** Whether a tap has revealed this message's actions (touch / narrow). */
+  revealed?: boolean;
+  onReveal?: (on: boolean) => void;
 }) {
   const s = useChatState();
   const mine = s.me != null && m.user_id === s.me.id;
@@ -48,16 +60,63 @@ export function MessageBubble({
   const status = store.deliveryStatus(m.channel);
 
   const replyTarget = m.reply_to ? allMsgs.find((x) => x.id === m.reply_to) : null;
+  const pressRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; fired: boolean }>({
+    timer: null,
+    fired: false,
+  });
+  useEffect(() => () => {
+    if (pressRef.current.timer) clearTimeout(pressRef.current.timer);
+  }, []);
+  const openProfile = () => m.user_id != null && onOpenProfile(m.user_id);
+  const closeActions = () => onReveal?.(false);
+
+  const tapReveals = () => typeof window.matchMedia === "function" && window.matchMedia(TAP_REVEAL_QUERY).matches;
+  const cancelPress = () => {
+    if (pressRef.current.timer) clearTimeout(pressRef.current.timer);
+    pressRef.current.timer = null;
+  };
 
   return (
     <div
-      className={`msg ${mine ? "me" : "them"}${isCont ? " cont" : ""}`}
+      className={`msg ${mine ? "me" : "them"}${isCont ? " cont" : ""}${editing ? " editing" : ""}`}
       id={`msg-${m.id}`}
+      data-key={messageKey(m)}
+      onPointerDown={(e) => {
+        pressRef.current.fired = false;
+        if (e.pointerType !== "touch" || editing) return;
+        cancelPress();
+        // Long-press reveals the actions anywhere on the message (even on a
+        // link or a photo), as in Messages.
+        pressRef.current.timer = setTimeout(() => {
+          pressRef.current.timer = null;
+          pressRef.current.fired = true;
+          onReveal?.(true);
+        }, LONG_PRESS_MS);
+      }}
+      onPointerUp={cancelPress}
+      onPointerCancel={cancelPress}
+      onPointerLeave={cancelPress}
+      onContextMenu={(e) => {
+        if (pressRef.current.fired) e.preventDefault();
+      }}
+      onClickCapture={(e) => {
+        // The click that ends a long-press must not also open a link/photo.
+        if (pressRef.current.fired) {
+          pressRef.current.fired = false;
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }}
+      onClick={(e) => {
+        if (editing || !tapReveals()) return;
+        if ((e.target as HTMLElement).closest(INTERACTIVE)) return;
+        onReveal?.(!revealed);
+      }}
     >
       {!mine && (
         <div
           className="av-slot"
-          onClick={isCont ? undefined : () => m.user_id != null && onOpenProfile(m.user_id)}
+          onClick={isCont ? undefined : openProfile}
         >
           {isCont ? (
             <span className="timestamp-gutter">{fmtTime(m.created_at)}</span>
@@ -76,21 +135,25 @@ export function MessageBubble({
             <div className="head">
               <b
                 style={{ color: c }}
-                onClick={() => m.user_id != null && onOpenProfile(m.user_id)}
+                role="button"
+                tabIndex={0}
+                dir="auto"
+                onClick={openProfile}
+                onKeyDown={onActivateKey(openProfile)}
               >
                 {nameFor(s.users, m.user_id)}
               </b>
               <span className="time">{fmtTime(m.created_at)}</span>
             </div>
           ))}
-        <div className="bubble" title={fmtTime(m.created_at)}>
-          {replyTarget && <ReplyRef target={replyTarget} />}
+        <div className={`bubble${editing ? " editing" : ""}`} title={fmtTime(m.created_at)}>
+          {replyTarget ? <ReplyRef target={replyTarget} /> : m.reply_to ? <ReplyMissing /> : null}
           {editing ? (
             <EditArea m={m} onDone={() => setEditing(false)} />
           ) : (
             m.text != null &&
             m.text !== "" && (
-              <div className="body">
+              <div className="body" dir="auto">
                 {renderBodyNodes(m.text)}
                 {m.edited_at != null && <span className="edited-tag">(edited)</span>}
               </div>
@@ -120,18 +183,35 @@ export function MessageBubble({
         )}
         {status && status.messageId === m.id && <div className="send-status">{status.label}</div>}
       </div>
-      <div className="actions">
-        <button title="Reply" onClick={() => store.setReplyTo(m)}>
+      <div className={`actions${revealed ? " mobile" : ""}`} role="group" aria-label="Message actions">
+        <button
+          title="Reply"
+          aria-label="Reply"
+          onClick={() => {
+            closeActions();
+            store.setReplyTo(m);
+            document.querySelector<HTMLTextAreaElement>("textarea.input")?.focus();
+          }}
+        >
           <Icon name="reply" size={14} sw={1.8} />
         </button>
         {mine && !!m.text && (
-          <button title="Edit" onClick={() => setEditing(true)}>
+          <button
+            title="Edit"
+            aria-label="Edit"
+            onClick={() => {
+              closeActions();
+              setEditing(true);
+            }}
+          >
             <Icon name="compose" size={14} sw={1.8} />
           </button>
         )}
         <button
           title="Copy"
+          aria-label="Copy"
           onClick={() => {
+            closeActions();
             navigator.clipboard
               ?.writeText(m.text || "")
               .then(() => toast("Copied"))
@@ -155,21 +235,42 @@ function ReplyRef({ target }: { target: ChatMessage }) {
   )
     .replace(/\s+/g, " ")
     .slice(0, 100);
+  const jump = () => {
+    const el = document.getElementById(`msg-${target.id}`);
+    if (!el) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" });
+    el.classList.add("highlight");
+    setTimeout(() => el.classList.remove("highlight"), 1400);
+  };
   return (
     <div
       className="reply-ref"
-      onClick={() => {
-        const el = document.getElementById(`msg-${target.id}`);
-        if (!el) return;
-        el.scrollIntoView({ block: "center", behavior: "smooth" });
-        el.classList.add("highlight");
-        setTimeout(() => el.classList.remove("highlight"), 1400);
-      }}
+      role="button"
+      tabIndex={0}
+      aria-label={`Jump to the message from ${nameFor(s.users, target.user_id)}`}
+      onClick={jump}
+      onKeyDown={onActivateKey(jump)}
     >
       <Icon name="reply" size={12} sw={1.8} />
       <span>replying to</span>
-      <b style={{ color: tc }}>{nameFor(s.users, target.user_id)}</b>
-      <span className="preview">{preview}</span>
+      <b style={{ color: tc }} dir="auto">
+        {nameFor(s.users, target.user_id)}
+      </b>
+      <span className="preview" dir="auto">
+        {preview}
+      </span>
+    </div>
+  );
+}
+
+/** The reply chip when the original message is not loaded (older history,
+ *  or deleted): same shape as ReplyRef, nothing to jump to. */
+function ReplyMissing() {
+  return (
+    <div className="reply-ref missing">
+      <Icon name="reply" size={12} sw={1.8} />
+      <span className="preview">Original message not loaded</span>
     </div>
   );
 }
@@ -200,6 +301,7 @@ function EditArea({ m, onDone }: { m: ChatMessage; onDone: () => void }) {
         ref={ref}
         className="edit-area"
         aria-label="Edit message"
+        dir="auto"
         value={val}
         onChange={(e) => {
           setVal(e.target.value);
@@ -208,7 +310,7 @@ function EditArea({ m, onDone }: { m: ChatMessage; onDone: () => void }) {
           el.style.height = Math.min(200, el.scrollHeight) + "px";
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
+          if (e.key === "Enter" && !e.shiftKey && !isImeComposing(e)) {
             e.preventDefault();
             save();
           }

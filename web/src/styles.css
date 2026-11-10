@@ -137,7 +137,13 @@ body::before {
 }
 .dm-row:hover .dm-menu-btn,
 .dm-row.active .dm-menu-btn,
+.dm-menu-btn:focus-visible,
 .dm-menu-btn[aria-expanded="true"] { opacity: 1; }
+.dm-row:has(.dm:focus-visible) .dm-menu-btn { opacity: 1; }
+/* No hover on touch screens and in the phone drawer: always show it. */
+@media (hover: none), (max-width: 920px) {
+  .dm-menu-btn { opacity: 1; }
+}
 .dm-menu-btn:hover { background: rgba(79,122,94,.12); color: var(--sage-deep); }
 
 .dm-menu {
@@ -243,7 +249,7 @@ body::before {
   font-family: 'Instrument Serif', serif; font-size: 26px; color: var(--ink-2);
   line-height: 1.2; letter-spacing:-.01em;
 }
-.empty-state .empty-sub { font-size: 13px; color: var(--muted); max-width: 320px; }
+.empty-state .empty-sub { font-size: 13px; color: var(--muted); max-width: 320px; overflow-wrap: anywhere; }
 .composer-wrap.hidden { display: none; }
 
 .day-sep {
@@ -282,7 +288,10 @@ body::before {
 .msg.me { justify-content: flex-end; }
 .msg.cont { padding-top: 1px; padding-bottom: 1px; }
 .msg.cont .av-slot .av { visibility: hidden; }
-.msg.highlight .bubble { background: rgba(199,225,197,.65); transition: background 1.2s ease; }
+/* The transition sits on the base state so the jump-to-reply highlight
+   fades out as smoothly as it fades in. */
+.msg .bubble { transition: background-color 1.2s ease; }
+.msg.highlight .bubble { background: rgba(199,225,197,.65); }
 .av-slot { width: 32px; flex-shrink: 0; display:flex; justify-content:center; position: relative; padding-bottom: 2px; }
 .av-slot .av { cursor: pointer; }
 .msg-col {
@@ -291,7 +300,10 @@ body::before {
 }
 .msg.me .msg-col { align-items: flex-end; }
 .msg .head { display:flex; align-items:baseline; gap:8px; margin: 6px 4px 2px; flex-wrap: wrap; }
-.msg .head b { font-size: 12.5px; font-weight:600; color: var(--ink); cursor: pointer; }
+.msg .head b {
+  font-size: 12.5px; font-weight:600; color: var(--ink); cursor: pointer;
+  min-width: 0; max-width: 100%; overflow-wrap: anywhere;
+}
 .msg .head .time { font-size: 10.5px; color: var(--faint); }
 .bubble {
   background: var(--surface);
@@ -355,8 +367,21 @@ body::before {
   cursor: pointer;
 }
 .reply-ref:hover { color: var(--ink-2); }
-.reply-ref b { color: var(--ink-2); font-weight:600; }
-.reply-ref .preview { color: var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 320px; }
+.reply-ref b {
+  color: var(--ink-2); font-weight:600; flex-shrink: 1; min-width: 0; max-width: 40%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.reply-ref > svg, .reply-ref > span:not(.preview) { flex-shrink: 0; }
+/* The original is not loaded: same height as a real chip, nothing to jump to. */
+.reply-ref.missing { cursor: default; font-style: italic; }
+.reply-ref.missing:hover { color: var(--muted); }
+.reply-ref .preview { color: var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 320px; min-width: 0; }
+.reply-ref:focus-visible,
+.msg .head b:focus-visible,
+.av[role="button"]:focus-visible {
+  outline: 2px solid var(--sage); outline-offset: 2px; border-radius: 6px;
+}
+.av[role="button"]:focus-visible { border-radius: 50%; }
 
 /* Attachments */
 .attachments { margin-top: 6px; display:flex; flex-direction:column; align-items: flex-start; gap:6px; max-width: 100%; }
@@ -439,15 +464,21 @@ body::before {
 .att-file .meta b { font-size: 13px; font-weight: 600; color: var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .att-file .meta span { font-size: 11px; color: var(--muted); }
 
-/* Hover actions */
+/* Message actions: shown on hover, on keyboard focus (they stay in the tab
+   order while transparent), and — where there is no hover — by a tap or a
+   long-press on the message (.mobile). */
 .actions {
   position:absolute; top: -14px; right: 16px;
-  display:none; align-items:center; gap: 2px;
+  display:inline-flex; align-items:center; gap: 2px;
   background: var(--surface); border:1px solid var(--line);
   border-radius: 10px; padding: 3px; box-shadow: var(--shadow-2);
   z-index: 4;
+  opacity: 0; pointer-events: none; transition: opacity .12s ease;
 }
-.msg:hover .actions { display:inline-flex; }
+.msg:hover .actions,
+.msg .actions.mobile { opacity: 1; pointer-events: auto; }
+.msg .actions:has(:focus-visible) { opacity: 1; pointer-events: auto; }
+.msg.editing .actions { display: none; }
 .actions button {
   width: 28px; height: 28px; display:grid; place-items:center;
   border: 0; background: transparent; color: var(--muted); border-radius: 7px;
@@ -465,6 +496,7 @@ body::before {
   transition: border-color .15s, box-shadow .15s;
 }
 .composer.focused { border-color: var(--sage-mint); box-shadow: 0 0 0 4px rgba(199,225,197,.35), var(--shadow-1); }
+.composer.drag-over { border-style: dashed; border-color: var(--sage); }
 .replying-to {
   display:flex; align-items:center; gap:10px;
   padding: 8px 16px; border-bottom: 1px solid var(--line-2);
@@ -472,7 +504,9 @@ body::before {
   background: var(--sage-tint); border-radius: 22px 22px 0 0;
 }
 .replying-to b { color: var(--sage-deep); font-weight:600; }
-.replying-to .preview { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 60vw; }
+.replying-to .replying-who { min-width: 0; max-width: 45%; flex-shrink: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.replying-to > svg, .replying-to .x { flex-shrink: 0; }
+.replying-to .preview { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 60vw; min-width: 0; flex: 1 1 auto; }
 .replying-to .x {
   margin-left:auto; width:22px; height:22px; border:0; background: transparent;
   color: var(--muted); border-radius: 6px; display:grid; place-items:center;
@@ -491,6 +525,13 @@ body::before {
   display:grid; place-items:center; border-radius:50%;
 }
 .pending-att button:hover { background: rgba(53,80,64,.15); }
+/* A file still uploading: a placeholder chip in the staged row. */
+.pending-att.uploading { opacity: .8; }
+.pending-att.uploading .spinner {
+  width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+  border: 2px solid var(--sage-mint); border-top-color: var(--sage);
+  animation: spin .8s linear infinite;
+}
 /* iMessage-style image thumbnail for pending image attachments */
 .pending-thumb { position: relative; width: 72px; height: 72px; }
 .pending-thumb img {
@@ -649,7 +690,8 @@ textarea.input::placeholder { color: var(--faint); }
 .badge-you { background: var(--sage-tint); color: var(--sage-deep); padding: 1px 6px; border-radius: 999px; font-size: 10px; margin-left: 6px; font-weight:600; }
 
 /* Toast */
-.toast-stack { position: fixed; bottom: 26px; left: 50%; transform: translate(-50%, 0); z-index: 9999; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
+/* Above the composer (Composer.tsx publishes its height as --composer-h). */
+.toast-stack { position: fixed; bottom: calc(var(--composer-h, 0px) + 26px); left: 50%; transform: translate(-50%, 0); z-index: 9999; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
 .toast {
   background: var(--ink); color: #ECF3E8;
   padding: 9px 14px; border-radius: 999px; font-size: 12.5px;
@@ -681,6 +723,7 @@ textarea.input::placeholder { color: var(--faint); }
   backdrop-filter: blur(3px);
 }
 .modal.on { display: flex; }
+.modal:focus, .lightbox:focus { outline: none; }
 .modal .card {
   background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: var(--shadow-2); width: 100%; max-width: 420px; padding: 22px;
@@ -928,8 +971,6 @@ textarea.input::placeholder { color: var(--faint); }
   .composer-wrap { padding: 4px 8px 6px; padding-bottom: max(6px, env(safe-area-inset-bottom)); }
   .replying-to .preview { max-width: 50vw; }
   .actions { top: auto; right: 4px; bottom: -2px; }
-  .msg:hover .actions { display: none; }
-  .msg .actions.mobile { display: inline-flex; }
   .rail-title { font-size: 26px; }
 }
 
@@ -1319,11 +1360,12 @@ textarea.input::placeholder { color: var(--faint); }
 }
 .call-size:hover { background: rgba(0,0,0,.5); }
 
-/* Minimized: a floating window over the chat. It stays below the modals
-   (.modal, z-index 250), so an open dialog such as Settings is never
-   covered by it. */
+/* Minimized: a floating window over the chat. It stays below every dialog
+   (.modal, z-index 250) and the image lightbox (z-index 200), so an open
+   dialog such as Settings or a photo is never covered by it. */
 .call-view.mini {
-  z-index: 240;
+  z-index: 150;
+  transition: opacity .15s ease;
   inset: auto 24px 96px auto; width: 320px; height: 200px;
   border-radius: 18px;
   box-shadow: 0 24px 60px -18px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.08) inset;
@@ -1358,4 +1400,25 @@ textarea.input::placeholder { color: var(--faint); }
   .call-view.mini .call-peer { padding: 10px 8px 54px; }
   .call-view.mini .call-peer-name { font-size: 13px; }
   .call-view.mini .call-peer-muted { bottom: 50px; }
+}
+
+/* No hover on touch screens and narrow windows: the actions bar shows only
+   when a tap or long-press reveals it (.mobile) or a key focuses it. */
+@media (hover: none), (max-width: 920px) {
+  .msg:hover .actions:not(.mobile) { opacity: 0; pointer-events: none; }
+  .msg:hover .actions:has(:focus-visible) { opacity: 1; pointer-events: auto; }
+  /* The rail drawer covers the left of the screen and the floating call
+     window the top right: hide the window while the drawer is open, so it
+     never covers the drawer's rows (their "…" buttons sit on the right). */
+  .app.rail-open ~ .call-view.mini { opacity: 0; pointer-events: none; }
+}
+
+/* Reduced motion: no endless animations, near-instant transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
 }

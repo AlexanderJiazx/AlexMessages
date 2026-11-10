@@ -111,7 +111,7 @@ export async function enablePushFlow(): Promise<boolean> {
           ? "Notifications are blocked — enable them in your browser settings"
           : "Notifications were declined",
       );
-      store.state.pushSubscribed = false;
+      store.setPushSubscribed(false);
       return false;
     }
     const { public_key: vapidKey } = await api.pushPublicKey();
@@ -122,7 +122,7 @@ export async function enablePushFlow(): Promise<boolean> {
     } catch {
       /* private mode */
     }
-    store.state.pushSubscribed = true;
+    store.setPushSubscribed(true);
     toast("Notifications enabled");
     return true;
   } catch (err) {
@@ -149,7 +149,7 @@ export async function disablePushFlow(): Promise<void> {
         /* best effort */
       }
     }
-    store.state.pushSubscribed = false;
+    store.setPushSubscribed(false);
     try {
       localStorage.setItem(PUSH_DECLINED_KEY, "1");
     } catch {
@@ -203,7 +203,7 @@ export async function reconcilePushOnLoad(): Promise<"prompt" | "ok" | "unsuppor
     const { public_key: vapidKey } = await api.pushPublicKey();
     const sub = await getOrCreateSubscription(reg, vapidKey);
     await postSubscriptionToServer(sub);
-    store.state.pushSubscribed = true;
+    store.setPushSubscribed(true);
   } catch (err) {
     console.warn("[push] reconcile failed", err);
   }

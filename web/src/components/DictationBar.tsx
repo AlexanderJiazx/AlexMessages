@@ -21,11 +21,18 @@ const VOICE_NAME = "voice-message.wav";
  *   stop          — end capture, transcribe, put the text in the composer
  *   send-audio    — end capture, upload the WAV as a voice-message attachment
  *   send          — end capture, transcribe, and send the text immediately
+ *
+ * Results belong to the conversation the dictation started in (`channel`):
+ * sends go there even if the user has switched meanwhile, and a transcript
+ * meant for the composer is dropped once this bar is gone.
  */
 export function DictationBar({
+  channel,
   onTranscribed,
   onExit,
 }: {
+  /** The conversation this dictation belongs to. */
+  channel: string;
   /** Fills the composer textarea with transcript text (stop action). */
   onTranscribed: (text: string) => void;
   /** Leaves dictation mode entirely (cancel). */
@@ -35,15 +42,29 @@ export function DictationBar({
   const [elapsed, setElapsed] = useState(0);
   const [levels, setLevels] = useState<number[]>(() => new Array(WAVE_BARS).fill(0));
   const recRef = useRef<VoiceRecorder | null>(null);
-  const clipRef = useRef<RecordedClip | null>(null);
+  // The parent passes fresh lambdas on every render: read them through refs
+  // so a re-render never restarts the microphone.
+  const exitRef = useRef(onExit);
+  exitRef.current = onExit;
+  const transcribedRef = useRef(onTranscribed);
+  transcribedRef.current = onTranscribed;
+  const channelRef = useRef(channel);
+  const mountedRef = useRef(true);
+  const exit = () => {
+    if (mountedRef.current) exitRef.current();
+  };
 
-  // Start the mic on mount; report permission problems and bail out.
+  // Start the mic once on mount; report permission problems and bail out.
   useEffect(() => {
+    mountedRef.current = true;
     const rec = new VoiceRecorder();
     recRef.current = rec;
     rec.start()
-      .then(() => setPhase({ kind: "recording" }))
+      .then(() => {
+        if (mountedRef.current && recRef.current === rec) setPhase({ kind: "recording" });
+      })
       .catch((e: Error) => {
+        if (e.message === "cancelled" || !mountedRef.current) return;
         toast(
           e.message === "denied"
             ? "Microphone access denied — allow it in your browser settings"
@@ -52,10 +73,14 @@ export function DictationBar({
               : "Couldn't start recording",
           true,
         );
-        onExit();
+        exitRef.current();
       });
-    return () => rec.cancel();
-  }, [onExit]);
+    return () => {
+      mountedRef.current = false;
+      rec.cancel();
+      if (recRef.current === rec) recRef.current = null;
+    };
+  }, []);
 
   // Waveform ticker: shifts the rolling level history left and pushes the
   // current smoothed level on the right — the ChatGPT scrolling-wave look.
@@ -86,7 +111,7 @@ export function DictationBar({
   function cancel() {
     recRef.current?.cancel();
     recRef.current = null;
-    onExit();
+    exit();
   }
 
   async function transcribeClip(clip: RecordedClip): Promise<string | null> {
@@ -105,17 +130,15 @@ export function DictationBar({
     setPhase({ kind: "transcribing" });
     const clip = await finishCapture();
     if (!clip) {
-      onExit();
+      exit();
       return;
     }
-    clipRef.current = clip;
     const text = await transcribeClip(clip);
-    if (text == null) {
-      onExit();
-      return;
-    }
-    onTranscribed(text);
-    onExit();
+    // The bar is gone (the user left the conversation): the composer it
+    // would fill belongs to another conversation now.
+    if (!mountedRef.current) return;
+    if (text) transcribedRef.current(text);
+    exit();
   }
 
   async function onSendText() {
@@ -123,16 +146,13 @@ export function DictationBar({
     setPhase({ kind: "transcribing" });
     const clip = await finishCapture();
     if (!clip) {
-      onExit();
+      exit();
       return;
     }
     const text = await transcribeClip(clip);
-    if (text == null) {
-      onExit();
-      return;
-    }
-    store.sendMessage(text);
-    onExit();
+    // Staged files go along only while their conversation is still open.
+    if (text) store.sendMessage(text, undefined, channelRef.current);
+    exit();
   }
 
   async function onSendAudio() {
@@ -140,26 +160,15 @@ export function DictationBar({
     setPhase({ kind: "transcribing" });
     const clip = await finishCapture();
     if (!clip) {
-      onExit();
+      exit();
       return;
     }
-    try {
-      const file = new File([clip.blob], VOICE_NAME, { type: "audio/wav" });
-      const att = await api.upload(file);
-      store.sendMessage("", [
-        {
-          name: att.name || VOICE_NAME,
-          url: att.url,
-          size: att.size,
-          mime: att.mime || "audio/wav",
-          width: 0,
-          height: 0,
-        },
-      ]);
-    } catch {
-      toast("Couldn't send voice message", true);
+    const file = new File([clip.blob], VOICE_NAME, { type: "audio/wav" });
+    const att = await store.uploadAttachment(file, VOICE_NAME, { stage: false });
+    if (att) {
+      store.sendMessage("", [{ ...att, mime: att.mime || "audio/wav" }], channelRef.current);
     }
-    onExit();
+    exit();
   }
 
   const recording = phase.kind === "recording";

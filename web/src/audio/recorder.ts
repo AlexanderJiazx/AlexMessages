@@ -43,6 +43,7 @@ export class VoiceRecorder {
   /** Starts capturing. Throws a typed error when permission is denied. */
   async start(): Promise<void> {
     if (this.recording) return;
+    this.destroyed = false;
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
@@ -58,13 +59,18 @@ export class VoiceRecorder {
       }
       throw err;
     }
+    // Cancelled (or stopped) while the permission prompt / device open was
+    // pending: release the microphone at once instead of recording.
+    if (this.destroyed) {
+      for (const t of stream.getTracks()) t.stop();
+      throw new Error("cancelled");
+    }
     this.stream = stream;
     this.chunks = [];
     this.samples = 0;
     this.level = 0;
     this.peak = 0;
     this.startTs = performance.now();
-    this.destroyed = false;
 
     const ctx = new AudioContext();
     this.ctx = ctx;
@@ -97,6 +103,7 @@ export class VoiceRecorder {
    * recorded (under ~150 ms — almost certainly an accidental tap).
    */
   async stop(): Promise<RecordedClip | null> {
+    this.destroyed = true;
     const ctx = this.ctx;
     const rate = ctx?.sampleRate || 48000;
     this.teardown();
@@ -114,6 +121,7 @@ export class VoiceRecorder {
 
   /** Aborts capture and discards everything (the Cancel action). */
   cancel(): void {
+    this.destroyed = true;
     this.chunks = [];
     this.samples = 0;
     this.teardown();

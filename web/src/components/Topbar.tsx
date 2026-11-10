@@ -19,7 +19,7 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
       </button>
       <div className="title">
         <h1>
-          <span>{name}</span>
+          <span dir="auto">{name}</span>
         </h1>
         {s.activeChannel && (
           <span className="presence-chip">

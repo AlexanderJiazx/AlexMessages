@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useEscapeLayer, useFocusTrap } from "../layers";
 import { onToast } from "../client";
 import type { ToastEvent } from "@shared/store";
 import { useChatState } from "../hooks";
@@ -18,7 +19,7 @@ export function Toasts() {
   }, []);
 
   return (
-    <div className="toast-stack">
+    <div className="toast-stack" role="status" aria-live="polite">
       {items.map((t) => (
         <div key={t.id} className={`toast${t.isErr ? " err" : ""}`}>
           {t.text}
@@ -36,17 +37,20 @@ export function Toasts() {
 
 /** Full-screen image preview. */
 export function Lightbox({ src, onClose }: { src: string | null; onClose: () => void }) {
-  useEffect(() => {
-    if (!src) return;
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", esc);
-    return () => document.removeEventListener("keydown", esc);
-  }, [src, onClose]);
+  const ref = useRef<HTMLDivElement>(null);
+  useEscapeLayer(!!src, onClose);
+  useFocusTrap(ref, !!src);
   if (!src) return null;
   return (
-    <div className="lightbox on" onClick={onClose}>
+    <div
+      ref={ref}
+      className="lightbox on"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image preview"
+      tabIndex={-1}
+      onClick={onClose}
+    >
       <img src={src} alt="" />
     </div>
   );

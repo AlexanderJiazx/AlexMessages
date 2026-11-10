@@ -16,6 +16,7 @@ import {
 import { Toasts, Lightbox } from "../components/Overlays";
 import { CallView } from "../components/CallView";
 import { reconcilePushOnLoad, registerServiceWorker } from "../push";
+import { useEscapeLayer } from "../layers";
 
 /** The signed-in app shell: rail + center pane + every overlay. */
 export function ChatScreen() {
@@ -41,12 +42,15 @@ export function ChatScreen() {
     });
   }, [ready]);
 
+  // The phone's rail drawer is a layer too: Escape closes it.
+  useEscapeLayer(railOpen, () => setRailOpen(false));
+
   const peerId = store.peerOf(s.activeChannel);
   const peerName = nameFor(s.users, peerId);
 
   return (
     <>
-      <div className="app">
+      <div className={`app${railOpen ? " rail-open" : ""}`}>
         <div
           className={`backdrop${railOpen ? " on" : ""}`}
           onClick={() => setRailOpen(false)}

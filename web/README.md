@@ -66,7 +66,7 @@ to the legacy `static/` shells — so a fresh clone still runs without Node.
 ## Test
 
 ```bash
-npm run test:e2e   # playwright — 49 tests across 8 specs
+npm run test:e2e   # playwright — 56 tests across 9 specs
 ```
 
 The web client has no Vitest unit tests of its own (the shared logic is

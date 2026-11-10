@@ -5,31 +5,35 @@ import { useChatState } from "../hooks";
 import { Avatar } from "./Avatar";
 import { Icon } from "./icons";
 import { enablePushFlow } from "../push";
+import { isImeComposing, useEscapeLayer, useFocusTrap } from "../layers";
 
-/** Generic modal shell: dimmed backdrop, .card content, Escape/backdrop close. */
+/** Generic modal shell: dimmed backdrop, .card content, Escape/backdrop
+ *  close. A dialog for assistive tech; Tab stays inside while it is open. */
 function Modal({
   on,
   onClose,
+  label,
   className = "",
   children,
 }: {
   on: boolean;
   onClose: () => void;
+  label: string;
   className?: string;
   children: React.ReactNode;
 }) {
-  useEffect(() => {
-    if (!on) return;
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", esc);
-    return () => document.removeEventListener("keydown", esc);
-  }, [on, onClose]);
+  const ref = useRef<HTMLDivElement>(null);
+  useEscapeLayer(on, onClose);
+  useFocusTrap(ref, on);
   if (!on) return null;
   return (
     <div
+      ref={ref}
       className={`modal on ${className}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label={label}
+      tabIndex={-1}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -61,7 +65,7 @@ export function NewDmModal({ on, onClose }: { on: boolean; onClose: () => void }
   }
 
   return (
-    <Modal on={on} onClose={onClose}>
+    <Modal on={on} onClose={onClose} label="Start a new chat">
       <div className="card">
         <h3 className="serif">Start a new chat</h3>
         <div
@@ -84,7 +88,7 @@ export function NewDmModal({ on, onClose }: { on: boolean; onClose: () => void }
           value={val}
           onChange={(e) => setVal(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
+            if (e.key === "Enter" && !isImeComposing(e)) {
               e.preventDefault();
               void submit();
             }
@@ -146,7 +150,7 @@ export function DeleteAccountModal({ on, onClose }: { on: boolean; onClose: () =
   }
 
   return (
-    <Modal on={on} onClose={onClose}>
+    <Modal on={on} onClose={onClose} label="Delete account">
       <div className="card">
         <h3 className="serif">Delete account</h3>
         <div
@@ -168,7 +172,7 @@ export function DeleteAccountModal({ on, onClose }: { on: boolean; onClose: () =
           value={pw}
           onChange={(e) => setPw(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
+            if (e.key === "Enter" && !isImeComposing(e)) {
               e.preventDefault();
               void confirm();
             }
@@ -220,7 +224,7 @@ export function ProfileSheet({
   };
 
   return (
-    <Modal on={uid != null} onClose={onClose}>
+    <Modal on={uid != null} onClose={onClose} label="Profile">
       <div className="card sheet-card">
         <div className="detail-hd">
           <b>Profile</b>
@@ -233,13 +237,13 @@ export function ProfileSheet({
           <div className="profile-row">
             <Avatar uid={uid} large />
             <div className="name-block">
-              <div className="name">{u?.display_name || nameFor(s.users, uid)}</div>
+              <div className="name" dir="auto">{u?.display_name || nameFor(s.users, uid)}</div>
             </div>
           </div>
           <div className="field">
             <label>Bio</label>
             <div className={`read-only${u?.bio ? "" : " empty"}`}>
-              {u?.bio || "No bio yet."}
+              <span dir="auto">{u?.bio || "No bio yet."}</span>
             </div>
           </div>
           {/* The mobile contact card's row: equal tiles, one line at any width. */}
@@ -312,7 +316,7 @@ export function ProfileSheet({
 
 export function PushPromptModal({ on, onClose }: { on: boolean; onClose: () => void }) {
   return (
-    <Modal on={on} onClose={onClose}>
+    <Modal on={on} onClose={onClose} label="Stay in the loop">
       <div className="card">
         <div className="push-illus" aria-hidden="true">
           <Icon name="bell" size={34} sw={1.6} />

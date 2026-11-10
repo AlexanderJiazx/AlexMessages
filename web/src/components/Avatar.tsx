@@ -1,6 +1,7 @@
 import { colorFor, initialsFor, nameFor, shade } from "@shared/format";
 import { store } from "../client";
 import { useStoreVersion } from "../hooks";
+import { onActivateKey } from "../layers";
 
 /**
  * The generated-avatar block used across the app: gradient circle with
@@ -29,6 +30,9 @@ export function Avatar({
       title={nameFor(s.users, uid)}
       onClick={onClick}
       role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      aria-label={onClick ? nameFor(s.users, uid) : undefined}
+      onKeyDown={onClick ? onActivateKey(onClick) : undefined}
     >
       {u?.avatar ? (
         <img className="av-photo" src={u.avatar} alt="" loading="lazy" />
