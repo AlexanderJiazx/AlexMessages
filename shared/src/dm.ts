@@ -10,22 +10,26 @@ export function isDM(channel: string | null | undefined): channel is string {
   return typeof channel === "string" && channel.startsWith("dm:");
 }
 
-/** Parses `dm:<a>:<b>` into its two member ids, or null when malformed. */
+/** Parses `dm:<lo>:<hi>` into its two member ids, or null when malformed or
+ * not in canonical form. */
 export function parseDMChannel(channel: string): [number, number] | null {
   if (!isDM(channel)) return null;
   const parts = channel.split(":");
   if (parts.length !== 3) return null;
-  const a = parseInt(parts[1], 10);
-  const b = parseInt(parts[2], 10);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  const a = Number(parts[1]);
+  const b = Number(parts[2]);
+  // Like the server, accept only the exact spelling dmChannelFor builds.
+  if (!Number.isInteger(a) || !Number.isInteger(b) || a <= 0 || a >= b) return null;
+  if (dmChannelFor(a, b) !== channel) return null;
   return [a, b];
 }
 
-/** Returns the channel's other participant relative to `meId`. */
+/** Returns the channel's other participant relative to `meId`, or null when
+ *  `meId` is not one of its two participants. */
 export function dmPeerOf(channel: string | null | undefined, meId: number | null | undefined): number | null {
   if (meId == null) return null;
   const ids = channel ? parseDMChannel(channel) : null;
-  if (!ids) return null;
+  if (!ids || (ids[0] !== meId && ids[1] !== meId)) return null;
   return ids[0] === meId ? ids[1] : ids[0];
 }
 

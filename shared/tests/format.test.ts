@@ -8,6 +8,8 @@ import {
   fmtListTime,
   fmtSize,
   fmtStampLabel,
+  formatDate,
+  isoDate,
   hash,
   initialsFor,
   isVoiceMessage,
@@ -36,6 +38,7 @@ describe("dm helpers", () => {
     expect(parseDMChannel("dm:x:y")).toBeNull();
     expect(parseDMChannel("dm:1")).toBeNull();
     expect(parseDMChannel("dm:1:2:3")).toBeNull();
+    for (const bad of ["dm:9:3", "dm:03:9", "dm:+3:9", "dm:3:3", "dm:0:3", "dm:3.0:9", "dm: 3:9"]) expect(parseDMChannel(bad)).toBeNull();
   });
 
   it("dmChannelFor sorts the ids", () => {
@@ -46,7 +49,7 @@ describe("dm helpers", () => {
   it("dmPeerOf returns the other participant", () => {
     expect(dmPeerOf("dm:3:9", 3)).toBe(9);
     expect(dmPeerOf("dm:3:9", 9)).toBe(3);
-    expect(dmPeerOf("dm:3:9", 5)).toBe(3); // non-member sees first id
+    expect(dmPeerOf("dm:3:9", 5)).toBeNull(); // not a participant
     expect(dmPeerOf("dm:3:9", null)).toBeNull();
   });
 });
@@ -192,5 +195,36 @@ describe("list + stream timestamps", () => {
     expect(fmtStampLabel(at(6, 9), now)).toMatch(/^Today 9:05/);
     expect(fmtStampLabel(at(5, 9), now)).toMatch(/^Yesterday 9:05/);
     expect(fmtStampLabel(at(2, 9), now)).toMatch(/^Friday 9:05/);
+  });
+});
+
+describe("review regressions (format)", () => {
+  it("links stop before sentence punctuation and unmatched brackets", () => {
+    const links = (t: string) => bodySegments(t).filter((x) => x.kind === "link").map((x) => (x as { href: string }).href);
+    expect(links("(see https://x.com/a), ok.")).toEqual(["https://x.com/a"]);
+    expect(links("go to https://x.com/page.")).toEqual(["https://x.com/page"]);
+    expect(links("wiki https://en.wikipedia.org/wiki/Go_(game) rocks")).toEqual(["https://en.wikipedia.org/wiki/Go_(game)"]);
+    expect(links('"https://x.com/q?a=1"')).toEqual(["https://x.com/q?a=1"]);
+    expect(firstUrl("look: https://x.com/page.")).toBe("https://x.com/page");
+    // The trimmed punctuation stays in the text.
+    expect(bodySegments("at https://x.com.").map((x) => ("text" in x ? x.text : ""))).toEqual(["at ", "https://x.com", "."]);
+  });
+
+  it("initials never split an emoji", () => {
+    expect(initialsFor({ 1: { id: 1, username: "z", display_name: "😀 Zed", bio: "", avatar: "" } }, 1)).toBe("😀Z");
+    expect(initialsFor({ 1: { id: 1, username: "z", display_name: "😀", bio: "", avatar: "" } }, 1)).toBe("😀");
+  });
+
+  it("sizes switch to MB before reading 1024.0 KB", () => {
+    expect(fmtSize(1048575)).toBe("1.00 MB");
+    expect(fmtSize(1023)).toBe("1023 B");
+    expect(fmtSize(1536)).toBe("1.5 KB");
+  });
+
+  it("day separators use the local calendar day", () => {
+    const evening = new Date(2026, 9, 28, 23, 30); // local time
+    expect(isoDate(evening.getTime() / 1000)).toBe("2026-10-28");
+    expect(formatDate("2026-10-28", new Date(2026, 9, 28, 8, 0))).toBe("Today");
+    expect(formatDate("2026-10-27", new Date(2026, 9, 28, 8, 0))).not.toBe("Today");
   });
 });

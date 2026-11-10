@@ -10,7 +10,10 @@ import {
   CALL_CONNECT_TIMEOUT_MS,
   CALL_ENDED_LINGER_MS,
   CALL_ICE_RESTART_DELAY_MS,
+  CALL_RATE_LIMITED_TEXT,
   CALL_RECONNECT_TIMEOUT_MS,
+  CALL_START_TIMEOUT_MS,
+  CALL_START_TIMEOUT_TEXT,
   type CallIceCandidate,
   type CallMediaConstraints,
   type CallPeerConnection,
@@ -300,7 +303,7 @@ describe("outgoing calls", () => {
 
     const tracks = h.store.state.call!.localStream!.getTracks() as FakeTrack[];
     h.store.calls.hangUp();
-    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1" }]);
+    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1", device: h.store.calls.device }]);
     expect(tracks.every((t) => t.stopped)).toBe(true);
     expect(pc.closed).toBe(true);
     expect(h.store.state.call).toMatchObject({ phase: "ended", outcome: "hung_up", localStream: null });
@@ -338,7 +341,7 @@ describe("outgoing calls", () => {
     h.store.calls.hangUp();
     expect(h.ws().frames("call_hangup")).toEqual([]);
     h.server({ type: "call_outgoing", client_call_id: nonce, call: outgoing({ id: "late", media: "audio" }) });
-    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "late" }]);
+    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "late", device: h.store.calls.device }]);
   });
 
   it("reports why the peer couldn't take the call", async () => {
@@ -390,7 +393,7 @@ describe("incoming calls", () => {
     const h = harness();
     h.server({ type: "call_incoming", call: call() });
     h.store.calls.hangUp();
-    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1" }]);
+    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1", device: h.store.calls.device }]);
     expect(h.getUserMedia).not.toHaveBeenCalled();
     expect(h.store.state.call!.phase).toBe("ended");
   });
@@ -452,7 +455,7 @@ describe("crossed calls", () => {
     expect(h.ws().frames("call_hangup")).toEqual([]);
     h.server({ type: "call_accepted", client_call_id: nonce, call: call({ state: "active", answered_at: 1001 }) });
     await settle();
-    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1" }]);
+    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1", device: h.store.calls.device }]);
     expect(h.store.state.call!.phase).toBe("ended");
     expect(h.pcs).toEqual([]);
     // Bob's call, held back while ours was in flight, is forgotten with it:
@@ -476,7 +479,7 @@ describe("crossed calls", () => {
     // ...and the server then joins our call_start to it.
     h.server({ type: "call_accepted", client_call_id: nonce, call: call({ state: "active", answered_at: 1001 }) });
     await settle();
-    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1" }]);
+    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1", device: h.store.calls.device }]);
     expect(h.store.state.call).toMatchObject({ id: "call1", phase: "ended", outcome: "hung_up" });
     expect(h.pcs).toEqual([]);
     // The server's end of that call changes nothing here.
@@ -551,12 +554,200 @@ describe("reconnects", () => {
   });
 });
 
+describe("lost frames", () => {
+  /** Drops the control socket and brings a new one up through init. */
+  async function reconnect(h: ReturnType<typeof harness>) {
+    h.ws().close();
+    await vi.advanceTimersByTimeAsync(1500); // ChatSocket retries
+    h.ws().fire("open");
+    h.server(initFrame());
+  }
+
+  it("asks for a call whose call_start went unanswered when the socket dropped", async () => {
+    const h = harness();
+    h.store.startCall(2, "audio");
+    await settle();
+    const nonce = h.ws().frames("call_start")[0].client_call_id as string;
+    await reconnect(h);
+    expect(h.ws().frames("call_resume")).toEqual([
+      { type: "call_resume", call_id: "", client_call_id: nonce, device: h.store.calls.device },
+    ]);
+    h.server({ type: "call_outgoing", client_call_id: nonce, call: outgoing({ media: "audio" }) });
+    h.server({ type: "call_ringing", call_id: "call1" });
+    expect(h.store.state.call).toMatchObject({ id: "call1", phase: "outgoing", ringing: true });
+    // The server answered: no timeout ends the call while it rings.
+    await vi.advanceTimersByTimeAsync(CALL_START_TIMEOUT_MS * 2);
+    expect(h.store.state.call!.phase).toBe("outgoing");
+  });
+
+  it("ends a call whose call_start the server never answers", async () => {
+    const h = harness();
+    h.store.startCall(2, "audio");
+    await settle();
+    const nonce = h.ws().frames("call_start")[0].client_call_id as string;
+    await vi.advanceTimersByTimeAsync(CALL_START_TIMEOUT_MS);
+    expect(h.store.state.call).toMatchObject({ phase: "ended", outcome: "failed", error: CALL_START_TIMEOUT_TEXT });
+    expect(callStatusText(h.store.state.call!)).toBe("Couldn't connect");
+    // A late answer is hung up.
+    h.server({ type: "call_outgoing", client_call_id: nonce, call: outgoing({ id: "late", media: "audio" }) });
+    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "late", device: h.store.calls.device }]);
+  });
+
+  it("times a call_start only while the socket is up, from the resume on", async () => {
+    const h = harness();
+    h.store.startCall(2, "audio");
+    await settle();
+    h.ws().close();
+    await vi.advanceTimersByTimeAsync(CALL_START_TIMEOUT_MS); // down the whole time
+    expect(h.store.state.call!.phase).toBe("outgoing");
+    h.ws().fire("open");
+    h.server(initFrame());
+    await vi.advanceTimersByTimeAsync(CALL_START_TIMEOUT_MS - 1);
+    expect(h.store.state.call!.phase).toBe("outgoing");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.store.state.call).toMatchObject({ phase: "ended", outcome: "failed" });
+  });
+
+  it("ends the call when the server has no call for the resumed call_start", async () => {
+    const h = harness();
+    h.store.startCall(2, "audio");
+    await settle();
+    const nonce = h.ws().frames("call_start")[0].client_call_id as string;
+    await reconnect(h);
+    h.server({ type: "call_ended", call_id: "", client_call_id: nonce, reason: "gone" });
+    expect(h.store.state.call).toMatchObject({ phase: "ended", outcome: "gone" });
+  });
+
+  it("hangs up a call hung up before it was named once the socket is back", async () => {
+    const h = harness();
+    h.store.startCall(2, "audio");
+    await settle();
+    const nonce = h.ws().frames("call_start")[0].client_call_id as string;
+    h.store.calls.hangUp();
+    await reconnect(h);
+    expect(h.ws().frames("call_resume")).toEqual([
+      { type: "call_resume", call_id: "", client_call_id: nonce, device: h.store.calls.device },
+    ]);
+    h.server({ type: "call_outgoing", client_call_id: nonce, call: outgoing({ id: "late", media: "audio" }) });
+    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "late", device: h.store.calls.device }]);
+  });
+
+  it("re-sends a call_accept lost in a socket drop", async () => {
+    const h = harness();
+    h.server({ type: "call_incoming", call: call() });
+    await h.store.calls.accept();
+    await reconnect(h);
+    expect(h.ws().frames("call_resume")).toEqual([{ type: "call_resume", call_id: "call1", device: h.store.calls.device }]);
+    // Still ringing on the server: the accept never reached it.
+    h.server({ type: "call_resumed", call: call() });
+    expect(h.ws().frames("call_accept")).toEqual([{ type: "call_accept", call_id: "call1", device: h.store.calls.device }]);
+    h.server({ type: "call_accepted", client_call_id: "", call: call({ state: "active", answered_at: 1001 }) });
+    await settle();
+    expect(h.store.state.call).toMatchObject({ phase: "connecting" });
+    expect(h.store.state.call!.answeredAt).not.toBeNull();
+  });
+
+  it("takes up the call when its call_accepted was lost in a socket drop", async () => {
+    const h = harness();
+    h.server({ type: "call_incoming", call: call() });
+    await h.store.calls.accept();
+    await reconnect(h);
+    h.server({ type: "call_resumed", call: call({ state: "active", answered_at: 1001 }) });
+    await settle();
+    expect(h.store.state.call!.answeredAt).not.toBeNull();
+    expect(h.signals()).toEqual([{ kind: "state", mic: true, camera: true }]);
+  });
+
+  it("gives up on an answer the server never confirms", async () => {
+    const h = harness();
+    h.server({ type: "call_incoming", call: call() });
+    await h.store.calls.accept();
+    await vi.advanceTimersByTimeAsync(CALL_CONNECT_TIMEOUT_MS);
+    expect(h.store.state.call).toMatchObject({ phase: "ended", outcome: "failed" });
+    expect(h.ws().frames("call_hangup")).toEqual([
+      { type: "call_hangup", call_id: "call1", reason: "failed", device: h.store.calls.device },
+    ]);
+  });
+});
+
+describe("held-back incoming calls", () => {
+  const carolCall = () => call({ id: "call9", caller_id: 3, peer: carol, channel: "dm:1:3" });
+
+  it("shows the call when our hung-up call_start is refused", async () => {
+    const h = harness();
+    h.store.startCall(2, "audio");
+    await settle();
+    const nonce = h.ws().frames("call_start")[0].client_call_id as string;
+    h.server({ type: "call_incoming", call: carolCall() });
+    h.store.calls.hangUp();
+    expect(h.store.state.call).toMatchObject({ direction: "outgoing", phase: "ended" });
+    h.server({ type: "call_error", client_call_id: nonce, error: "busy_self" });
+    expect(h.store.state.call).toMatchObject({ id: "call9", phase: "incoming", peer: carol });
+    // The refused nonce is forgotten.
+    expect(h.store.calls["cancelled"].size).toBe(0);
+  });
+
+  it("shows the call when we end our call before its call_start went out", async () => {
+    const h = harness();
+    let grant: () => void = () => undefined;
+    h.getUserMedia.mockImplementationOnce(
+      (c) => new Promise((resolve) => (grant = () => resolve(new FakeStream([new FakeTrack("audio", "mic"), ...(c.video ? [new FakeTrack("video")] : [])])))),
+    );
+    h.store.startCall(2, "audio"); // the permission prompt is up
+    await settle();
+    h.server({ type: "call_incoming", call: carolCall() });
+    expect(h.store.state.call).toMatchObject({ direction: "outgoing", phase: "outgoing" });
+    h.store.calls.hangUp();
+    expect(h.store.state.call).toMatchObject({ id: "call9", phase: "incoming" });
+    grant();
+    await settle();
+    expect(h.ws().frames("call_start")).toEqual([]);
+    expect(h.store.state.call).toMatchObject({ id: "call9", phase: "incoming" });
+  });
+
+  it("shows the call when our call_start goes unanswered", async () => {
+    const h = harness();
+    h.store.startCall(2, "audio");
+    await settle();
+    h.server({ type: "call_incoming", call: carolCall() });
+    await vi.advanceTimersByTimeAsync(CALL_START_TIMEOUT_MS);
+    expect(h.store.state.call).toMatchObject({ id: "call9", phase: "incoming" });
+  });
+
+  it("forgets a held-back call when the socket drops; the server rings it again", async () => {
+    const h = harness();
+    h.store.startCall(2, "audio");
+    await settle();
+    const nonce = h.ws().frames("call_start")[0].client_call_id as string;
+    h.server({ type: "call_incoming", call: carolCall() });
+    h.ws().close();
+    await vi.advanceTimersByTimeAsync(1500);
+    h.ws().fire("open");
+    h.server(initFrame());
+    // Carol's call ended while we were away: the server doesn't ring it again.
+    h.server({ type: "call_ended", call_id: "", client_call_id: nonce, reason: "gone" });
+    expect(h.store.state.call).toMatchObject({ direction: "outgoing", phase: "ended", outcome: "gone" });
+  });
+});
+
+describe("rate limit", () => {
+  it("says so when the server refuses a call as rate_limited", async () => {
+    const h = harness();
+    h.store.startCall(2, "audio");
+    await settle();
+    const nonce = h.ws().frames("call_start")[0].client_call_id as string;
+    h.server({ type: "call_error", client_call_id: nonce, error: "rate_limited" });
+    expect(h.toast).toHaveBeenCalledWith({ text: CALL_RATE_LIMITED_TEXT, isErr: true });
+    expect(h.store.state.call).toMatchObject({ phase: "ended", outcome: "rate_limited" });
+  });
+});
+
 describe("media trouble", () => {
   it("ends an answered call whose media never connects as failed", async () => {
     const h = harness();
     await connectedOutgoing(h);
     await vi.advanceTimersByTimeAsync(CALL_CONNECT_TIMEOUT_MS);
-    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1", reason: "failed" }]);
+    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1", reason: "failed", device: h.store.calls.device }]);
     expect(callStatusText(h.store.state.call!)).toBe("Couldn't connect");
   });
 
@@ -568,7 +759,7 @@ describe("media trouble", () => {
     await vi.advanceTimersByTimeAsync(CALL_ICE_RESTART_DELAY_MS);
     expect(last(h.signals())).toEqual({ kind: "offer", sdp: "offer-2-restart" });
     await vi.advanceTimersByTimeAsync(CALL_RECONNECT_TIMEOUT_MS - CALL_ICE_RESTART_DELAY_MS);
-    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1" }]);
+    expect(h.ws().frames("call_hangup")).toEqual([{ type: "call_hangup", call_id: "call1", device: h.store.calls.device }]);
     expect(callStatusText(h.store.state.call!)).toBe("Connection lost");
   });
 

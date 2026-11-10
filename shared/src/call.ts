@@ -133,8 +133,10 @@ export type CallPhase = "outgoing" | "incoming" | "connecting" | "active" | "rec
  *  "hung_up" (this device ended it), "no_media" (no usable microphone),
  *  "failed" (answered, but media never connected), "lost" (media connected,
  *  then stayed lost), "busy_self" (another of your devices is on a call),
- *  "invalid" (that user can't be called). */
-export type CallOutcome = CallEndReason | "hung_up" | "no_media" | "lost" | "busy_self" | "invalid";
+ *  "invalid" (that user can't be called), "rate_limited" (this user placed
+ *  too many calls too quickly; the server refused this one). An outgoing call
+ *  that got no answer to its call_start ends as "failed" too. */
+export type CallOutcome = CallEndReason | "hung_up" | "no_media" | "lost" | CallErrorCode;
 
 export interface CallSession {
   /** Local identity, stable for the session's whole life (React keys). */
@@ -170,12 +172,31 @@ export const CALL_CONNECT_TIMEOUT_MS = 30000;
 export const CALL_RECONNECT_TIMEOUT_MS = 30000;
 /** How long ICE may sit "disconnected" before an ICE restart. */
 export const CALL_ICE_RESTART_DELAY_MS = 4000;
+/** How long a call_start may go unanswered (call_outgoing, call_accepted,
+ *  or call_error) while the socket is up before the call ends as failed. */
+export const CALL_START_TIMEOUT_MS = 15000;
+/** Shown when a call_start goes unanswered for CALL_START_TIMEOUT_MS. */
+export const CALL_START_TIMEOUT_TEXT = "Couldn't reach the server. Try again.";
+/** The toast for a call_start the server refused as rate_limited. */
+export const CALL_RATE_LIMITED_TEXT = "Too many calls. Wait a moment.";
 /** How long an ended session stays on screen. */
 export const CALL_ENDED_LINGER_MS = 2000;
 /** Cap on signals held while this device's socket reconnects. */
 const OUTBOX_CAP = 256;
 
 export type CallEvent = Extract<ServerEvent, { type: `call_${string}` }>;
+/** Why the server refused a call_start. */
+export type CallErrorCode = Extract<CallEvent, { type: "call_error" }>["error"];
+
+/** call_hangup naming this device, so the server takes it from the device on
+ *  the call even when it arrives on a new socket (a hang-up queued while the
+ *  socket was down). ClientMessage (types.ts) doesn't list `device` yet. */
+type CallHangupFrame = Extract<ClientMessage, { type: "call_hangup" }> & { device: string };
+/** call_resume for a call this device placed (or joined by a crossed
+ *  call_start) but whose id it never heard: call_id is "" and the server
+ *  finds the call by client_call_id and device. ClientMessage (types.ts)
+ *  doesn't list `client_call_id` on call_resume yet. */
+type CallResumeByNonceFrame = Extract<ClientMessage, { type: "call_resume" }> & { client_call_id: string };
 
 export interface CallManagerDeps {
   /** Null when this client can't place or take calls. */
@@ -228,11 +249,14 @@ export class CallManager {
   private startSent: string | null = null;
   /** Nonces hung up before the server named their call. */
   private cancelled = new Set<string>();
-  /** A call that rang while our own call_start was in flight. */
+  /** A call that rang while our own call_start was in flight. It shows once
+   *  that call_start ends without becoming a call. */
   private deferredIncoming: CallInfo | null = null;
+  /** Whether the control socket is up (linkDown → linkReady). */
+  private online = true;
   private everConnected = false;
   private cameraBusy = false;
-  private timers: { connect?: Timer; restart?: Timer; giveUp?: Timer; linger?: Timer } = {};
+  private timers: { start?: Timer; connect?: Timer; restart?: Timer; giveUp?: Timer; linger?: Timer } = {};
 
   constructor(deps: CallManagerDeps) {
     this.deps = deps;
@@ -277,6 +301,7 @@ export class CallManager {
     this.startSent = nonce;
     this.nonce = nonce;
     this.deps.send({ type: "call_start", peer_id: peer.id, media, client_call_id: nonce, device: this.device });
+    if (this.online) this.armStartTimeout();
   }
 
   /** Answers the call ringing on this device. */
@@ -289,6 +314,8 @@ export class CallManager {
     this.role = "callee";
     this.createPeer();
     this.deps.send({ type: "call_accept", call_id: id, device: this.device });
+    // Covers a call_accept lost in a socket drop, too (onResumed re-sends it).
+    this.armConnectTimeout();
   }
 
   /** Ends the call: hangs up, cancels, or declines, depending on the phase. */
@@ -375,14 +402,32 @@ export class CallManager {
 
   /** The control socket dropped: signals wait until the call is resumed. */
   linkDown(): void {
+    this.online = false;
+    clearTimeout(this.timers.start);
+    this.timers.start = undefined;
+    // The server rings a call that is still ringing again on the next socket.
+    this.deferredIncoming = null;
     if (this.busy && this.session?.id) this.linkUp = false;
   }
 
   /** The control socket is back and init applied: rebind this device. */
   linkReady(): void {
+    this.online = true;
+    // Calls hung up before the server named them: a call the server made
+    // meanwhile is named now, and onOutgoing / onAccepted hang it up.
+    for (const nonce of this.cancelled) this.resumeByNonce(nonce);
     const s = this.session;
-    if (!this.busy || !s?.id) {
+    if (!this.busy || !s) {
       this.linkUp = true;
+      return;
+    }
+    if (!s.id) {
+      this.linkUp = true;
+      // The answer to our call_start may have been lost with the socket.
+      if (this.startSent) {
+        this.resumeByNonce(this.startSent);
+        this.armStartTimeout();
+      }
       return;
     }
     this.linkUp = false;
@@ -430,10 +475,10 @@ export class CallManager {
   }
 
   private onOutgoing(nonce: string, call: CallInfo): void {
-    if (this.startSent === nonce) this.startSent = null;
+    if (this.startSent === nonce) this.answeredStart();
     if (this.cancelled.delete(nonce)) {
       // Hung up before the server named the call: end it there too.
-      this.deps.send({ type: "call_hangup", call_id: call.id });
+      this.hangupFrame(call.id);
       return;
     }
     const s = this.session;
@@ -474,14 +519,14 @@ export class CallManager {
       // may have rung or been held back meanwhile.
       if (this.deferredIncoming?.id === call.id) this.deferredIncoming = null;
       if (this.isLive(call.id)) this.finish("hung_up", { tell: true });
-      else this.deps.send({ type: "call_hangup", call_id: call.id });
+      else this.hangupFrame(call.id);
       return;
     }
     const s = this.session;
     if (!s || !this.busy) return;
     if (!((nonce && this.nonce === nonce) || s.id === call.id)) return;
     this.deferredIncoming = null;
-    this.startSent = null;
+    this.answeredStart();
     this.iceServers = call.ice_servers || this.iceServers;
     const me = this.deps.me();
     this.update({
@@ -515,9 +560,15 @@ export class CallManager {
     this.linkUp = true;
     const held = this.outbox.splice(0);
     for (const payload of held) this.deps.send({ type: "call_signal", call_id: call.id, payload });
-    if (call.state === "active" && !this.role) {
-      // Answered while this device was reconnecting.
+    if (call.state === "active" && s.answeredAt == null) {
+      // Answered while this device was reconnecting, or this device answered
+      // and its call_accepted was lost with the socket.
       this.onAccepted("", call);
+      return;
+    }
+    if (call.state === "ringing" && this.role === "callee") {
+      // This device answered, but its call_accept was lost with the socket.
+      this.deps.send({ type: "call_accept", call_id: call.id, device: this.device });
       return;
     }
     const ice = this.pc?.iceConnectionState;
@@ -525,7 +576,12 @@ export class CallManager {
   }
 
   private onEnded(callId: string, nonce: string | undefined, reason: CallEndReason): void {
-    if (nonce) this.cancelled.delete(nonce);
+    if (nonce && this.startSent === nonce) this.answeredStart();
+    if (nonce && this.cancelled.delete(nonce)) {
+      // A call_start hung up before the server named its call is over (or
+      // was never made): a call that rang for us meanwhile shows now.
+      this.showDeferred();
+    }
     if (this.deferredIncoming?.id === callId) {
       this.deferredIncoming = null;
       return;
@@ -536,14 +592,45 @@ export class CallManager {
     this.finish(reason);
   }
 
-  private onError(nonce: string, error: "invalid" | "busy_self"): void {
-    if (this.startSent === nonce) this.startSent = null;
-    if (!this.busy || this.nonce !== nonce) return;
-    this.finish(error);
-    // Our call never started; a call that rang for us meanwhile shows now.
+  private onError(nonce: string, error: CallErrorCode): void {
+    const pending = this.startSent === nonce;
+    if (pending) this.answeredStart();
+    const cancelled = this.cancelled.delete(nonce);
+    const live = this.busy && this.nonce === nonce;
+    if (error === "rate_limited" && live) this.deps.toast(CALL_RATE_LIMITED_TEXT, true);
+    // Our call never started. finish() shows a call that rang for us
+    // meanwhile; if this attempt was already hung up, it shows here.
+    if (live) this.finish(error);
+    else if (pending || cancelled) this.showDeferred();
+  }
+
+  /** The server answered this device's pending call_start. */
+  private answeredStart(): void {
+    this.startSent = null;
+    clearTimeout(this.timers.start);
+    this.timers.start = undefined;
+  }
+
+  /** Shows the call that rang while our own call_start was in flight. */
+  private showDeferred(): void {
     const deferred = this.deferredIncoming;
     this.deferredIncoming = null;
     if (deferred) this.onIncoming(deferred);
+  }
+
+  private resumeByNonce(nonce: string): void {
+    const frame: CallResumeByNonceFrame = { type: "call_resume", call_id: "", client_call_id: nonce, device: this.device };
+    this.deps.send(frame);
+  }
+
+  private hangupFrame(callId: string, failed = false): void {
+    const frame: CallHangupFrame = {
+      type: "call_hangup",
+      call_id: callId,
+      ...(failed ? { reason: "failed" as const } : {}),
+      device: this.device,
+    };
+    this.deps.send(frame);
   }
 
   // ---------- signaling ----------
@@ -788,6 +875,22 @@ export class CallManager {
     }
   }
 
+  /** Ends an outgoing call whose call_start the server never answered while
+   *  the socket stayed up. */
+  private armStartTimeout(): void {
+    clearTimeout(this.timers.start);
+    const key = this.session?.key;
+    this.timers.start = setTimeout(() => {
+      this.timers.start = undefined;
+      const s = this.session;
+      if (!s || s.key !== key || !this.busy || s.id || !this.startSent) return;
+      this.deps.debug("warn", "call_start_timeout", "No answer to call_start", { nonce: this.startSent });
+      this.finish("failed", { tell: true, error: CALL_START_TIMEOUT_TEXT });
+      // finish() leaves a held-back call for the server's answer; none came.
+      this.showDeferred();
+    }, CALL_START_TIMEOUT_MS);
+  }
+
   private armConnectTimeout(): void {
     if (this.everConnected || this.timers.connect) return;
     this.timers.connect = setTimeout(() => {
@@ -854,13 +957,11 @@ export class CallManager {
   private finish(outcome: CallOutcome, opts: { tell?: boolean; error?: string } = {}): void {
     const s = this.session;
     if (!s || !this.busy) return;
+    // A call_start the server hasn't answered yet: its answer still comes.
+    const pending = s.id ? null : this.startSent;
     if (opts.tell) {
-      if (s.id) {
-        const failed = outcome === "failed" && this.role != null;
-        this.deps.send({ type: "call_hangup", call_id: s.id, ...(failed ? { reason: "failed" as const } : {}) });
-      } else if (this.startSent) {
-        this.cancelled.add(this.startSent);
-      }
+      if (s.id) this.hangupFrame(s.id, outcome === "failed" && this.role != null);
+      else if (pending) this.cancelled.add(pending);
     }
     this.deps.debug("info", "call_end", "Call ended", { call: s.id, outcome });
     this.release();
@@ -869,11 +970,15 @@ export class CallManager {
     this.timers.linger = setTimeout(() => {
       if (this.session?.key === key) this.clear();
     }, CALL_ENDED_LINGER_MS);
+    // A call that rang for us while our own call_start was in flight shows
+    // now, unless the server's answer to that call_start is still to come
+    // (onError, onEnded, or onAccepted then decides).
+    if (!pending) this.showDeferred();
   }
 
   /** Stops the media and the peer connection. */
   private release(): void {
-    for (const k of ["connect", "restart", "giveUp"] as const) {
+    for (const k of ["start", "connect", "restart", "giveUp"] as const) {
       clearTimeout(this.timers[k]);
       this.timers[k] = undefined;
     }

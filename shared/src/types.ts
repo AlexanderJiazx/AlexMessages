@@ -103,6 +103,8 @@ export interface InitPayload {
   history_has_more: Record<string, boolean>;
   page_size: number;
   max_upload: number;
+  /** Most attachments one message may carry (older servers omit it: 6). */
+  max_attachments?: number;
 }
 
 // ---------- calls ----------
@@ -189,7 +191,7 @@ export type ServerEvent =
   | { type: "call_signal"; call_id: string; payload: CallSignal }
   | { type: "call_resumed"; call: CallInfo }
   | { type: "call_ended"; call_id: string; client_call_id?: string; reason: CallEndReason }
-  | { type: "call_error"; client_call_id: string; error: "invalid" | "busy_self" }
+  | { type: "call_error"; client_call_id: string; error: "invalid" | "busy_self" | "rate_limited" }
   | { type: "pong" };
 
 // ---------- client → server messages ----------
@@ -209,9 +211,9 @@ export type ClientMessage =
   | { type: "call_start"; peer_id: number; media: CallMedia; client_call_id: string; device: string }
   | { type: "call_accept"; call_id: string; device: string }
   /** reason "failed": the call was answered but its media never connected. */
-  | { type: "call_hangup"; call_id: string; reason?: "failed" }
+  | { type: "call_hangup"; call_id: string; reason?: "failed"; device?: string }
   | { type: "call_signal"; call_id: string; payload: CallSignal }
-  | { type: "call_resume"; call_id: string; device: string }
+  | { type: "call_resume"; call_id: string; device: string; client_call_id?: string }
   /** Whether this device's screen shows the app; calls ring through Web Push
    *  when none of the callee's devices does. */
   | { type: "visibility"; visible: boolean }

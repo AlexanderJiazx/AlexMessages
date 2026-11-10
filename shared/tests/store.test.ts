@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../src/api";
 import { ChatSocket, type SocketLike, type WebSocketFactory } from "../src/socket";
-import { ChatStore, SEND_TIMEOUT_MS } from "../src/store";
+import { ChatStore, messageKey, SEND_TIMEOUT_MS } from "../src/store";
 import type { ServerEvent } from "../src/types";
 
 // ---------- MockSocket: captures sent frames, exposes manual triggers ----------
@@ -119,7 +119,7 @@ describe("review regressions", () => {
     store.editMessage(local,"edited before echo");
     expect(sockets[0].sent.map((x)=>JSON.parse(x)).filter((x)=>x.type==="edit")).toHaveLength(0);
     store.handleEvent({type:"message",channel:"dm:1:2",message:{...local,id:"server-id",client_id:sent.clientId,text:"original",position:1001,created_at:100,edited_at:null}});
-    expect(local).toMatchObject({id:"server-id",text:"edited before echo",_status:"delivered"});
+    expect(store.state.history["dm:1:2"][0]).toMatchObject({id:"server-id",client_id:sent.clientId,text:"edited before echo",_status:"delivered"});
     expect(JSON.parse(sockets[0].sent[sockets[0].sent.length-1])).toMatchObject({type:"edit",id:"server-id",text:"edited before echo"});
     store.reset();vi.useRealTimers();
   });
@@ -212,9 +212,12 @@ describe("optimistic send", () => {
         client_id: cid,
       },
     });
-    expect(arr).toHaveLength(1); // no duplicate
-    expect(arr[0].id).toBe("srv1");
-    expect(arr[0]._status).toBe("delivered");
+    const after = store.state.history["dm:1:2"];
+    expect(after).not.toBe(arr); // copy-on-write: a new array for React
+    expect(after).toHaveLength(1); // no duplicate
+    expect(after[0].id).toBe("srv1");
+    expect(after[0]._status).toBe("delivered");
+    expect(messageKey(after[0])).toBe(cid); // the list key survives the id change
     expect(store.deliveryStatus("dm:1:2")?.label).toBe("Delivered");
     vi.useRealTimers();
   });
@@ -230,7 +233,7 @@ describe("optimistic send", () => {
     expect(m._status).toBe("failed");
     const before = sockets[0].sent.length;
     store.retrySend(m.client_id!);
-    expect(m._status).toBe("sending");
+    expect(store.state.history["dm:1:2"][0]._status).toBe("sending");
     const last = JSON.parse(sockets[0].sent[sockets[0].sent.length - 1]);
     expect(last.client_id).toBe(m.client_id);
     expect(sockets[0].sent.length).toBe(before + 1);
@@ -263,7 +266,7 @@ describe("incoming messages", () => {
       message: mkMsg("m2", 2, "you there?"),
     });
     expect(store.dmStateFor("dm:1:2").unreadCount).toBe(0);
-    expect(read).toHaveBeenCalledWith("dm:1:2");
+    expect(read.mock.calls[0][0]).toBe("dm:1:2");
   });
 
   it("fires onNotify for backgrounded incoming messages", () => {
@@ -422,8 +425,8 @@ describe("thread actions", () => {
       history: { "dm:1:2": [mkMsg("a", 2, "one"), mkMsg("b", 1, "two"), mkMsg("c", 2, "three")] },
     }));
     await store.markUnread("dm:1:2");
-    // 2 messages from the peer → unreadCount 2
-    expect(store.dmStateFor("dm:1:2").unreadCount).toBe(2);
+    // As on the server: a thread marked unread shows one unread message.
+    expect(store.dmStateFor("dm:1:2").unreadCount).toBe(1);
   });
 });
 
@@ -471,3 +474,265 @@ function memStorage(seed: Record<string, string> = {}) {
     removeItem: (k: string) => void map.delete(k),
   };
 }
+
+// ---------- second review pass ----------
+
+const msgs = (n: number, from = 0) => Array.from({ length: n }, (_, i) => ({ ...mkMsg(`m${from + i}`, 2, `t${from + i}`, 1000 + from + i), position: 1000 + from + i }));
+
+describe("review pass 2: history", () => {
+  it("keeps pages scrolled back to when a live message or a reconnect init arrives", async () => {
+    const { api, store, sockets } = makeHarness();
+    connectAndInit(store, sockets, initFrame({ history: { "dm:1:2": msgs(50, 250) }, history_has_more: { "dm:1:2": true } }));
+    vi.spyOn(api, "history").mockResolvedValue({ channel: "dm:1:2", messages: msgs(250, 0), has_more: false } as never);
+    await store.loadOlder("dm:1:2");
+    expect(store.state.history["dm:1:2"]).toHaveLength(300);
+    sockets[0].event({ type: "message", channel: "dm:1:2", message: { ...mkMsg("live", 2, "hi", 5000), position: 5000 } });
+    expect(store.state.history["dm:1:2"]).toHaveLength(301);
+    expect(store.state.history["dm:1:2"][0].id).toBe("m0");
+    // Reconnect: the newest page overlaps what is held, so older pages stay.
+    sockets[0].event(initFrame({ history: { "dm:1:2": [...msgs(49, 251), { ...mkMsg("live", 2, "hi", 5000), position: 5000 }, { ...mkMsg("new", 2, "x", 5001), position: 5001 }] }, history_has_more: { "dm:1:2": true } }));
+    const h = store.state.history["dm:1:2"];
+    expect(h[0].id).toBe("m0");
+    expect(h[h.length - 1].id).toBe("new");
+    expect(new Set(h.map((m) => m.id)).size).toBe(h.length);
+    expect(store.state.historyHasMore["dm:1:2"]).toBe(false);
+  });
+
+  it("drops an older page that resolves after a snapshot replaced the thread", async () => {
+    const { api, store, sockets } = makeHarness();
+    connectAndInit(store, sockets, initFrame({ history: { "dm:1:2": msgs(50, 100) }, history_has_more: { "dm:1:2": true } }));
+    let resolve!: (v: unknown) => void;
+    vi.spyOn(api, "history").mockReturnValue(new Promise((r) => (resolve = r)) as never);
+    const loading = store.loadOlder("dm:1:2");
+    // Disconnected long enough that the new snapshot does not overlap.
+    sockets[0].event(initFrame({ history: { "dm:1:2": msgs(50, 900) }, history_has_more: { "dm:1:2": true } }));
+    resolve({ channel: "dm:1:2", messages: msgs(50, 50), has_more: true });
+    await loading;
+    expect(store.state.history["dm:1:2"].map((m) => m.id)).toEqual(msgs(50, 900).map((m) => m.id));
+  });
+
+  it("history arrays are replaced, never mutated (React sees each change)", () => {
+    vi.useFakeTimers();
+    const { store, sockets } = makeHarness();
+    connectAndInit(store, sockets);
+    store.switchChannel("dm:1:2");
+    const a0 = store.state.history["dm:1:2"];
+    store.sendMessage("one");
+    const a1 = store.state.history["dm:1:2"];
+    expect(a1).not.toBe(a0);
+    const m = a1[0];
+    store.editMessage(m, "two");
+    expect(store.state.history["dm:1:2"]).not.toBe(a1);
+    expect(m.text).toBe("one"); // the old object is untouched
+    sockets[0].event({ type: "message", channel: "dm:1:2", message: mkMsg("x", 2, "hey") });
+    expect(store.state.history["dm:1:2"]).toHaveLength(2);
+    store.reset();
+    vi.useRealTimers();
+  });
+});
+
+describe("review pass 2: unread and receipts", () => {
+  it("a mark-read response does not clear a message that arrived meanwhile", async () => {
+    const { api, store, sockets } = makeHarness();
+    let resolve!: (v: unknown) => void;
+    vi.spyOn(api, "markDMRead").mockReturnValue(new Promise((r) => (resolve = r)) as never);
+    connectAndInit(store, sockets, initFrame({ history: { "dm:1:2": msgs(3) } }));
+    const pending = store.markRead("dm:1:2");
+    store.switchChannel(null);
+    sockets[0].event({ type: "message", channel: "dm:1:2", message: { ...mkMsg("late", 2, "late"), position: 9999 } });
+    resolve({ ok: true, last_read_at: 2000 });
+    await pending;
+    expect(store.dmStateFor("dm:1:2").unreadCount).toBe(1);
+  });
+
+  it("sends the newest held position with mark-read", async () => {
+    const { api, store, sockets } = makeHarness();
+    const read = vi.spyOn(api, "markDMRead").mockResolvedValue({ ok: true, last_read_at: 1 });
+    connectAndInit(store, sockets, initFrame({ history: { "dm:1:2": msgs(3) } }));
+    await store.markRead("dm:1:2");
+    expect(read).toHaveBeenCalledWith("dm:1:2", 1002);
+  });
+
+  it("a push received while the socket is online does not double count", () => {
+    const { store, sockets } = makeHarness();
+    connectAndInit(store, sockets);
+    sockets[0].event({ type: "message", channel: "dm:1:2", message: mkMsg("x", 2, "hey") });
+    store.handlePushReceived("dm:1:2");
+    expect(store.dmStateFor("dm:1:2").unreadCount).toBe(1);
+  });
+
+  it("a read receipt never moves backwards", () => {
+    const { store, sockets } = makeHarness();
+    connectAndInit(store, sockets);
+    sockets[0].event({ type: "dm_read", channel: "dm:1:2", user_id: 2, last_read_at: 300, last_read_position: 30 } as ServerEvent);
+    sockets[0].event({ type: "dm_read", channel: "dm:1:2", user_id: 2, last_read_at: 200, last_read_position: 20 } as ServerEvent);
+    expect(store.dmStateFor("dm:1:2").peerLastReadPosition).toBe(30);
+    expect(store.dmStateFor("dm:1:2").peerLastReadAt).toBe(300);
+  });
+
+  it("ignores an external open of a channel this user is not part of", () => {
+    const { store, sockets } = makeHarness();
+    connectAndInit(store, sockets);
+    store.openChannelExternal("dm:5:9");
+    expect(store.state.activeChannel).toBeNull();
+    expect(store.state.dmThreads.some((t) => t.channel === "dm:5:9")).toBe(false);
+  });
+});
+
+describe("review pass 2: composing", () => {
+  const att = (n: string) => ({ name: n, url: `/uploads/1/${n}`, mime: "text/plain", size: 1, width: 0, height: 0 });
+
+  it("staged files and the reply stay with their conversation", async () => {
+    vi.useFakeTimers();
+    const { api, store, sockets } = makeHarness();
+    connectAndInit(store, sockets, initFrame({ users: [me, bob, { ...bob, id: 3, username: "carol" }], dm_threads: [{ channel: "dm:1:2", peer_id: 2 }, { channel: "dm:1:3", peer_id: 3 }] }));
+    store.switchChannel("dm:1:2");
+    store.addPendingAtt(att("a"));
+    store.switchChannel("dm:1:3");
+    expect(store.state.pendingAtt).toEqual([]);
+    // An upload that finishes after the user left its conversation is dropped.
+    let resolve!: (v: unknown) => void;
+    vi.spyOn(api, "upload").mockReturnValue(new Promise((r) => (resolve = r)) as never);
+    const up = store.uploadAttachment(new Blob(["x"]), "b");
+    store.switchChannel("dm:1:2");
+    resolve({ ...att("b") });
+    expect(await up).toBe(false);
+    expect(store.state.pendingAtt).toEqual([]);
+    store.reset();
+    vi.useRealTimers();
+  });
+
+  it("an explicit send goes to its own conversation and leaves the staged files", () => {
+    vi.useFakeTimers();
+    const { store, sockets } = makeHarness();
+    connectAndInit(store, sockets, initFrame({ users: [me, bob, { ...bob, id: 3, username: "carol" }], dm_threads: [{ channel: "dm:1:2", peer_id: 2 }, { channel: "dm:1:3", peer_id: 3 }] }));
+    store.switchChannel("dm:1:3");
+    store.addPendingAtt(att("staged"));
+    const r = store.sendMessage("", [att("voice-message.m4a")], "dm:1:2");
+    expect(r).toBeTruthy();
+    expect(store.state.history["dm:1:2"][0].attachments.map((a) => a.name)).toEqual(["voice-message.m4a"]);
+    expect(store.state.pendingAtt.map((a) => a.name)).toEqual(["staged"]);
+    store.reset();
+    vi.useRealTimers();
+  });
+
+  it("caps staged files at the server's limit", () => {
+    const { store, sockets } = makeHarness();
+    connectAndInit(store, sockets, initFrame({ max_attachments: 2 }));
+    store.switchChannel("dm:1:2");
+    for (const n of ["a", "b", "c"]) store.addPendingAtt(att(n));
+    expect(store.state.pendingAtt).toHaveLength(2);
+    expect(store.canAttachMore()).toBe(false);
+  });
+
+  it("retry only re-sends a failed message", () => {
+    vi.useFakeTimers();
+    const { store, sockets } = makeHarness();
+    connectAndInit(store, sockets);
+    store.switchChannel("dm:1:2");
+    const { clientId } = store.sendMessage("x")!;
+    const before = sockets[0].sent.length;
+    store.retrySend(clientId); // still sending: nothing to retry
+    expect(sockets[0].sent.length).toBe(before);
+    store.reset();
+    vi.useRealTimers();
+  });
+});
+
+describe("review pass 2: socket liveness", () => {
+  function sock(opts: Partial<ConstructorParameters<typeof ChatSocket>[0]> = {}) {
+    const sockets: MockSocket[] = [];
+    const statuses: string[] = [];
+    const s = new ChatSocket({
+      url: "ws://t/ws",
+      onEvent: () => {},
+      onStatus: (st) => statuses.push(st),
+      WebSocketImpl: () => {
+        const m = new MockSocket();
+        sockets.push(m);
+        return m;
+      },
+      pingIntervalMs: 1000,
+      retryMs: 100,
+      downGraceMs: 300,
+      connectTimeoutMs: 500,
+      ...opts,
+    });
+    return { s, sockets, statuses };
+  }
+
+  it("replaces a socket that stops delivering frames", () => {
+    vi.useFakeTimers();
+    const { s, sockets } = sock();
+    s.connect();
+    sockets[0].open();
+    vi.advanceTimersByTime(2500); // two ping intervals without a frame: still kept
+    expect(sockets[0].closed).toBe(false);
+    vi.advanceTimersByTime(600); // the 3 s check gives up; the retry runs 100 ms later
+    expect(sockets[0].closed).toBe(true);
+    expect(sockets).toHaveLength(2);
+    s.destroy();
+    vi.useRealTimers();
+  });
+
+  it("an abandoned socket reports one close, not two", () => {
+    vi.useFakeTimers();
+    const { s, sockets, statuses } = sock();
+    s.connect();
+    sockets[0].open();
+    vi.advanceTimersByTime(3100);
+    expect(statuses.filter((x) => x === "connecting")).toHaveLength(1);
+    s.destroy();
+    vi.useRealTimers();
+  });
+
+  it("keeps a socket that answers its pings", () => {
+    vi.useFakeTimers();
+    const { s, sockets } = sock();
+    s.connect();
+    sockets[0].open();
+    for (let i = 0; i < 10; i++) {
+      vi.advanceTimersByTime(1000);
+      sockets[0].event({ type: "pong" });
+    }
+    expect(sockets).toHaveLength(1);
+    s.destroy();
+    vi.useRealTimers();
+  });
+
+  it("abandons a connection attempt that never opens", () => {
+    vi.useFakeTimers();
+    const { s, sockets } = sock();
+    s.connect();
+    vi.advanceTimersByTime(700);
+    expect(sockets.length).toBe(2);
+    s.destroy();
+    vi.useRealTimers();
+  });
+
+  it("ignores the close event of a destroyed socket", () => {
+    vi.useFakeTimers();
+    const { s, sockets, statuses } = sock();
+    s.connect();
+    sockets[0].open();
+    s.destroy(); // MockSocket.close fires a close event synchronously
+    vi.advanceTimersByTime(5000);
+    expect(statuses).toEqual(["open"]);
+    expect(sockets).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it("wake reconnects at once while down, and probes an open socket", () => {
+    vi.useFakeTimers();
+    const { s, sockets } = sock({ retryMs: 60_000 });
+    s.connect();
+    sockets[0].open();
+    s.wake();
+    vi.advanceTimersByTime(5100); // the probe ping got no answer
+    expect(sockets[0].closed).toBe(true);
+    s.wake(); // down with a 60 s retry pending: reconnect now
+    expect(sockets).toHaveLength(2);
+    s.destroy();
+    vi.useRealTimers();
+  });
+});

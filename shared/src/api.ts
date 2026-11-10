@@ -52,6 +52,11 @@ function isNativeFile(f: UploadFile): f is { uri: string; name: string; type: st
   return typeof f === "object" && f !== null && "uri" in f;
 }
 
+/** Default limit for one request (headers received). */
+export const REQUEST_TIMEOUT_MS = 20_000;
+/** Uploads and transcriptions send up to 20 MB, so they get longer. */
+export const TRANSFER_TIMEOUT_MS = 180_000;
+
 export class ApiClient {
   baseUrl: string;
   token: string | null;
@@ -78,19 +83,33 @@ export class ApiClient {
     return h;
   }
 
-  /** Raw fetch with auth wired in. */
-  async request(path: string, init: RequestInit = {}): Promise<Response> {
+  /**
+   * Raw fetch with auth wired in. A request that gets no response within
+   * `timeoutMs` is aborted and throws ApiError(0, "Request timed out"), so a
+   * hung server or a dead network never leaves a caller waiting forever.
+   */
+  async request(path: string, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
     const headers = this.headers(init.headers as Record<string, string> | undefined);
-    return fetch(this.url(path), {
-      credentials: "include",
-      ...init,
-      headers,
-    });
+    const ctrl = init.signal ? null : new AbortController();
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+    try {
+      return await fetch(this.url(path), {
+        credentials: "include",
+        ...init,
+        ...(ctrl ? { signal: ctrl.signal } : {}),
+        headers,
+      });
+    } catch (e) {
+      if (ctrl?.signal.aborted) throw new ApiError(0, "Request timed out");
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** Fetch expecting a JSON body; throws ApiError with the server's detail. */
-  async json<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const res = await this.request(path, init);
+  async json<T>(path: string, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+    const res = await this.request(path, init, timeoutMs);
     const body = await res.json().catch(() => null);
     if (!res.ok) {
       const detail = (body && (body as { detail?: string }).detail) || `Request failed (${res.status})`;
@@ -154,7 +173,7 @@ export class ApiClient {
   setAvatar(file: UploadFile): Promise<{ user: PublicUser }> {
     const fd = new FormData();
     appendFile(fd, file, this.readFile);
-    return this.json("/api/me/avatar", { method: "POST", body: fd });
+    return this.json("/api/me/avatar", { method: "POST", body: fd }, TRANSFER_TIMEOUT_MS);
   }
 
   deleteAvatar(): Promise<{ user: PublicUser }> {
@@ -204,7 +223,7 @@ export class ApiClient {
   upload(file: UploadFile): Promise<Attachment> {
     const fd = new FormData();
     appendFile(fd, file, this.readFile);
-    return this.json("/api/upload", { method: "POST", body: fd });
+    return this.json("/api/upload", { method: "POST", body: fd }, TRANSFER_TIMEOUT_MS);
   }
 
   history(channel: string, before?: number, limit?: number, beforeId?: string): Promise<HistoryResponse> {
@@ -220,7 +239,7 @@ export class ApiClient {
   transcribe(file: UploadFile): Promise<{ text: string }> {
     const fd = new FormData();
     appendFile(fd, file, this.readFile);
-    return this.json("/api/transcribe", { method: "POST", body: fd });
+    return this.json("/api/transcribe", { method: "POST", body: fd }, TRANSFER_TIMEOUT_MS);
   }
 
   linkPreview(url: string): Promise<LinkPreview | null> {
@@ -241,8 +260,10 @@ export class ApiClient {
     return this.dmAction(channel, "unpin");
   }
 
-  markDMRead(channel: string): Promise<{ ok: boolean; last_read_at: number }> {
-    return this.dmAction(channel, "read") as Promise<{ ok: boolean; last_read_at: number }>;
+  /** Marks the thread read up to `position` (the newest message this client
+   *  holds), so a message still in flight is never reported as read. */
+  markDMRead(channel: string, position?: number): Promise<{ ok: boolean; last_read_at: number; last_read_position?: number }> {
+    return this.post(`/api/dm/${encodeURIComponent(channel)}/read`, position != null ? { position } : undefined);
   }
 
   markDMUnread(channel: string): Promise<{ ok: boolean; last_read_at: number }> {

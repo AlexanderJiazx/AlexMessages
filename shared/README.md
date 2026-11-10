@@ -44,8 +44,8 @@ npm test            # vitest run
 npm run test:watch  # vitest (watch)
 ```
 
-Tests (`shared/tests/`, 92 tests in 6 files: `api` 8, `call` 28, `format`
-21, `socket` 4, `store` 22, `wav` 9) cover the store reducers (optimistic
+Tests (`shared/tests/`, 127 tests in 6 files: `api` 8, `call` 41, `format`
+25, `socket` 4, `store` 40, `wav` 9) cover the store reducers (optimistic
 send → delivered → read, edits, replies, unread state), the socket's
 reconnect/queue behavior, the API client's error mapping, the format
 helpers, the WAV encoder, and the call engine (`call.test.ts`, against a fake

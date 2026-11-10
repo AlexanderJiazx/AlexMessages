@@ -57,13 +57,17 @@ export function initialsFor(users: Record<number, PublicUser>, uid: number | nul
   if (uid == null || !users[uid]) return "?";
   const name = nameFor(users, uid);
   const parts = name.split(/[\s._-]+/).filter(Boolean);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return (parts[0] || "?").slice(0, 2).toUpperCase();
+  // Code points, not UTF-16 units: "😀 Zed" must not split the emoji in half.
+  const chars = (p: string) => Array.from(p);
+  if (parts.length >= 2) return (chars(parts[0])[0] + chars(parts[1])[0]).toUpperCase();
+  return chars(parts[0] || "?").slice(0, 2).join("").toUpperCase();
 }
 
 export function fmtSize(n: number): string {
+  if (!Number.isFinite(n) || n < 0) n = 0;
   if (n < 1024) return n + " B";
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  // Switch units where the rounded value would read "1024.0 KB".
+  if (n < 1024 * 1024 - 51) return (n / 1024).toFixed(1) + " KB";
   return (n / 1024 / 1024).toFixed(2) + " MB";
 }
 
@@ -112,17 +116,21 @@ export function fmtStampLabel(ts: number | null | undefined, now: Date = new Dat
   return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 }
 
-/** "2026-09-17" — used for day separators. */
+/** "2026-09-17" in the viewer's local time zone — the day-separator key. */
 export function isoDate(ts: number | null | undefined): string {
   if (!ts) return "";
-  return new Date(ts * 1000).toISOString().slice(0, 10);
+  return localDay(new Date(ts * 1000));
 }
 
-/** "Today" or "Wednesday, Sep 17" for the day separator pill. */
-export function formatDate(d: string): string {
+function localDay(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** "Today" or "Wednesday, Sep 17" for the day separator pill (`d` from isoDate). */
+export function formatDate(d: string, now: Date = new Date()): string {
   if (!d) return "";
-  const today = new Date().toISOString().slice(0, 10);
-  if (d === today) return "Today";
+  if (d === localDay(now)) return "Today";
   const dt = new Date(d + "T00:00:00");
   return dt.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
 }
@@ -241,6 +249,28 @@ export type BodySegment =
 const CODE_RE = /`([^`\n]+)`/g;
 const URL_RE = /(https?:\/\/[^\s<]+)/g;
 
+/**
+ * Trims what ends a sentence rather than the URL: trailing punctuation, a
+ * closing bracket without a matching opening one in the URL, and quotes —
+ * "(see https://x.com/a)." links https://x.com/a.
+ */
+function trimUrl(raw: string): string {
+  let url = raw;
+  for (;;) {
+    const last = url[url.length - 1];
+    if (/[.,;:!?'"’”]/.test(last)) {
+      url = url.slice(0, -1);
+      continue;
+    }
+    const pair = ({ ")": "(", "]": "[", "}": "{" } as Record<string, string>)[last];
+    if (pair && url.split(pair).length <= url.split(last).length - 1) {
+      url = url.slice(0, -1);
+      continue;
+    }
+    return url;
+  }
+}
+
 export function bodySegments(text: string): BodySegment[] {
   const out: BodySegment[] = [];
   // Split out backtick code spans first; the remainder is plain text.
@@ -259,9 +289,11 @@ function pushTextWithLinks(chunk: string, out: BodySegment[]): void {
   let last = 0;
   for (const m of chunk.matchAll(URL_RE)) {
     const idx = m.index ?? 0;
+    const url = trimUrl(m[0]);
+    if (url.length <= "https://".length) continue;
     if (idx > last) pushTextWithBreaks(chunk.slice(last, idx), out);
-    out.push({ kind: "link", text: m[0], href: m[0] });
-    last = idx + m[0].length;
+    out.push({ kind: "link", text: url, href: url });
+    last = idx + url.length;
   }
   if (last < chunk.length) pushTextWithBreaks(chunk.slice(last), out);
 }
@@ -276,8 +308,11 @@ function pushTextWithBreaks(chunk: string, out: BodySegment[]): void {
 
 /** First URL in a message body, for link-preview hydration. */
 export function firstUrl(text: string): string | null {
-  const m = (text || "").match(/(https?:\/\/[^\s<]+)/);
-  return m ? m[1] : null;
+  for (const m of (text || "").matchAll(URL_RE)) {
+    const url = trimUrl(m[0]);
+    if (url.length > "https://".length) return url;
+  }
+  return null;
 }
 
 // ---------- calls ----------

@@ -34,14 +34,26 @@ import type {
 
 /** How long to wait for the server's echo before flagging a send as failed. */
 export const SEND_TIMEOUT_MS = 10000;
-/** Messages kept per channel in memory (matches the legacy client). */
-export const HISTORY_CAP = 200;
 export const PAGE_SIZE_DEFAULT = 50;
+/** Most attachments one message may carry, until init says otherwise. */
+export const MAX_ATTACHMENTS_DEFAULT = 6;
 
-/** A message plus client-side delivery state for optimistic sends. */
+/**
+ * A message plus client-side delivery state for optimistic sends.
+ *
+ * Messages and history arrays are immutable: every change replaces the
+ * message object and the channel's array, so views can memoize on identity.
+ * Render lists keyed by `messageKey(m)`, which stays the same when an
+ * optimistic message is confirmed and its `id` changes to the server's.
+ */
 export interface ChatMessage extends BroadcastMessage {
   client_id?: string;
   _status?: "sending" | "delivered" | "failed";
+}
+
+/** Stable list key: the send nonce when there is one, else the id. */
+export function messageKey(m: { id: string; client_id?: string }): string {
+  return m.client_id || m.id;
 }
 
 export type ConnState = "connecting" | "online" | "reconnecting";
@@ -65,6 +77,7 @@ export interface ChatState {
   connState: ConnState;
   pageSize: number;
   maxUpload: number;
+  maxAttachments: number;
   pushSubscribed: boolean;
   /** True once the first init frame has been applied. */
   ready: boolean;
@@ -91,6 +104,7 @@ const initialState = (): ChatState => ({
   connState: "connecting",
   pageSize: PAGE_SIZE_DEFAULT,
   maxUpload: 20 * 1024 * 1024,
+  maxAttachments: MAX_ATTACHMENTS_DEFAULT,
   pushSubscribed: false,
   ready: false,
   call: null,
@@ -154,6 +168,9 @@ export class ChatStore {
   private socket: ChatSocket | null = null;
   private listeners = new Set<Listener>();
   private pending: Record<string, { channel: string; timer: ReturnType<typeof setTimeout> | null; message: ChatMessage; edit?: string }> = {};
+  /** Bumped whenever a channel's history is replaced by a server snapshot
+   *  or cleared, so a history page that was requested before is dropped. */
+  private historyEpoch: Record<string, number> = {};
   /** Whether the app surface is currently visible (drives read-marking). */
   private foreground = true;
   /** This device's side of DM calls; its session is mirrored in state.call. */
@@ -203,10 +220,57 @@ export class ChatStore {
     this.opts.debug?.(level, event, message, context);
   }
 
+  /** Replaces the first message of `channel` that matches with `next(old)`,
+   *  copy-on-write, and keeps a pending send's reference current. */
+  private updateMessage(channel: string, match: (m: ChatMessage) => boolean, next: (m: ChatMessage) => ChatMessage): ChatMessage | null {
+    const arr = this.state.history[channel];
+    const i = arr ? arr.findIndex(match) : -1;
+    if (!arr || i < 0) return null;
+    const updated = next(arr[i]);
+    const copy = arr.slice();
+    copy[i] = updated;
+    this.state.history[channel] = copy;
+    const p = updated.client_id ? this.pending[updated.client_id] : undefined;
+    if (p && p.channel === channel) p.message = updated;
+    return updated;
+  }
+
+  /** Whether `m` counts toward this user's unread badge (the server's rule:
+   *  someone else's message, or a call this user missed). */
+  private countsAsUnread(m: ChatMessage): boolean {
+    const me = this.state.me?.id;
+    if (m.user_id == null || m.user_id === me || m.type === "system") return false;
+    return m.type !== "call" || callMissedBy(m.call, me);
+  }
+
+  /**
+   * Merges a server snapshot (the newest page of a thread) into what this
+   * client already holds: when the snapshot's oldest message is already
+   * loaded, the older pages the user scrolled back to stay. Returns the new
+   * array (pending sends included) and whether older history remains.
+   */
+  private mergeSnapshot(channel: string, incoming: HistoryMessage[], hasMore: boolean): { messages: ChatMessage[]; hasMore: boolean } {
+    const held = (this.state.history[channel] || []).filter((m) => m._status !== "sending" && m._status !== "failed");
+    let older: ChatMessage[] = [];
+    let more = hasMore;
+    if (incoming.length) {
+      const i = held.findIndex((m) => m.id === incoming[0].id);
+      if (i > 0) {
+        older = held.slice(0, i);
+        more = !!this.state.historyHasMore[channel];
+      }
+    }
+    if (!older.length) this.historyEpoch[channel] = (this.historyEpoch[channel] || 0) + 1;
+    return { messages: this.mergePending(channel, [...older, ...incoming]), hasMore: more };
+  }
+
   /** Platform tells the store whether the UI is in the foreground. */
   setForeground(visible: boolean): void {
     // The server rings a hidden device through Web Push as well.
     if (visible !== this.foreground) this.send({ type: "visibility", visible });
+    // Back in front: check at once that the socket still works (a phone
+    // that slept or changed networks often holds a dead connection).
+    if (visible && !this.foreground) this.socket?.wake();
     this.foreground = visible;
     if (visible && this.state.activeChannel && isDM(this.state.activeChannel) && this.isUnread(this.state.activeChannel)) {
       void this.markRead(this.state.activeChannel, { silent: true });
@@ -403,7 +467,17 @@ export class ChatStore {
     s.dmThreads = data.dm_threads || [];
     s.online = new Set(data.online || []);
     const previousChannel = s.activeChannel;
-    s.history = Object.fromEntries(Object.entries(data.history || {}).map(([ch, messages]) => [ch, this.mergePending(ch, messages)]));
+    const history: Record<string, ChatMessage[]> = {};
+    const hasMore: Record<string, boolean> = {};
+    for (const [ch, messages] of Object.entries(data.history || {})) {
+      const merged = this.mergeSnapshot(ch, messages, !!data.history_has_more?.[ch]);
+      history[ch] = merged.messages;
+      hasMore[ch] = merged.hasMore;
+    }
+    for (const ch of Object.keys(s.history)) {
+      if (!history[ch]) this.historyEpoch[ch] = (this.historyEpoch[ch] || 0) + 1;
+    }
+    s.history = history;
     for (const pending of Object.values(this.pending)) {
       if (!s.history[pending.channel]) s.history[pending.channel] = this.mergePending(pending.channel, []);
       if (!s.dmThreads.some((t) => t.channel === pending.channel)) {
@@ -411,10 +485,11 @@ export class ChatStore {
         if (peer != null) s.dmThreads.push({channel: pending.channel, peer_id: peer});
       }
     }
-    s.historyHasMore = data.history_has_more || {};
+    s.historyHasMore = hasMore;
     s.historyLoading = {};
     s.pageSize = data.page_size || PAGE_SIZE_DEFAULT;
     s.maxUpload = data.max_upload || s.maxUpload;
+    s.maxAttachments = data.max_attachments || MAX_ATTACHMENTS_DEFAULT;
     s.dmState = {};
     for (const [ch, st] of Object.entries(data.dm_state || {})) {
       s.dmState[ch] = dmStateFromPayload(st);
@@ -455,25 +530,26 @@ export class ChatStore {
     for (const [cid, p] of Object.entries(this.pending)) {
       if (p.channel !== channel) continue;
       const index = messages.findIndex((m) => m.client_id === cid && m.user_id === this.state.me?.id);
-      if (index >= 0) {
-        this.reconcilePending(cid, messages[index]);
-        messages[index] = p.message;
-      } else messages.push(p.message);
+      if (index >= 0) messages[index] = this.reconcilePending(cid, messages[index]) ?? messages[index];
+      else messages.push(p.message);
     }
     return messages;
   }
 
-  private reconcilePending(cid: string, message: HistoryMessage): void {
+  /** Confirms a pending send with the server's copy; returns the new
+   *  message object (the caller puts it in the history array). */
+  private reconcilePending(cid: string, message: HistoryMessage): ChatMessage | null {
     const p = this.pending[cid];
-    if (!p) return;
+    if (!p) return null;
     if (p.timer) clearTimeout(p.timer);
     delete this.pending[cid];
-    Object.assign(p.message, message, {_status: "delivered"});
+    const confirmed: ChatMessage = { ...p.message, ...message, client_id: cid, _status: "delivered" };
     if (p.edit && p.edit !== message.text) {
-      p.message.text = p.edit;
-      p.message.edited_at = Math.floor(Date.now() / 1000);
+      confirmed.text = p.edit;
+      confirmed.edited_at = Math.floor(Date.now() / 1000);
       this.send({type: "edit", id: message.id, text: p.edit});
     }
+    return confirmed;
   }
 
   private applyMessage(channel: string, msg: BroadcastMessage): void {
@@ -485,16 +561,14 @@ export class ChatStore {
     // Reconcile our own optimistic bubble (matched by the echoed client_id).
     if (msg.client_id && this.pending[msg.client_id] && s.me && msg.user_id === s.me.id) {
       const cid = msg.client_id;
-      const p = this.pending[cid];
-      const local = p.message;
-      this.reconcilePending(cid, msg);
+      const confirmed = this.reconcilePending(cid, msg)!;
       const arr = s.history[channel] || [];
-      if (!arr.includes(local)) {
-        const existing = arr.findIndex((m) => m.id === msg.id);
-        if (existing >= 0) arr[existing] = local;
-        else arr.push(local);
-        s.history[channel] = arr;
-      }
+      let i = arr.findIndex((m) => m.client_id === cid);
+      if (i < 0) i = arr.findIndex((m) => m.id === msg.id);
+      const copy = arr.slice();
+      if (i >= 0) copy[i] = confirmed;
+      else copy.push(confirmed);
+      s.history[channel] = copy;
       this.emit();
       return;
     }
@@ -504,10 +578,9 @@ export class ChatStore {
     if (msg.type !== "call" && msg.user_id != null && !s.online.has(msg.user_id)) {
       s.online.add(msg.user_id);
     }
-    const arr = (s.history[channel] = s.history[channel] || []);
+    const arr = s.history[channel] || [];
     if (arr.some((m) => m.id === msg.id)) return;
-    arr.push(msg as ChatMessage);
-    while (arr.length > HISTORY_CAP) arr.shift();
+    s.history[channel] = [...arr, msg as ChatMessage];
 
     if (isDM(channel) && !s.dmThreads.find((t) => t.channel === channel)) {
       const peer = this.peerOf(channel);
@@ -516,8 +589,7 @@ export class ChatStore {
 
     let notify: NotifyEvent | null = null;
     // An answered or declined call is no news to the callee (as on the server).
-    const quietCall = msg.type === "call" && !callMissedBy(msg.call, s.me?.id);
-    if (!quietCall && isDM(channel) && msg.user_id != null && s.me && msg.user_id !== s.me.id) {
+    if (isDM(channel) && s.me && this.countsAsUnread(msg as ChatMessage)) {
       const st = this.dmStateFor(channel);
       if (channel === s.activeChannel && this.foreground) {
         // Actively reading — mark read instead of incrementing unread.
@@ -546,13 +618,7 @@ export class ChatStore {
   }
 
   private applyEdited(channel: string, id: string, text: string, editedAt: number): void {
-    const arr = this.state.history[channel] || [];
-    const m = arr.find((x) => x.id === id);
-    if (m) {
-      m.text = text;
-      m.edited_at = editedAt;
-    }
-    this.emit();
+    if (this.updateMessage(channel, (x) => x.id === id, (x) => ({ ...x, text, edited_at: editedAt }))) this.emit();
   }
 
   private applyProfileUpdate(p: PublicUser): void {
@@ -569,15 +635,21 @@ export class ChatStore {
     if (this.state.me && userId === this.state.me.id) {
       this.state.dmState[channel] = { ...st, lastReadAt: lastReadAt || st.lastReadAt, unreadCount: 0 };
     } else {
-      this.state.dmState[channel] = { ...st, peerLastReadAt: lastReadAt || 0, peerLastReadPosition: position };
+      // A receipt only moves forward (two tabs of the peer may answer out of order).
+      this.state.dmState[channel] = {
+        ...st,
+        peerLastReadAt: Math.max(lastReadAt || 0, st.peerLastReadAt || 0),
+        peerLastReadPosition: position != null && st.peerLastReadPosition != null ? Math.max(position, st.peerLastReadPosition) : (position ?? st.peerLastReadPosition),
+      };
     }
     this.emit();
   }
 
   private applyDmOpened(data: Extract<ServerEvent, { type: "dm_opened" }>): void {
     const s = this.state;
-    s.history[data.channel] = this.mergePending(data.channel, data.history || []);
-    s.historyHasMore[data.channel] = !!data.has_more;
+    const merged = this.mergeSnapshot(data.channel, data.history || [], !!data.has_more);
+    s.history[data.channel] = merged.messages;
+    s.historyHasMore[data.channel] = merged.hasMore;
     if (!s.dmThreads.find((t) => t.channel === data.channel)) {
       s.dmThreads.push({ channel: data.channel, peer_id: data.peer_id });
     }
@@ -594,7 +666,9 @@ export class ChatStore {
     if (this.state.activeChannel === id) return;
     this.state.activeChannel = id;
     this.writeLastChannel(id);
+    // A reply and staged files belong to the conversation they were made in.
     this.state.replyTo = null;
+    this.state.pendingAtt = [];
     this.emit();
     if (id) {
       this.send({ type: "switch", channel: id });
@@ -624,7 +698,16 @@ export class ChatStore {
     this.emit();
   }
 
+  /** Whether another file may be staged for the current message. */
+  canAttachMore(): boolean {
+    return this.state.pendingAtt.length < this.state.maxAttachments;
+  }
+
   addPendingAtt(a: Attachment): void {
+    if (!this.canAttachMore()) {
+      this.toast(`A message can carry at most ${this.state.maxAttachments} files`, true);
+      return;
+    }
     this.state.pendingAtt = [...this.state.pendingAtt, a];
     this.emit();
   }
@@ -636,33 +719,57 @@ export class ChatStore {
     this.emit();
   }
 
-  /** Uploads a file and stages it as a pending attachment. */
-  async uploadAttachment(file: Parameters<ApiClient["upload"]>[0], name: string): Promise<boolean> {
+  /**
+   * Uploads a file. By default it is staged as a pending attachment of the
+   * conversation that was open when the upload started (and dropped if the
+   * user has left that conversation by the time it finishes). With
+   * `{ stage: false }` it is only returned, for a caller that sends it itself.
+   */
+  async uploadAttachment(file: Parameters<ApiClient["upload"]>[0], name: string): Promise<boolean>;
+  async uploadAttachment(file: Parameters<ApiClient["upload"]>[0], name: string, opts: { stage: false }): Promise<Attachment | null>;
+  async uploadAttachment(file: Parameters<ApiClient["upload"]>[0], name: string, opts?: { stage: false }): Promise<boolean | Attachment | null> {
+    const channel = this.state.activeChannel;
+    if (opts?.stage !== false && !this.canAttachMore()) {
+      this.toast(`A message can carry at most ${this.state.maxAttachments} files`, true);
+      return false;
+    }
     try {
       const j = await this.api.upload(file);
-      this.addPendingAtt({
+      const att: Attachment = {
         name: j.name || name,
         url: j.url,
         size: j.size,
         mime: j.mime,
         width: j.width || 0,
         height: j.height || 0,
-      });
+      };
+      if (opts?.stage === false) return att;
+      if (this.state.activeChannel !== channel) return false;
+      this.addPendingAtt(att);
       return true;
     } catch {
       this.toast(`Upload failed: ${name}`, true);
-      return false;
+      return opts?.stage === false ? null : false;
     }
   }
 
-  /** Sends the composer contents (text + pending attachments) optimistically. */
-  sendMessage(text: string, attachments?: Attachment[]): { clientId: string } | null {
+  /**
+   * Sends a message optimistically. Without `attachments` it sends the
+   * composer's staged files (and clears them); with `attachments` it sends
+   * exactly those and leaves the staged files alone. `channel` defaults to
+   * the open conversation; a caller that started work in one conversation
+   * (a voice message, a dictation) passes that conversation so the result
+   * never lands in another one. The open reply applies only to its own
+   * conversation. Returns null when nothing was sent.
+   */
+  sendMessage(text: string, attachments?: Attachment[], channel: string | null = this.state.activeChannel): { clientId: string } | null {
     const s = this.state;
-    if (!s.activeChannel || !s.me) return null;
+    if (!channel || !s.me || !this.channelExists(channel)) return null;
     const trimmed = text.trim();
-    const atts = attachments ?? s.pendingAtt;
+    const staged = attachments == null;
+    const atts = (attachments ?? (channel === s.activeChannel ? s.pendingAtt : [])).slice(0, s.maxAttachments);
     if (!trimmed && !atts.length) return null;
-    const channel = s.activeChannel;
+    const reply = s.replyTo && s.replyTo.channel === channel ? s.replyTo : null;
     const cid = "c" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
     const optimistic: ChatMessage = {
       id: cid,
@@ -671,15 +778,13 @@ export class ChatStore {
       channel,
       user_id: s.me.id,
       text: trimmed,
-      reply_to: s.replyTo ? s.replyTo.id : null,
-      attachments: atts.slice(),
+      reply_to: reply ? reply.id : null,
+      attachments: atts,
       created_at: Math.floor(Date.now() / 1000),
       edited_at: null,
       _status: "sending",
     };
-    const arr = (s.history[channel] = s.history[channel] || []);
-    arr.push(optimistic);
-    while (arr.length > HISTORY_CAP) arr.shift();
+    s.history[channel] = [...(s.history[channel] || []), optimistic];
     if (isDM(channel) && !s.dmThreads.find((t) => t.channel === channel)) {
       const peer = this.peerOf(channel);
       if (peer != null) s.dmThreads.push({ channel, peer_id: peer });
@@ -693,8 +798,8 @@ export class ChatStore {
       client_id: cid,
     });
     this.pending[cid] = { channel, message: optimistic, timer: setTimeout(() => this.markSendFailed(channel, cid), SEND_TIMEOUT_MS) };
-    s.pendingAtt = [];
-    s.replyTo = null;
+    if (staged && channel === s.activeChannel) s.pendingAtt = [];
+    if (reply) s.replyTo = null;
     this.emit();
     return { clientId: cid };
   }
@@ -707,10 +812,7 @@ export class ChatStore {
     const p = this.pending[cid];
     if (p?.timer) clearTimeout(p.timer);
     if (p) p.timer = null;
-    const m = this.findOptimistic(channel, cid);
-    if (!m) return;
-    m._status = "failed";
-    this.emit();
+    if (this.updateMessage(channel, (m) => m.client_id === cid && m._status === "sending", (m) => ({ ...m, _status: "failed" }))) this.emit();
   }
 
   /** Re-sends a failed optimistic message with the same client_id nonce. */
@@ -718,9 +820,10 @@ export class ChatStore {
     const p = this.pending[cid];
     const channel = p ? p.channel : this.state.activeChannel;
     if (!channel) return;
-    const m = this.findOptimistic(channel, cid);
-    if (!m) return;
-    m._status = "sending";
+    const found = this.findOptimistic(channel, cid);
+    // Only a failed send is retried; a confirmed one is already delivered.
+    if (!found || found._status !== "failed") return;
+    const m = this.updateMessage(channel, (x) => x.client_id === cid, (x) => ({ ...x, _status: "sending" })) ?? { ...found, _status: "sending" as const };
     this.send({
       type: "message",
       channel,
@@ -738,11 +841,12 @@ export class ChatStore {
   editMessage(m: ChatMessage, text: string): void {
     const trimmed = text.trim();
     if (!trimmed || trimmed === m.text) return;
+    const key = messageKey(m);
     const pending = m.client_id ? this.pending[m.client_id] : undefined;
+    const updated = this.updateMessage(m.channel, (x) => messageKey(x) === key, (x) => ({ ...x, text: trimmed, edited_at: Math.floor(Date.now() / 1000) }));
+    if (!updated) return;
     if (pending) pending.edit = trimmed;
-    else this.send({ type: "edit", id: m.id, text: trimmed });
-    m.text = trimmed;
-    m.edited_at = Math.floor(Date.now() / 1000);
+    else this.send({ type: "edit", id: updated.id, text: trimmed });
     this.emit();
   }
 
@@ -754,16 +858,21 @@ export class ChatStore {
     const first = arr.find((m) => m._status !== "sending" && m._status !== "failed");
     const oldest = first?.created_at ?? null;
     if (oldest == null) return;
+    const epoch = this.historyEpoch[channel] || 0;
     s.historyLoading[channel] = true;
     this.emit();
     try {
       const j = await this.api.history(channel, oldest, s.pageSize, first?.id);
+      // A snapshot or a delete replaced the thread meanwhile: this page no
+      // longer joins onto what is held.
+      if ((this.historyEpoch[channel] || 0) !== epoch) return;
       const older = (j.messages || []) as ChatMessage[];
+      const cur = s.history[channel] || [];
       if (!older.length) {
         s.historyHasMore[channel] = false;
       } else {
-        const seen = new Set(arr.map((m) => m.id));
-        s.history[channel] = [...older.filter((m) => !seen.has(m.id)), ...arr];
+        const seen = new Set(cur.map((m) => m.id));
+        s.history[channel] = [...older.filter((m) => !seen.has(m.id)), ...cur];
         s.historyHasMore[channel] = !!j.has_more;
       }
     } catch {
@@ -788,13 +897,20 @@ export class ChatStore {
   }
 
   async markRead(channel: string, opts: { silent?: boolean } = {}): Promise<void> {
+    const held = (this.state.history[channel] || []).filter((m) => m.position != null);
+    const newest = held[held.length - 1];
     try {
-      const j = await this.api.markDMRead(channel);
+      const j = await this.api.markDMRead(channel, newest?.position);
+      // Messages that arrived after the request was made stay unread.
+      const cur = this.state.history[channel] || [];
+      const cut = newest ? cur.findIndex((m) => m.id === newest.id) : -1;
+      const later = cut >= 0 ? cur.slice(cut + 1).filter((m) => this.countsAsUnread(m)).length : 0;
+      const reading = channel === this.state.activeChannel && this.foreground;
       const st = this.dmStateFor(channel);
       this.state.dmState[channel] = {
         ...st,
         lastReadAt: j.last_read_at || Math.floor(Date.now() / 1000),
-        unreadCount: 0,
+        unreadCount: reading ? 0 : later,
       };
       this.emit();
     } catch {
@@ -806,11 +922,8 @@ export class ChatStore {
     try {
       await this.api.markDMUnread(channel);
       const st = this.dmStateFor(channel);
-      const arr = this.state.history[channel] || [];
-      const myId = this.state.me?.id;
-      const unreadCount =
-        arr.filter((m) => m.user_id != null && m.user_id !== myId && m.type !== "system").length || 1;
-      this.state.dmState[channel] = { ...st, lastReadAt: 0, unreadCount };
+      // As on the server: a thread marked unread counts one unread message.
+      this.state.dmState[channel] = { ...st, unreadCount: Math.max(st.unreadCount, 1) };
       this.emit();
       this.toast("Marked as unread");
     } catch {
@@ -825,6 +938,7 @@ export class ChatStore {
       const cleared = j.cleared_at || Math.floor(Date.now() / 1000);
       this.state.history[channel] = [];
       this.state.historyHasMore[channel] = false;
+      this.historyEpoch[channel] = (this.historyEpoch[channel] || 0) + 1;
       this.state.dmState[channel] = {
         pinned: false,
         lastReadAt: cleared,
@@ -912,17 +1026,29 @@ export class ChatStore {
     return p;
   }
 
-  /** Push-received hook (web service worker): bumps unread eagerly. */
+  /** Push-received hook (web service worker): bumps unread eagerly — only
+   *  while the socket is down, since a live socket delivers the message
+   *  itself and already counted it. */
   handlePushReceived(channel: string): void {
-    if (isDM(channel) && channel !== this.state.activeChannel) {
+    if (this.state.connState === "online") return;
+    if (isDM(channel) && this.peerOf(channel) != null && channel !== this.state.activeChannel) {
       const st = this.dmStateFor(channel);
       this.state.dmState[channel] = { ...st, unreadCount: (st.unreadCount || 0) + 1 };
       this.emit();
     }
   }
 
-  /** Channel-open request coming from an external surface (push tap, deep link). */
+  setPushSubscribed(on: boolean): void {
+    if (this.state.pushSubscribed === on) return;
+    this.state.pushSubscribed = on;
+    this.emit();
+  }
+
+  /** Channel-open request coming from an external surface (push tap, deep
+   *  link). A channel this user is not part of (a notification left over
+   *  from another account) is ignored. */
   openChannelExternal(channel: string): void {
+    if (this.peerOf(channel) == null) return;
     if (isDM(channel)) {
       const peer = this.peerOf(channel);
       if (peer != null && !this.state.dmThreads.find((t) => t.channel === channel)) {
@@ -944,6 +1070,7 @@ export class ChatStore {
       if (p.timer) clearTimeout(p.timer);
     }
     this.pending = {};
+    this.historyEpoch = {};
     this.calls.destroy();
     this.disconnect();
     this.state = initialState();
