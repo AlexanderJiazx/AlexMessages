@@ -14,6 +14,10 @@ CLAUDE.local.md
 # Go
 /bin/
 *.test
+# Python bytecode of deploy/remote_deploy_test.py
+deploy/__pycache__/
+# Archive made by the manual deploy in DEPLOY.md
+/release.tgz
 
 # JS/TS clients
 node_modules/
