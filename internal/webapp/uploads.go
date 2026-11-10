@@ -87,16 +87,12 @@ func handleUpload(c *gin.Context) {
 	if original == "" {
 		original = "file"
 	}
-	safe := strings.Trim(safeNameRE.ReplaceAllString(original, "_"), "._")
-	if safe == "" {
-		safe = "file"
-	}
 	token, err := tokenHex(6)
 	if err != nil {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return
 	}
-	storedName := token + "_" + safe
+	storedName := token + "_" + safeUploadName(original)
 
 	userDir, err := db.UserUploadDir(user.ID)
 	if err != nil {
@@ -188,6 +184,27 @@ func handleGetUpload(c *gin.Context) {
 	http.ServeContent(c.Writer, c.Request, name, info.ModTime(), f)
 }
 
+// safeUploadName turns an uploaded file's name into the ASCII stored name:
+// stem and extension are cleaned separately, so "报告.pdf" keeps ".pdf" (the
+// download's name comes from it), and the stem is capped so a long name
+// cannot exceed the file system's 255-byte limit.
+func safeUploadName(original string) string {
+	clean := func(s string) string { return strings.Trim(safeNameRE.ReplaceAllString(s, "_"), "._") }
+	ext := filepath.Ext(original)
+	stem := clean(strings.TrimSuffix(original, ext))
+	ext = clean(ext)
+	if len(stem) > 80 {
+		stem = strings.TrimRight(stem[:80], "._") // ASCII after clean, so bytes are runes
+	}
+	if stem == "" {
+		stem = "file"
+	}
+	if ext == "" || len(ext) > 16 {
+		return stem
+	}
+	return stem + "." + ext
+}
+
 // imageDimensions returns the pixel size of an image upload, or (0, 0) when
 // the file isn't an image or the format isn't decodable (e.g. webp). The
 // client uses these to render a placeholder with the final layout size.
@@ -195,11 +212,82 @@ func imageDimensions(raw []byte, contentType string) (int, int) {
 	if !strings.HasPrefix(contentType, "image/") {
 		return 0, 0
 	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil {
 		return 0, 0
 	}
+	// Phone cameras store portrait photos as landscape pixels plus an EXIF
+	// orientation, and every client draws them rotated; report the drawn
+	// size so the placeholder has the image's final shape.
+	if format == "jpeg" && jpegOrientation(raw) >= 5 {
+		return cfg.Height, cfg.Width
+	}
 	return cfg.Width, cfg.Height
+}
+
+// jpegOrientation returns the EXIF orientation (1–8) of a JPEG, or 0 when it
+// has none. Orientations 5–8 rotate the image by 90° or 270°.
+func jpegOrientation(raw []byte) int {
+	if len(raw) < 4 || raw[0] != 0xFF || raw[1] != 0xD8 {
+		return 0
+	}
+	for i := 2; i+4 <= len(raw); {
+		if raw[i] != 0xFF {
+			return 0
+		}
+		marker := raw[i+1]
+		if marker == 0xFF { // fill byte
+			i++
+			continue
+		}
+		if marker == 0xDA || marker == 0xD9 { // image data or end: no EXIF before it
+			return 0
+		}
+		size := int(raw[i+2])<<8 | int(raw[i+3])
+		if size < 2 || i+2+size > len(raw) {
+			return 0
+		}
+		seg := raw[i+4 : i+2+size]
+		if marker == 0xE1 && len(seg) >= 14 && string(seg[:6]) == "Exif\x00\x00" {
+			return exifOrientation(seg[6:])
+		}
+		i += 2 + size
+	}
+	return 0
+}
+
+// exifOrientation reads tag 0x0112 from IFD0 of a TIFF block.
+func exifOrientation(t []byte) int {
+	var u16 func([]byte) int
+	var u32 func([]byte) int
+	switch string(t[:2]) {
+	case "II":
+		u16 = func(b []byte) int { return int(b[0]) | int(b[1])<<8 }
+		u32 = func(b []byte) int { return int(b[0]) | int(b[1])<<8 | int(b[2])<<16 | int(b[3])<<24 }
+	case "MM":
+		u16 = func(b []byte) int { return int(b[0])<<8 | int(b[1]) }
+		u32 = func(b []byte) int { return int(b[0])<<24 | int(b[1])<<16 | int(b[2])<<8 | int(b[3]) }
+	default:
+		return 0
+	}
+	ifd := u32(t[4:8])
+	if ifd < 8 || ifd+2 > len(t) {
+		return 0
+	}
+	n := u16(t[ifd : ifd+2])
+	for k := 0; k < n; k++ {
+		e := ifd + 2 + 12*k
+		if e+12 > len(t) {
+			return 0
+		}
+		if u16(t[e:e+2]) == 0x0112 {
+			if v := u16(t[e+8 : e+10]); v >= 1 && v <= 8 {
+				return v
+			}
+			return 0
+		}
+	}
+	return 0
 }
 
 // tokenHex mirrors secrets.token_hex(n): n random bytes as 2n hex chars.

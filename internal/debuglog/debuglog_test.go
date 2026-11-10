@@ -1,6 +1,9 @@
 package debuglog
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestRateLimiterCapsBurst(t *testing.T) {
 	limiterMu.Lock()
@@ -57,5 +60,21 @@ func TestClampContextRejectsInvalidJSON(t *testing.T) {
 	}
 	if got := clampContext(nil); got != "" {
 		t.Errorf("nil context should be empty, got %q", got)
+	}
+}
+
+// Many active addresses can't grow the limiter map past maxLimiters.
+func TestRateLimiterMapBounded(t *testing.T) {
+	limiterMu.Lock()
+	limiters = map[string]*bucket{}
+	limiterMu.Unlock()
+	for i := 0; i < 3*maxLimiters; i++ {
+		allow(fmt.Sprintf("2001:db8::%x", i), 1)
+	}
+	limiterMu.Lock()
+	n := len(limiters)
+	limiterMu.Unlock()
+	if n > maxLimiters {
+		t.Fatalf("limiter map holds %d buckets, cap %d", n, maxLimiters)
 	}
 }

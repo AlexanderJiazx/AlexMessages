@@ -24,12 +24,17 @@ var upgrader = websocket.Upgrader{
 //	client → server: join {code, guest_name?, client_id?} · leave ·
 //	                 signal {to, payload} · state {muted, cam_on, sharing} ·
 //	                 host_mute {pid} · host_transfer {pid} · host_kick {pid} ·
-//	                 set_guests {allowed} · ping
+//	                 set_guests {allowed} · volc_token · ping
 //	server → client: hello {me} · joined {...} · peer_joined {participant} ·
 //	                 peer_left {pid} · signal {from, payload} ·
 //	                 peer_state {pid, ...} · host_changed {host_pid} ·
 //	                 force_mute {by} · kicked {by} · replaced ·
-//	                 guests_changed {allowed} · error {message} · pong
+//	                 guests_changed {allowed} · volc_token {volc} ·
+//	                 error {message} · pong
+//
+// volc_token renews the VolcEngine room token (volcTokenTTL) and is answered
+// only while the socket is on the roster of a volc meeting, so a participant
+// who was kicked or left can't extend its access to the media room.
 //
 // client_id is a stable per-tab id: a join with an id already present in the
 // room evicts the prior instance (so a reconnect/rejoin replaces its ghost and
@@ -74,7 +79,8 @@ func handleWS(c *gin.Context) {
 		}()
 	}
 
-	cn := &conn{ws: ws}
+	cn := newConn(ws)
+	defer cn.stop()
 	var me any
 	if user != nil {
 		me = userPublic(user)
@@ -89,12 +95,21 @@ func handleWS(c *gin.Context) {
 	// healthy connection alive.
 	_ = ws.SetReadDeadline(time.Now().Add(pongWait))
 
+	// Most frames fan out to the whole room, so each socket gets a budget:
+	// a frame costs 1 + 1 per 2 KB, 400 at once, 100 back a second (a
+	// newcomer's answers and ICE candidates to 8 peers cost about 200). A
+	// frame over the budget is dropped, so a flood can't fill the other
+	// participants' send queues (sendQueueSize) and get their sockets closed.
+	budget := auth.NewAttemptLimiter(frameBurst, frameRefill, 1)
 	for {
 		_, raw, err := ws.ReadMessage()
 		if err != nil {
 			return
 		}
 		_ = ws.SetReadDeadline(time.Now().Add(pongWait))
+		if !budget.AllowN("", 1+float64(len(raw))/2048) {
+			continue
+		}
 		if user != nil && auth.ResolveSession(token, "user") == nil {
 			_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "Session revoked"), time.Now().Add(time.Second))
 			return
@@ -126,6 +141,8 @@ func handleWS(c *gin.Context) {
 			handleHostKick(cn, data)
 		case "set_guests":
 			handleSetGuests(cn, data)
+		case "volc_token":
+			handleVolcToken(cn)
 		}
 		// Unknown types are silently ignored.
 	}
@@ -144,10 +161,7 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 		cn.send(meetError("Missing meeting code."))
 		return
 	}
-	guestName := strings.TrimSpace(strField(data, "guest_name"))
-	if r := []rune(guestName); len(r) > 40 {
-		guestName = string(r[:40])
-	}
+	guestName := auth.CleanDisplayName(strField(data, "guest_name"))
 	clientID := strings.TrimSpace(strField(data, "client_id"))
 	if r := []rune(clientID); len(r) > 64 {
 		clientID = string(r[:64])
@@ -172,6 +186,11 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 	if user == nil && guestName == "" {
 		meetMu.Unlock()
 		cn.send(meetError("Enter your name to join."))
+		return
+	}
+	if (user != nil && rm.removedUsers[user.ID]) || (clientID != "" && rm.removedClients[clientID]) {
+		meetMu.Unlock()
+		cn.send(meetError("The host removed you from this meeting."))
 		return
 	}
 
@@ -250,20 +269,19 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 	}
 	hostPid := rm.hostPid
 	hostChanged := hostWasEvicted
-	mode := rm.mode
-	allowGuests := rm.allowGuests
-	meetMu.Unlock()
 
+	// Every message is queued while meetMu is held, so each recipient sees
+	// this join in the same order as every other roster change.
 	joined := gin.H{
 		"type":         "joined",
 		"code":         code,
-		"mode":         mode,
+		"mode":         rm.mode,
 		"self_pid":     p.pid,
 		"host_pid":     hostPid,
 		"participants": roster,
-		"allow_guests": allowGuests,
+		"allow_guests": rm.allowGuests,
 	}
-	if mode == modeVolc {
+	if rm.mode == modeVolc {
 		joined["volc"] = volcJoinPayload(code, p.pid)
 	}
 	cn.send(joined)
@@ -272,7 +290,7 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 	// loop exits (its deferred leaveRoom is now a no-op — maps already cleared).
 	for _, ec := range evictedConns {
 		ec.send(gin.H{"type": "replaced"})
-		_ = ec.ws.Close()
+		ec.closeAfterFlush()
 	}
 
 	// Others see the ghost leave (+ any host handover) before the newcomer.
@@ -286,6 +304,7 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 		}
 		oc.send(announce)
 	}
+	meetMu.Unlock()
 
 	debuglog.Emit("meet", "info", "join", "Participant joined", map[string]any{
 		"code": code, "pid": p.pid, "user": p.user.DisplayName, "guest": p.user.Guest, "host_pid": hostPid,
@@ -295,7 +314,7 @@ func handleJoin(cn *conn, user *db.User, data map[string]any) {
 // detachLocked removes cn's participant from its room, reassigning the host
 // role if needed. Caller MUST hold meetMu. Returns the connections still in
 // the room, the departed pid (0 when cn was not in a room), and the resulting
-// host pid. Notifying happens after the lock is released.
+// host pid. The caller notifies (notifyLeft) before releasing meetMu.
 func detachLocked(cn *conn) (notify []*conn, pid, hostPid int, hostChanged bool) {
 	rm := connRoom[cn]
 	p := connPart[cn]
@@ -345,12 +364,12 @@ func leaveRoom(cn *conn) {
 		code = rm.code
 	}
 	notify, pid, hostPid, hostChanged := detachLocked(cn)
+	notifyLeft(notify, pid, hostPid, hostChanged)
 	meetMu.Unlock()
 	if pid == 0 {
 		return
 	}
 	debuglog.Emit("meet", "info", "leave", "Participant left", map[string]any{"code": code, "pid": pid, "host_changed": hostChanged})
-	notifyLeft(notify, pid, hostPid, hostChanged)
 }
 
 // ---------- mesh signaling relay ----------
@@ -366,20 +385,13 @@ func handleSignal(cn *conn, data map[string]any) {
 	if !present || payload == nil {
 		return
 	}
-	var target *conn
-	from := 0
 	meetMu.Lock()
+	defer meetMu.Unlock()
 	if rm, p := connRoom[cn], connPart[cn]; rm != nil && p != nil {
 		if t := rm.parts[to]; t != nil {
-			target = t.c
-			from = p.pid
+			t.c.send(gin.H{"type": "signal", "from": p.pid, "payload": payload})
 		}
 	}
-	meetMu.Unlock()
-	if target == nil {
-		return
-	}
-	target.send(gin.H{"type": "signal", "from": from, "payload": payload})
 }
 
 // ---------- AV state fan-out ----------
@@ -399,17 +411,12 @@ func handleStateUpdate(cn *conn, data map[string]any) {
 	p.camOn = camOn
 	p.sharing = sharing
 	payload := gin.H{"type": "peer_state", "pid": p.pid, "muted": muted, "cam_on": camOn, "sharing": sharing}
-	var notify []*conn
 	for _, op := range rm.parts {
 		if op.pid != p.pid {
-			notify = append(notify, op.c)
+			op.c.send(payload)
 		}
 	}
 	meetMu.Unlock()
-
-	for _, oc := range notify {
-		oc.send(payload)
-	}
 }
 
 // ---------- host controls ----------
@@ -419,41 +426,24 @@ func handleHostMute(cn *conn, data map[string]any) {
 	if !ok {
 		return
 	}
-	var (
-		targetConn *conn
-		notify     []*conn
-		payload    gin.H
-		byPid      int
-	)
 	meetMu.Lock()
+	defer meetMu.Unlock()
 	rm, p := connRoom[cn], connPart[cn]
 	switch {
 	case rm == nil || p == nil:
 	case rm.hostPid != p.pid:
-		meetMu.Unlock()
 		cn.send(meetError("Only the host can mute others."))
-		return
 	default:
 		if t := rm.parts[pid]; t != nil && t.pid != p.pid {
 			t.muted = true
-			targetConn = t.c
-			byPid = p.pid
-			payload = gin.H{"type": "peer_state", "pid": t.pid, "muted": true, "cam_on": t.camOn, "sharing": t.sharing}
+			t.c.send(gin.H{"type": "force_mute", "by": p.pid})
+			payload := gin.H{"type": "peer_state", "pid": t.pid, "muted": true, "cam_on": t.camOn, "sharing": t.sharing}
 			for _, op := range rm.parts {
 				if op.pid != t.pid {
-					notify = append(notify, op.c)
+					op.c.send(payload)
 				}
 			}
 		}
-	}
-	meetMu.Unlock()
-
-	if targetConn == nil {
-		return
-	}
-	targetConn.send(gin.H{"type": "force_mute", "by": byPid})
-	for _, oc := range notify {
-		oc.send(payload)
 	}
 }
 
@@ -465,25 +455,33 @@ func handleHostKick(cn *conn, data map[string]any) {
 		return
 	}
 	meetMu.Lock()
+	defer meetMu.Unlock()
 	rm, p := connRoom[cn], connPart[cn]
 	if rm == nil || p == nil {
-		meetMu.Unlock()
 		return
 	}
 	if rm.hostPid != p.pid {
-		meetMu.Unlock()
 		cn.send(meetError("Only the host can remove people."))
 		return
 	}
 	t := rm.parts[pid]
 	if t == nil || t.pid == p.pid {
-		meetMu.Unlock()
 		return
+	}
+	if !t.user.Guest {
+		if rm.removedUsers == nil {
+			rm.removedUsers = map[int]bool{}
+		}
+		rm.removedUsers[t.user.ID] = true
+	}
+	if t.clientID != "" {
+		if rm.removedClients == nil {
+			rm.removedClients = map[string]bool{}
+		}
+		rm.removedClients[t.clientID] = true
 	}
 	target := t.c
 	notify, gone, hostPid, hostChanged := detachLocked(target)
-	meetMu.Unlock()
-
 	target.send(gin.H{"type": "kicked", "by": p.pid})
 	notifyLeft(notify, gone, hostPid, hostChanged)
 }
@@ -492,26 +490,19 @@ func handleHostKick(cn *conn, data map[string]any) {
 func handleSetGuests(cn *conn, data map[string]any) {
 	allowed, _ := data["allowed"].(bool)
 	meetMu.Lock()
+	defer meetMu.Unlock()
 	rm, p := connRoom[cn], connPart[cn]
 	if rm == nil || p == nil {
-		meetMu.Unlock()
 		return
 	}
 	if rm.hostPid != p.pid {
-		meetMu.Unlock()
 		cn.send(meetError("Only the host can change who may join."))
 		return
 	}
 	rm.allowGuests = allowed
-	var notify []*conn
-	for _, op := range rm.parts {
-		notify = append(notify, op.c)
-	}
-	meetMu.Unlock()
-
 	payload := gin.H{"type": "guests_changed", "allowed": allowed}
-	for _, oc := range notify {
-		oc.send(payload)
+	for _, op := range rm.parts {
+		op.c.send(payload)
 	}
 }
 
@@ -520,33 +511,36 @@ func handleHostTransfer(cn *conn, data map[string]any) {
 	if !ok {
 		return
 	}
-	var notify []*conn
 	meetMu.Lock()
+	defer meetMu.Unlock()
 	rm, p := connRoom[cn], connPart[cn]
 	switch {
 	case rm == nil || p == nil:
 	case rm.hostPid != p.pid:
-		meetMu.Unlock()
 		cn.send(meetError("Only the host can transfer the host role."))
-		return
 	default:
 		if t := rm.parts[pid]; t != nil {
 			rm.hostPid = t.pid
+			payload := gin.H{"type": "host_changed", "host_pid": rm.hostPid}
 			for _, op := range rm.parts {
-				notify = append(notify, op.c)
+				op.c.send(payload)
 			}
 		}
 	}
-	hostPid := 0
-	if rm != nil {
-		hostPid = rm.hostPid
-	}
-	meetMu.Unlock()
+}
 
-	payload := gin.H{"type": "host_changed", "host_pid": hostPid}
-	for _, oc := range notify {
-		oc.send(payload)
+// handleVolcToken answers a volc_token request with a fresh VolcEngine token
+// for the caller's current pid. Only a socket that is on the roster of a volc
+// meeting gets one; anyone else (kicked, left, never joined, a mesh meeting)
+// gets no answer, so its token runs out within volcTokenTTL.
+func handleVolcToken(cn *conn) {
+	meetMu.Lock()
+	defer meetMu.Unlock()
+	rm, p := connRoom[cn], connPart[cn]
+	if rm == nil || p == nil || rm.mode != modeVolc || rm.parts[p.pid] != p {
+		return
 	}
+	cn.send(gin.H{"type": "volc_token", "volc": volcJoinPayload(rm.code, p.pid)})
 }
 
 // ---------- small helpers ----------

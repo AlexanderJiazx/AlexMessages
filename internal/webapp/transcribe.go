@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -142,8 +143,21 @@ func handleTranscribe(c *gin.Context) {
 		return
 	}
 
+	// The clip plus 1 MB of multipart overhead; a larger body stops being
+	// read at that point.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, transcribeMaxBytes+1024*1024)
+	defer func() {
+		if c.Request.MultipartForm != nil {
+			_ = c.Request.MultipartForm.RemoveAll()
+		}
+	}()
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			httpx.Error(c, http.StatusRequestEntityTooLarge, "Audio exceeds 20MB limit")
+			return
+		}
 		httpx.Error(c, http.StatusBadRequest, "Missing audio file")
 		return
 	}
@@ -235,4 +249,3 @@ func handleTranscribe(c *gin.Context) {
 	debuglog.Emit("messages", "info", "transcribe_ok", "Audio transcribed", map[string]any{"user": user.Username, "bytes": len(raw), "format": format})
 	c.JSON(http.StatusOK, gin.H{"text": text})
 }
-

@@ -32,7 +32,9 @@ func main() {
 	db.StartBackgroundMaintenance()
 
 	addr := envOr("CALL_HOST", "127.0.0.1") + ":" + envOr("CALL_PORT", "8002")
-	if err := httpx.Serve("alex-meet", addr, meet.NewEngine()); err != nil {
+	engine := meet.NewEngine()
+	httpx.TrustLocalProxy(engine)
+	if err := httpx.Serve("alex-meet", addr, engine); err != nil {
 		log.Fatalf("meet server: %v", err)
 	}
 }

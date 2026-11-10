@@ -44,6 +44,12 @@ var (
 	// socket. ChatSocket retries every 1.5 s, so a network blip resumes well
 	// inside it.
 	callResumeGrace = 30 * time.Second
+	// callStartGap and callStartsPerHour limit how often one user can place
+	// calls: every call writes a thread entry and rings the peer, so a stuck
+	// or hostile client could otherwise flood both. A call_start past either
+	// limit gets call_error "rate_limited".
+	callStartGap      = 2 * time.Second
+	callStartsPerHour = 30
 )
 
 // callSignalBacklog caps the signals held for a side that is reconnecting.
@@ -76,20 +82,29 @@ type liveCall struct {
 	id, channel, media string
 	// nonce echoes the caller's client_call_id so its client can match the
 	// call before it knows the server id.
-	nonce              string
+	nonce string
+	// calleeNonce is the client_call_id of the callee's own call_start when
+	// that call_start crossed this call and answered it (handleCallStart).
+	calleeNonce        string
 	callerID, calleeID int
 	caller, callee     runtime.PublicUser
 	active             bool
 	startedAt          int64
 	answeredAt         int64
+	// answeredClock is answeredAt on the monotonic clock, so a socket lost in
+	// the same second can be placed before or after the answer.
+	answeredClock time.Time
 	// callerConn placed the call and calleeConn answered it (nil while
 	// ringing); either is nil while that side reconnects. The device ids
 	// decide who may rebind after a reconnect.
 	callerConn, calleeConn     *runtime.Client
 	callerDevice, calleeDevice string
 	reached                    bool // a callee device has been rung
-	pushed                     bool // an incoming-call Web Push went out
-	withdrawn                  bool // a call_over push replaced it
+	// announced is set once call_outgoing has gone to the caller, so no
+	// call_ringing can reach the caller ahead of it.
+	announced bool
+	pushed    bool // an incoming-call Web Push went out
+	withdrawn bool // a call_over push replaced it
 	// pushQueue closes once the last push queued for this call has gone out.
 	pushQueue chan struct{}
 	// status is the outcome, set when endCall ends the call.
@@ -106,7 +121,33 @@ var (
 	callsMu   sync.Mutex
 	liveCalls = map[string]*liveCall{}
 	userCalls = map[int]*liveCall{}
+	// callStarts holds, per user, when each call they placed in the last
+	// hour started (oldest first). Guarded by callsMu.
+	callStarts = map[int][]time.Time{}
 )
+
+// allowCallStart records a call userID places now, unless it comes less than
+// callStartGap after their previous call or they placed callStartsPerHour
+// calls in the last hour. A refused call_start is not recorded. Caller holds
+// callsMu.
+func allowCallStart(userID int, now time.Time) bool {
+	kept := []time.Time{}
+	for _, t := range callStarts[userID] {
+		if now.Sub(t) < time.Hour {
+			kept = append(kept, t)
+		}
+	}
+	allowed := len(kept) < callStartsPerHour && (len(kept) == 0 || now.Sub(kept[len(kept)-1]) >= callStartGap)
+	if allowed {
+		kept = append(kept, now)
+	}
+	if len(kept) == 0 {
+		delete(callStarts, userID)
+	} else {
+		callStarts[userID] = kept
+	}
+	return allowed
+}
 
 // callView is a live call's wire shape as one participant sees it.
 type callView struct {
@@ -156,11 +197,15 @@ func handleCallMessage(client *runtime.Client, user *db.User, kind string, data 
 	case "call_accept":
 		handleCallAccept(client, user.ID, callID, device, "")
 	case "call_hangup":
-		handleCallHangup(user.ID, callID, strField(data, "reason") == "failed")
+		handleCallHangup(client, user.ID, callID, device, strField(data, "reason") == "failed")
 	case "call_signal":
 		handleCallSignal(client, callID, data)
 	case "call_resume":
-		handleCallResume(client, user.ID, callID, device)
+		if nonce := truncateRunes(strField(data, "client_call_id"), 64); callID == "" && nonce != "" {
+			handleCallResumeByNonce(client, user.ID, nonce, device)
+		} else {
+			handleCallResume(client, user.ID, callID, device)
+		}
 	}
 }
 
@@ -198,6 +243,11 @@ func handleCallStart(client *runtime.Client, user *db.User, device string, data 
 		reject("busy_self")
 		return
 	}
+	if !allowCallStart(user.ID, time.Now()) {
+		callsMu.Unlock()
+		reject("rate_limited")
+		return
+	}
 	id, err := tokenHex(8)
 	if err != nil {
 		callsMu.Unlock()
@@ -230,7 +280,22 @@ func handleCallStart(client *runtime.Client, user *db.User, device string, data 
 	callsMu.Unlock()
 
 	debuglog.Emit("messages", "info", "call_start", "Call placed", map[string]any{"call": id, "media": media, "user": user.Username})
+	if hook != nil {
+		hook("registered")
+	}
 	runtime.SendJSON(client, gin.H{"type": "call_outgoing", "client_call_id": nonce, "call": outgoing})
+	// A callee device that connected meanwhile was rung by deliverRingingCalls,
+	// which leaves call_ringing to this point so it follows call_outgoing.
+	callsMu.Lock()
+	call.announced = true
+	var ringNow *runtime.Client
+	if liveCalls[id] == call && !call.active && call.reached {
+		ringNow = call.callerConn
+	}
+	callsMu.Unlock()
+	if ringNow != nil {
+		runtime.SendJSON(ringNow, gin.H{"type": "call_ringing", "call_id": id})
+	}
 	if busy {
 		endCall(id, unconditionally(db.CallBusy))
 		return
@@ -306,9 +371,11 @@ func handleCallStart(client *runtime.Client, user *db.User, device string, data 
 		call.pushed = true
 		pushCall(call, "call")
 	}
+	// The caller's device may have reconnected (call_resume) since call_start.
+	callerConn := call.callerConn
 	callsMu.Unlock()
-	if reached {
-		runtime.SendJSON(client, gin.H{"type": "call_ringing", "call_id": id})
+	if reached && callerConn != nil {
+		runtime.SendJSON(callerConn, gin.H{"type": "call_ringing", "call_id": id})
 	}
 }
 
@@ -318,6 +385,13 @@ func handleCallStart(client *runtime.Client, user *db.User, device string, data 
 func handleCallAccept(client *runtime.Client, userID int, callID, device, nonce string) {
 	callsMu.Lock()
 	call := liveCalls[callID]
+	if call != nil && call.active && call.calleeID == userID && userCalls[userID] == call && device != "" && device == call.calleeDevice {
+		// The device that answered sent call_accept again (its client re-sends
+		// one it fears was lost in a reconnect): bind this socket and confirm.
+		callsMu.Unlock()
+		resumeCallee(client, call, nonce)
+		return
+	}
 	if call == nil || call.calleeID != userID || call.active || userCalls[userID] != call {
 		callsMu.Unlock()
 		runtime.SendJSON(client, gin.H{"type": "call_ended", "call_id": callID, "client_call_id": nonce, "reason": "gone"})
@@ -325,8 +399,10 @@ func handleCallAccept(client *runtime.Client, userID int, callID, device, nonce 
 	}
 	call.active = true
 	call.answeredAt = db.NowTS()
+	call.answeredClock = time.Now()
 	call.calleeConn = client
 	call.calleeDevice = device
+	call.calleeNonce = nonce
 	if call.ringTimer != nil {
 		call.ringTimer.Stop()
 	}
@@ -361,26 +437,54 @@ func handleCallAccept(client *runtime.Client, userID int, callID, device, nonce 
 // handleCallHangup ends the call from either side: hanging up a ringing call
 // cancels it (caller) or declines it (callee). failed marks an answered call
 // whose media never connected.
-func handleCallHangup(userID int, callID string, failed bool) {
+//
+// Any device of either user may end a call that is still ringing. Once it is
+// answered, only the two devices on it may: the frame must come from a bound
+// socket, or name a bound device (a hang-up queued while that device's socket
+// was down arrives on its next socket). So a Decline that another device of
+// the callee sent before it heard answered_elsewhere can't end the call.
+func handleCallHangup(client *runtime.Client, userID int, callID, device string, failed bool) {
 	endCall(callID, func(c *liveCall) (string, bool) {
-		switch {
-		case userID != c.callerID && userID != c.calleeID:
+		if c.active && !c.onCall(client, userID, device) {
 			return "", false
-		case c.active && failed:
-			return db.CallFailed, true
-		case c.active:
-			return db.CallCompleted, true
-		case userID == c.callerID:
-			return db.CallCancelled, true
-		default:
-			return db.CallDeclined, true
 		}
+		return hangupStatus(c, userID, failed)
 	})
 }
 
-// endUserCall ends userID's live call as if they had hung up. Logout and
-// account deletion run it first, so the peer hears at once (and, for a
-// deletion, the thread entry is written while both users still exist).
+// onCall reports whether client, or device, is userID's side of the answered
+// call. Caller holds callsMu.
+func (c *liveCall) onCall(client *runtime.Client, userID int, device string) bool {
+	switch userID {
+	case c.callerID:
+		return client == c.callerConn || (device != "" && device == c.callerDevice)
+	case c.calleeID:
+		return client == c.calleeConn || (device != "" && device == c.calleeDevice)
+	}
+	return false
+}
+
+// hangupStatus is the outcome of userID hanging up the call. Caller holds
+// callsMu.
+func hangupStatus(c *liveCall, userID int, failed bool) (string, bool) {
+	switch {
+	case userID != c.callerID && userID != c.calleeID:
+		return "", false
+	case c.active && failed:
+		return db.CallFailed, true
+	case c.active:
+		return db.CallCompleted, true
+	case userID == c.callerID:
+		return db.CallCancelled, true
+	default:
+		return db.CallDeclined, true
+	}
+}
+
+// endUserCall ends userID's live call as if they had hung up on the device on
+// the call. Logout and account deletion run it first, so the peer hears at
+// once (and, for a deletion, the thread entry is written while both users
+// still exist).
 func endUserCall(userID int) {
 	callsMu.Lock()
 	call := userCalls[userID]
@@ -390,7 +494,7 @@ func endUserCall(userID int) {
 	}
 	id := call.id
 	callsMu.Unlock()
-	handleCallHangup(userID, id, false)
+	endCall(id, func(c *liveCall) (string, bool) { return hangupStatus(c, userID, false) })
 }
 
 // handleCallSignal relays an opaque SDP/ICE/state payload between the two
@@ -466,6 +570,71 @@ func handleCallResume(client *runtime.Client, userID int, callID, device string)
 	}
 }
 
+// handleCallResumeByNonce finds the call a device's call_start made when the
+// device never heard the server's answer (the socket dropped first): the
+// call it placed with this client_call_id, or the peer's call that this
+// call_start crossed and answered. It rebinds the device and repeats the
+// answer — call_outgoing (then call_ringing or call_accepted), or
+// call_accepted. When no such call is live, the device is told
+// call_ended "gone" with its client_call_id.
+func handleCallResumeByNonce(client *runtime.Client, userID int, nonce, device string) {
+	callsMu.Lock()
+	call := userCalls[userID]
+	switch {
+	case call != nil && call.callerID == userID && call.nonce == nonce && call.callerDevice == device:
+		call.callerConn = client
+		if t := call.grace[userID]; t != nil {
+			t.Stop()
+			delete(call.grace, userID)
+		}
+		backlog := call.backlog[userID]
+		delete(call.backlog, userID)
+		view := call.viewFor(userID)
+		active, ringing := call.active, call.reached && call.announced
+		callsMu.Unlock()
+		runtime.SendJSON(client, gin.H{"type": "call_outgoing", "client_call_id": nonce, "call": view})
+		if active {
+			runtime.SendJSON(client, gin.H{"type": "call_accepted", "client_call_id": nonce, "call": view})
+		} else if ringing {
+			runtime.SendJSON(client, gin.H{"type": "call_ringing", "call_id": call.id})
+		}
+		for _, p := range backlog {
+			runtime.SendJSON(client, gin.H{"type": "call_signal", "call_id": view.ID, "payload": p})
+		}
+	case call != nil && call.calleeID == userID && call.active && call.calleeNonce == nonce && call.calleeDevice == device:
+		callsMu.Unlock()
+		resumeCallee(client, call, nonce)
+	default:
+		callsMu.Unlock()
+		runtime.SendJSON(client, gin.H{"type": "call_ended", "call_id": "", "client_call_id": nonce, "reason": "gone"})
+	}
+}
+
+// resumeCallee binds client as the answering device of an answered call and
+// repeats its call_accepted, then the signals held for it.
+func resumeCallee(client *runtime.Client, call *liveCall, nonce string) {
+	callsMu.Lock()
+	if liveCalls[call.id] != call {
+		callsMu.Unlock()
+		runtime.SendJSON(client, gin.H{"type": "call_ended", "call_id": call.id, "client_call_id": nonce, "reason": "gone"})
+		return
+	}
+	uid := call.calleeID
+	call.calleeConn = client
+	if t := call.grace[uid]; t != nil {
+		t.Stop()
+		delete(call.grace, uid)
+	}
+	backlog := call.backlog[uid]
+	delete(call.backlog, uid)
+	view := call.viewFor(uid)
+	callsMu.Unlock()
+	runtime.SendJSON(client, gin.H{"type": "call_accepted", "client_call_id": nonce, "call": view})
+	for _, p := range backlog {
+		runtime.SendJSON(client, gin.H{"type": "call_signal", "call_id": view.ID, "payload": p})
+	}
+}
+
 // deliverRingingCalls rings a freshly connected device (opened from a push,
 // or reconnected) or call listener when a call to its user is still ringing.
 func deliverRingingCalls(client *runtime.Client) {
@@ -476,7 +645,8 @@ func deliverRingingCalls(client *runtime.Client) {
 		return
 	}
 	view := call.viewFor(client.UserID)
-	first := !call.reached
+	// Before call_outgoing has gone out, handleCallStart sends call_ringing.
+	first := !call.reached && call.announced
 	call.reached = true
 	callerConn, id := call.callerConn, call.id
 	callsMu.Unlock()
@@ -509,7 +679,7 @@ func callSocketGone(client *runtime.Client, unloaded bool) {
 	if t := call.grace[uid]; t != nil {
 		t.Stop()
 	}
-	id, lostAt := call.id, db.NowTS()
+	id, lostAt, lost := call.id, db.NowTS(), time.Now()
 	end := func() {
 		endCall(id, func(c *liveCall) (string, bool) {
 			gone := (uid == c.callerID && c.callerConn == nil) || (uid == c.calleeID && c.calleeConn == nil)
@@ -517,7 +687,12 @@ func callSocketGone(client *runtime.Client, unloaded bool) {
 				return "", false
 			}
 			c.lostAt = lostAt
-			if c.active {
+			switch {
+			case c.active && !lost.After(c.answeredClock):
+				// This side was already gone when the call was answered and
+				// never came back, so the two devices never connected.
+				return db.CallFailed, true
+			case c.active:
 				return db.CallCompleted, true
 			}
 			return db.CallCancelled, true

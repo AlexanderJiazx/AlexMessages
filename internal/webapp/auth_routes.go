@@ -20,12 +20,14 @@ func registerAuthRoutes(r *gin.Engine) {
 
 // resolveDisplayName mirrors `(payload.get("display_name") or username).strip()[:40] or username`.
 func resolveDisplayName(raw, username string) string {
-	dn := firstNonEmpty(raw, username)
-	dn = truncateRunes(trimSpace(dn), 40)
-	return firstNonEmpty(dn, username)
+	return firstNonEmpty(auth.CleanDisplayName(raw), username)
 }
 
 func handleRegister(c *gin.Context) {
+	if !auth.LoginLimiter.Allow(c.ClientIP()) {
+		httpx.Error(c, http.StatusTooManyRequests, auth.TooManyAttemptsDetail)
+		return
+	}
 	m := bindJSON(c)
 	username := auth.NormalizeUsername(strField(m, "username"))
 	password := strField(m, "password")
@@ -61,6 +63,11 @@ func handleRegister(c *gin.Context) {
 }
 
 func handleLogin(c *gin.Context) {
+	ip := c.ClientIP()
+	if !auth.LoginLimiter.Allow(ip) {
+		httpx.Error(c, http.StatusTooManyRequests, auth.TooManyAttemptsDetail)
+		return
+	}
 	m := bindJSON(c)
 	username := auth.NormalizeUsername(strField(m, "username"))
 	password := strField(m, "password")
@@ -70,6 +77,8 @@ func handleLogin(c *gin.Context) {
 		httpx.Error(c, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
+	// A correct password gives the attempt back: only failures use the budget.
+	auth.LoginLimiter.Refund(ip)
 	if user.Status == "pending" {
 		httpx.Error(c, http.StatusForbidden, "Your account is awaiting admin approval")
 		return

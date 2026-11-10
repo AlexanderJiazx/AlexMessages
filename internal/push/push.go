@@ -16,6 +16,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 
 	"alexmessage/internal/db"
+	"alexmessage/internal/httpx"
 )
 
 var (
@@ -41,8 +43,57 @@ const (
 // pushHTTPClient sends every push. webpush-go's default client has no
 // timeout, so a push service that accepts the request and never answers
 // would hold the sending goroutine forever, and with it every push queued
-// behind it (a call's pushes go out one after another).
-var pushHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// behind it (a call's pushes go out one after another). It dials only public
+// addresses (httpx.GuardedDialContext) and never follows a redirect, so a
+// stored endpoint can't make the server reach an internal service.
+var pushHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext:         httpx.GuardedDialContext,
+		ForceAttemptHTTP2:   true,
+		TLSHandshakeTimeout: 10 * time.Second,
+		MaxIdleConns:        16,
+		IdleConnTimeout:     90 * time.Second,
+	},
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+// pushServiceHosts are the push services of the browsers the app supports:
+// Chrome, Edge (Chromium), Opera, Samsung Internet and other Chromium
+// browsers use Firebase Cloud Messaging; Firefox uses Mozilla's autopush;
+// Safari uses Apple's web push service; Edge on Windows can also use the
+// Windows Push Notification Services. pushServiceSuffixes match any subdomain.
+var (
+	pushServiceHosts = map[string]bool{
+		"fcm.googleapis.com":                true,
+		"updates.push.services.mozilla.com": true,
+		"web.push.apple.com":                true,
+	}
+	pushServiceSuffixes = []string{".push.apple.com", ".notify.windows.com"}
+)
+
+// ValidEndpoint reports whether endpoint is an https URL on a known push
+// service (pushServiceHosts or a subdomain in pushServiceSuffixes), on the
+// default port and without credentials in the URL.
+func ValidEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Opaque != "" {
+		return false
+	}
+	if p := u.Port(); p != "" && p != "443" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if pushServiceHosts[host] {
+		return true
+	}
+	for _, suffix := range pushServiceSuffixes {
+		if strings.HasSuffix(host, suffix) && len(host) > len(suffix) {
+			return true
+		}
+	}
+	return false
+}
 
 // In-memory base64url keys derived from the on-disk PEM. The public key is the
 // uncompressed EC point; the private key is the raw 32-byte scalar — the two

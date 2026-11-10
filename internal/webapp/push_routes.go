@@ -42,6 +42,14 @@ func handleSubscribe(c *gin.Context) {
 		httpx.Error(c, http.StatusBadRequest, "Subscription is missing required fields")
 		return
 	}
+	if len(endpoint) > 1024 || !push.ValidEndpoint(endpoint) {
+		httpx.Error(c, http.StatusBadRequest, "Unsupported push service")
+		return
+	}
+	if len(p256dh) > 256 || len(authToken) > 64 {
+		httpx.Error(c, http.StatusBadRequest, "Subscription keys are too long")
+		return
+	}
 	if err := db.UpsertPushSubscription(user.ID, endpoint, p256dh, authToken, userAgent); err != nil {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return
@@ -50,7 +58,8 @@ func handleSubscribe(c *gin.Context) {
 }
 
 func handleUnsubscribe(c *gin.Context) {
-	if _, ok := requireUser(c); !ok {
+	user, ok := requireUser(c)
+	if !ok {
 		return
 	}
 	m := bindJSON(c)
@@ -59,7 +68,7 @@ func handleUnsubscribe(c *gin.Context) {
 		httpx.Error(c, http.StatusBadRequest, "Missing endpoint")
 		return
 	}
-	if err := db.RemovePushSubscription(endpoint); err != nil {
+	if err := db.RemoveUserPushSubscription(user.ID, endpoint); err != nil {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return
 	}

@@ -59,3 +59,53 @@ func TestSendOneGivesUpOnStalledPushService(t *testing.T) {
 		t.Fatal("sendOne is still waiting on a push service that never answers")
 	}
 }
+
+func TestValidEndpointAcceptsOnlyKnownPushServices(t *testing.T) {
+	good := []string{
+		"https://fcm.googleapis.com/fcm/send/abc:def",
+		"https://fcm.googleapis.com/wp/abc",
+		"https://updates.push.services.mozilla.com/wpush/v2/gAAA",
+		"https://web.push.apple.com/QGx",
+		"https://api.push.apple.com/3/device/x",
+		"https://wns2-par02p.notify.windows.com/w/?token=x",
+		"https://FCM.googleapis.com:443/fcm/send/x",
+	}
+	for _, e := range good {
+		if !ValidEndpoint(e) {
+			t.Errorf("ValidEndpoint(%q) = false, want true", e)
+		}
+	}
+	bad := []string{
+		"", "http://fcm.googleapis.com/fcm/send/x", "https://127.0.0.1/x",
+		"https://localhost/x", "https://evil.example/x", "https://fcm.googleapis.com.evil.example/x",
+		"https://evilpush.apple.com/x", "https://push.apple.com/x", "https://notify.windows.com/x",
+		"https://fcm.googleapis.com:8443/x", "https://user:pw@fcm.googleapis.com/x",
+		"https://169.254.169.254/latest/meta-data", "ftp://fcm.googleapis.com/x",
+	}
+	for _, e := range bad {
+		if ValidEndpoint(e) {
+			t.Errorf("ValidEndpoint(%q) = true, want false", e)
+		}
+	}
+}
+
+// The real push client refuses to dial a loopback endpoint, even one that
+// was stored before endpoints were checked.
+func TestPushClientRefusesInternalAddress(t *testing.T) {
+	hit := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit <- struct{}{} }))
+	defer srv.Close()
+	resp, err := pushHTTPClient.Post(srv.URL+"/sub", "text/plain", nil)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("push client reached a loopback server")
+	}
+	select {
+	case <-hit:
+		t.Fatal("loopback server got the request")
+	default:
+	}
+	if pushHTTPClient.CheckRedirect == nil {
+		t.Fatal("push client follows redirects")
+	}
+}

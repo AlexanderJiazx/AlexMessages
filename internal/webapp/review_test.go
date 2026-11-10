@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -391,5 +392,37 @@ func TestSocketInitFailureLeavesNoPresence(t *testing.T) {
 				t.Fatalf("%d ghost socket(s) left in presence", len(sockets))
 			}
 		})
+	}
+}
+
+func TestParsePeerIDAcceptsOnlyWholeNumbers(t *testing.T) {
+	for _, v := range []any{2.0, "2"} {
+		if id, ok := parsePeerID(v); !ok || id != 2 {
+			t.Fatalf("parsePeerID(%v) = %d, %v; want 2, true", v, id, ok)
+		}
+	}
+	for _, v := range []any{2.7, -1.0, 0.0, 1e308, math.Inf(1), "x", nil, true} {
+		if id, ok := parsePeerID(v); ok {
+			t.Fatalf("parsePeerID(%v) = %d, true; want rejected", v, id)
+		}
+	}
+}
+
+func TestCleanDisplayName(t *testing.T) {
+	for in, want := range map[string]string{
+		"  Alice  ":                         "Alice",
+		"Al\nice\tB":                        "Al ice B",
+		"​​":                                "",
+		"   ":                               "",
+		"‮evil‬":                            "evil",
+		"⁧x⁩":                               "x",
+		"👨‍👩‍👧":                             "👨‍👩‍👧",
+		"李 雷":                               "李 雷",
+		strings.Repeat("a", 50):             strings.Repeat("a", 40),
+		"a" + strings.Repeat(" ", 45) + "b": "a b",
+	} {
+		if got := auth.CleanDisplayName(in); got != want {
+			t.Fatalf("auth.CleanDisplayName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
@@ -22,6 +24,18 @@ import (
 
 // maxAvatarBytes caps a profile photo at 5 MB.
 const maxAvatarBytes = 5 * 1024 * 1024
+
+// avatarLocks serializes the avatar changes of each user (key: user id,
+// value: *sync.Mutex). Without it, two concurrent changes could each delete
+// the file the other one just recorded in the database.
+var avatarLocks sync.Map
+
+func lockAvatar(userID int) func() {
+	m, _ := avatarLocks.LoadOrStore(userID, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
 
 // avatarExtByMime maps the sniffed content type to the stored extension.
 var avatarExtByMime = map[string]string{
@@ -42,8 +56,21 @@ func handleSetAvatar(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// The photo plus 1 MB of multipart overhead; a larger body stops being
+	// read at that point.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAvatarBytes+1024*1024)
+	defer func() {
+		if c.Request.MultipartForm != nil {
+			_ = c.Request.MultipartForm.RemoveAll()
+		}
+	}()
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			httpx.Error(c, http.StatusRequestEntityTooLarge, "Photo exceeds 5MB limit")
+			return
+		}
 		httpx.Error(c, http.StatusBadRequest, "Empty file")
 		return
 	}
@@ -84,6 +111,8 @@ func handleSetAvatar(c *gin.Context) {
 		return
 	}
 	name := strconv.Itoa(user.ID) + "_" + token + ext
+	unlock := lockAvatar(user.ID)
+	defer unlock()
 	if err := os.WriteFile(filepath.Join(db.AvatarRoot, name), raw, 0o644); err != nil {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return
@@ -91,10 +120,11 @@ func handleSetAvatar(c *gin.Context) {
 	// Replace, don't accumulate: record the new photo, then drop the previous
 	// file(s). The token in the name doubles as a cache buster.
 	if err := db.SetUserAvatar(user.ID, "/avatars/"+name); err != nil {
+		_ = os.Remove(filepath.Join(db.AvatarRoot, name))
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return
 	}
-	removeAvatarFileExcept(user.ID, name)
+	pruneAvatarFiles(user.ID)
 
 	fresh, err := db.GetUserByID(user.ID)
 	if err != nil || fresh == nil {
@@ -111,11 +141,13 @@ func handleDeleteAvatar(c *gin.Context) {
 	if !ok {
 		return
 	}
+	unlock := lockAvatar(user.ID)
+	defer unlock()
 	if err := db.SetUserAvatar(user.ID, ""); err != nil {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
 		return
 	}
-	db.DeleteUserAvatarFiles(user.ID)
+	pruneAvatarFiles(user.ID)
 	fresh, err := db.GetUserByID(user.ID)
 	if err != nil || fresh == nil {
 		httpx.Error(c, http.StatusInternalServerError, "internal error")
@@ -124,6 +156,17 @@ func handleDeleteAvatar(c *gin.Context) {
 	profile := runtime.UserPublic(fresh)
 	runtime.BroadcastProfileUpdate(profile)
 	c.JSON(http.StatusOK, gin.H{"user": profile})
+}
+
+// pruneAvatarFiles deletes every avatar file of the user except the one the
+// database row names now. It deletes nothing when that row can't be read.
+// The caller holds lockAvatar(userID).
+func pruneAvatarFiles(userID int) {
+	u, err := db.GetUserByID(userID)
+	if err != nil || u == nil {
+		return
+	}
+	removeAvatarFileExcept(userID, strings.TrimPrefix(u.Avatar, "/avatars/"))
 }
 
 // removeAvatarFileExcept deletes every avatar file for the user except keep.

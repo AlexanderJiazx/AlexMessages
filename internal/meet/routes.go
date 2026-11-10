@@ -47,19 +47,20 @@ func NewEngine() *gin.Engine {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(httpx.SecurityHeaders())
 
 	if dir := filepath.Join(db.BaseDir, "fonts"); isDir(dir) {
-		mountStatic(r, "/fonts", dir)
+		httpx.Static(r, "/fonts", dir, "public, max-age=86400")
 	}
 	if dir := filepath.Join(db.BaseDir, "sound"); isDir(dir) {
-		mountStatic(r, "/sound", dir)
+		httpx.Static(r, "/sound", dir, "public, max-age=86400")
 	}
 	if dir := filepath.Join(db.BaseDir, "static"); isDir(dir) {
-		mountStatic(r, "/static", dir)
+		httpx.Static(r, "/static", dir, "no-cache")
 	}
 	// Profile photos are written by the main app; serve them here too so
 	// meeting tiles can use the same /avatars/... URLs.
-	mountStatic(r, "/avatars", db.AvatarRoot)
+	httpx.Static(r, "/avatars", db.AvatarRoot, "public, max-age=86400")
 
 	r.GET("/", s.handleRoot)
 	r.GET("/m/:code", s.handleMeetingPage)
@@ -94,21 +95,28 @@ func envOr(key, def string) string {
 	return def
 }
 
+// volcTokenTTL is how long one VolcEngine token (and its publish/subscribe
+// privileges) stays valid. Clients renew it over the control socket
+// (volc_token) before it runs out; the server renews only for participants on
+// the roster, so a kicked participant loses the media room within this time.
+const volcTokenTTL = 15 * time.Minute
+
 // volcJoinPayload mints the per-participant join credentials for a VolcEngine
 // meeting. The VolcEngine user id is "p<pid>" so clients can map media streams
-// back to roster entries.
+// back to roster entries. expires_at is the token's expiry in unix seconds.
 func volcJoinPayload(roomID string, pid int) gin.H {
 	uid := "p" + strconv.Itoa(pid)
-	exp := uint32(time.Now().Add(24 * time.Hour).Unix())
+	exp := uint32(time.Now().Add(volcTokenTTL).Unix())
 	t := newVolcToken(volcAppID(), volcAppKey(), roomID, uid)
 	t.expireTime(exp)
 	t.addPrivilege(volcPrivPublishStream, exp)
 	t.addPrivilege(volcPrivSubscribeStream, exp)
 	return gin.H{
-		"app_id":  volcAppID(),
-		"room_id": roomID,
-		"user_id": uid,
-		"token":   t.serialize(),
+		"app_id":     volcAppID(),
+		"room_id":    roomID,
+		"user_id":    uid,
+		"token":      t.serialize(),
+		"expires_at": exp,
 	}
 }
 
@@ -120,6 +128,7 @@ func (s *meetServer) handleRoot(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/login")
 		return
 	}
+	c.Header("Cache-Control", "no-cache")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.meetHTML))
 }
 
@@ -138,6 +147,7 @@ func (s *meetServer) handleMeetingPage(c *gin.Context) {
 			return
 		}
 	}
+	c.Header("Cache-Control", "no-cache")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.meetHTML))
 }
 
@@ -147,15 +157,30 @@ func (s *meetServer) handleLoginPage(c *gin.Context) {
 		c.Redirect(http.StatusFound, safeNext(c.Query("next")))
 		return
 	}
+	c.Header("Cache-Control", "no-cache")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.loginHTML))
 }
 
 // safeNext only allows same-site paths so /login?next= can't open-redirect.
+// The value must start with exactly one "/", contain no backslash (browsers
+// read "/\evil.com" as "//evil.com") and no control character (browsers drop
+// tabs and newlines, so "/\t/evil.com" also becomes "//evil.com"), and parse
+// as a URL without a scheme, host, user info, or opaque part. meet_login.html's
+// nextPath() applies the same rule.
 func safeNext(next string) string {
-	if strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") {
-		return next
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+		return "/"
 	}
-	return "/"
+	for _, r := range next {
+		if r == '\\' || r < 0x20 || r == 0x7f {
+			return "/"
+		}
+	}
+	u, err := url.Parse(next)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return "/"
+	}
+	return next
 }
 
 // ---------- auth ----------
@@ -184,6 +209,11 @@ func requireUser(c *gin.Context) (*db.User, bool) {
 }
 
 func handleLogin(c *gin.Context) {
+	ip := c.ClientIP()
+	if !auth.LoginLimiter.Allow(ip) {
+		httpx.Error(c, http.StatusTooManyRequests, auth.TooManyAttemptsDetail)
+		return
+	}
 	m := bindJSON(c)
 	username := auth.NormalizeUsername(strField(m, "username"))
 	password := strField(m, "password")
@@ -193,6 +223,8 @@ func handleLogin(c *gin.Context) {
 		httpx.Error(c, http.StatusUnauthorized, "Invalid username or password")
 		return
 	}
+	// A correct password gives the attempt back: only failures use the budget.
+	auth.LoginLimiter.Refund(ip)
 	if user.Status == "pending" {
 		httpx.Error(c, http.StatusForbidden, "Your account is awaiting admin approval")
 		return
@@ -229,7 +261,8 @@ func handleMe(c *gin.Context) {
 // ---------- meetings ----------
 
 func handleCreateMeeting(c *gin.Context) {
-	if _, ok := requireUser(c); !ok {
+	user, ok := requireUser(c)
+	if !ok {
 		return
 	}
 	m := bindJSON(c)
@@ -239,12 +272,24 @@ func handleCreateMeeting(c *gin.Context) {
 	}
 	meetMu.Lock()
 	pruneRoomsLocked()
+	live := 0
+	for _, rm := range rooms {
+		if rm.creatorID == user.ID {
+			live++
+		}
+	}
+	if live >= maxLiveRoomsPerUser {
+		meetMu.Unlock()
+		httpx.Error(c, http.StatusTooManyRequests, "You have too many open meetings. Try again once some have ended.")
+		return
+	}
 	code := newRoomCode()
 	rooms[code] = &room{
 		code:      code,
 		mode:      mode,
 		parts:     map[int]*participant{},
 		createdAt: db.NowTS(),
+		creatorID: user.ID,
 	}
 	meetMu.Unlock()
 	debuglog.Emit("meet", "info", "meeting_created", "Meeting created", map[string]any{"code": code, "mode": mode})
@@ -301,10 +346,6 @@ func loadHTML(name string) string {
 		return "<h1>" + name + " missing</h1>"
 	}
 	return string(b)
-}
-
-func mountStatic(r *gin.Engine, prefix, dir string) {
-	r.StaticFS(prefix, httpx.NoListFS{FS: http.Dir(dir)})
 }
 
 func isDir(p string) bool {

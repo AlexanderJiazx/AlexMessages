@@ -120,19 +120,25 @@ func newCallFixture(t *testing.T, ring, grace time.Duration) *callFixture {
 	takeCallPushes()
 
 	// The timeouts are read under callsMu, so they are swapped under it.
+	// Tests place calls back to back, so the gap between one user's calls is
+	// off unless a test sets it (TestCallStartRateLimited).
 	callsMu.Lock()
-	defaultRing, defaultGrace := callRingTimeout, callResumeGrace
+	defaultRing, defaultGrace, defaultGap, defaultHourly := callRingTimeout, callResumeGrace, callStartGap, callStartsPerHour
 	if ring != 0 {
 		callRingTimeout = ring
 	}
 	if grace != 0 {
 		callResumeGrace = grace
 	}
+	callStartGap = 0
+	callStarts = map[int][]time.Time{}
 	callsMu.Unlock()
 	t.Cleanup(func() {
 		callsMu.Lock()
 		defer callsMu.Unlock()
 		callRingTimeout, callResumeGrace = defaultRing, defaultGrace
+		callStartGap, callStartsPerHour = defaultGap, defaultHourly
+		callStarts = map[int][]time.Time{}
 		// Drop calls a test left behind so their timers can't write into
 		// the next test's database.
 		for _, c := range liveCalls {
@@ -628,6 +634,253 @@ func TestCallGraceExpiry(t *testing.T) {
 	id = ring(t, a, b, f.bob.ID)
 	a.drop()
 	expectEnd(t, b, id, "cancelled")
+}
+
+// A Decline that the callee's second device sent before it heard
+// answered_elsewhere must not end the call the first device answered. The
+// device on the call can still hang up, also from its next socket after a
+// reconnect (a hang-up queued while its socket was down).
+func TestCallStaleDeclineKeepsAnsweredCall(t *testing.T) {
+	f := newCallFixture(t, 0, 0)
+	a := f.dial(t, f.tokA)
+	b := f.dial(t, f.tokB)
+	b2 := f.dial(t, f.tokB)
+	id := ring(t, a, b, f.bob.ID)
+	b2.next("call_incoming")
+	answer(t, a, b, id)
+	b2.send(gin.H{"type": "call_hangup", "call_id": id, "device": "dev-b2"})
+	b2.sync()
+	if _, live := liveCallState(id, func(c *liveCall) bool { return c.active }); !live {
+		t.Fatal("a stale Decline from another device ended the answered call")
+	}
+	// A tab of the caller that isn't on the call can't end it either.
+	a2 := f.dial(t, f.tokA)
+	a2.send(gin.H{"type": "call_hangup", "call_id": id, "device": "dev-a2"})
+	a2.sync()
+	if _, live := liveCallState(id, func(c *liveCall) bool { return c.active }); !live {
+		t.Fatal("an unbound tab of the caller ended the answered call")
+	}
+
+	// Bob's answering device loses its socket; its hang-up arrives on the next.
+	b.drop()
+	waitUntil(t, "the server to notice the drop", func() bool {
+		gone, _ := liveCallState(id, func(c *liveCall) bool { return c.calleeConn == nil })
+		return gone
+	})
+	b3 := f.dial(t, f.tokB)
+	b3.send(gin.H{"type": "call_hangup", "call_id": id, "device": "dev-b"})
+	expectEnd(t, a, id, "completed")
+}
+
+// A caller whose socket dropped before the answer and never came back was
+// never connected to the callee: the call is logged failed, not completed.
+func TestCallCallerGoneBeforeAnswerLoggedFailed(t *testing.T) {
+	f := newCallFixture(t, 0, 300*time.Millisecond)
+	a := f.dial(t, f.tokA)
+	b := f.dial(t, f.tokB)
+	id := ring(t, a, b, f.bob.ID)
+	a.drop()
+	waitUntil(t, "the server to notice the drop", func() bool {
+		gone, _ := liveCallState(id, func(c *liveCall) bool { return c.callerConn == nil })
+		return gone
+	})
+	b.send(gin.H{"type": "call_accept", "call_id": id, "device": "dev-b"})
+	b.next("call_accepted")
+	expectText(t, expectEnd(t, b, id, "failed"), "Video call failed")
+}
+
+// aliceCallerGone waits until Alice has a live call she placed whose socket
+// is gone, and returns its id.
+func aliceCallerGone(t *testing.T, f *callFixture) string {
+	t.Helper()
+	id := ""
+	waitUntil(t, "Alice's call to lose its socket", func() bool {
+		callsMu.Lock()
+		defer callsMu.Unlock()
+		c := userCalls[f.alice.ID]
+		if c != nil && c.callerID == f.alice.ID && c.callerConn == nil {
+			id = c.id
+		}
+		return id != ""
+	})
+	return id
+}
+
+// A device whose socket dropped before it heard the answer to its call_start
+// asks for the call by its client_call_id and device.
+func TestCallResumeByNonce(t *testing.T) {
+	f := newCallFixture(t, 0, 0)
+	b := f.dial(t, f.tokB)
+
+	// The answer (call_outgoing) is lost with the socket; the call rings on.
+	a := f.dial(t, f.tokA)
+	a.send(gin.H{"type": "call_start", "peer_id": f.bob.ID, "media": "audio", "client_call_id": "n1", "device": "dev-a"})
+	a.drop()
+	id := aliceCallerGone(t, f)
+	b.next("call_incoming")
+	a2 := f.dial(t, f.tokA)
+	// Another device of Alice's can't take the call over.
+	a2.send(gin.H{"type": "call_resume", "call_id": "", "client_call_id": "n1", "device": "dev-other"})
+	if e := a2.next("call_ended"); e["client_call_id"] != "n1" || e["reason"] != "gone" {
+		t.Fatalf("call_ended = %v", e)
+	}
+	a2.send(gin.H{"type": "call_resume", "call_id": "", "client_call_id": "n1", "device": "dev-a"})
+	if out := a2.next("call_outgoing"); out["client_call_id"] != "n1" || callOf(out)["id"] != id || callOf(out)["state"] != "ringing" {
+		t.Fatalf("call_outgoing = %v", out)
+	}
+	if r := a2.next("call_ringing"); r["call_id"] != id {
+		t.Fatalf("call_ringing = %v", r)
+	}
+	// The resumed device is the caller's bound socket again.
+	b.send(gin.H{"type": "call_accept", "call_id": id, "device": "dev-b"})
+	b.next("call_accepted")
+	if acc := a2.next("call_accepted"); acc["client_call_id"] != "n1" || callOf(acc)["id"] != id {
+		t.Fatalf("call_accepted = %v", acc)
+	}
+	a2.send(gin.H{"type": "call_hangup", "call_id": id, "device": "dev-a"})
+	expectEnd(t, b, id, "completed")
+
+	// Answered while the caller was away: the resume repeats both answers,
+	// then the signals held for the caller.
+	a3 := f.dial(t, f.tokA)
+	a3.send(gin.H{"type": "call_start", "peer_id": f.bob.ID, "media": "audio", "client_call_id": "n2", "device": "dev-a"})
+	a3.drop()
+	id = aliceCallerGone(t, f)
+	b.next("call_incoming")
+	b.send(gin.H{"type": "call_accept", "call_id": id, "device": "dev-b"})
+	b.next("call_accepted")
+	b.send(gin.H{"type": "call_signal", "call_id": id, "payload": gin.H{"kind": "state", "mic": true}})
+	waitUntil(t, "the signal to be held", func() bool {
+		held, _ := liveCallState(id, func(c *liveCall) int { return len(c.backlog[f.alice.ID]) })
+		return held == 1
+	})
+	a4 := f.dial(t, f.tokA)
+	a4.send(gin.H{"type": "call_resume", "call_id": "", "client_call_id": "n2", "device": "dev-a"})
+	if got := callFramesUntilPong(a4); !slices.Equal(got, []string{"call_outgoing", "call_accepted", "call_signal"}) {
+		t.Fatalf("resumed caller frames = %v", got)
+	}
+	a4.send(gin.H{"type": "call_hangup", "call_id": id, "device": "dev-a"})
+	expectEnd(t, a4, id, "completed")
+
+	// A call_start the server never got: nothing to resume.
+	a4.send(gin.H{"type": "call_resume", "call_id": "", "client_call_id": "lost", "device": "dev-a"})
+	if e := a4.next("call_ended"); e["client_call_id"] != "lost" || e["reason"] != "gone" || e["call_id"] != "" {
+		t.Fatalf("call_ended = %v", e)
+	}
+}
+
+// Bob's call_start crossed Alice's call and answered it, but Bob's socket
+// dropped before he heard so: his resume by client_call_id finds that call.
+func TestCallResumeByNonceAfterGlare(t *testing.T) {
+	f := newCallFixture(t, 0, 0)
+	a := f.dial(t, f.tokA)
+	b := f.dial(t, f.tokB)
+	id := ring(t, a, b, f.bob.ID)
+	b.send(gin.H{"type": "call_start", "peer_id": f.alice.ID, "media": "audio", "client_call_id": "g1", "device": "dev-b"})
+	a.next("call_accepted")
+	b.drop()
+	waitUntil(t, "the server to notice the drop", func() bool {
+		gone, _ := liveCallState(id, func(c *liveCall) bool { return c.calleeConn == nil })
+		return gone
+	})
+	b2 := f.dial(t, f.tokB)
+	b2.send(gin.H{"type": "call_resume", "call_id": "", "client_call_id": "g1", "device": "dev-b"})
+	if acc := b2.next("call_accepted"); acc["client_call_id"] != "g1" || callOf(acc)["id"] != id {
+		t.Fatalf("call_accepted = %v", acc)
+	}
+	a.send(gin.H{"type": "call_signal", "call_id": id, "payload": gin.H{"kind": "offer"}})
+	b2.next("call_signal")
+	a.send(gin.H{"type": "call_hangup", "call_id": id})
+	expectEnd(t, b2, id, "completed")
+}
+
+// The answering device may send call_accept twice (its client re-sends one it
+// fears was lost): the second is confirmed, and the call goes on.
+func TestCallAcceptRepeated(t *testing.T) {
+	f := newCallFixture(t, 0, 0)
+	a := f.dial(t, f.tokA)
+	b := f.dial(t, f.tokB)
+	id := ring(t, a, b, f.bob.ID)
+	answer(t, a, b, id)
+	b.send(gin.H{"type": "call_accept", "call_id": id, "device": "dev-b"})
+	if acc := b.next("call_accepted"); callOf(acc)["id"] != id || callOf(acc)["state"] != "active" {
+		t.Fatalf("repeated call_accepted = %v", acc)
+	}
+	// Another device of Bob's can't answer it again.
+	b2 := f.dial(t, f.tokB)
+	b2.send(gin.H{"type": "call_accept", "call_id": id, "device": "dev-b2"})
+	expectNotice(t, b2, id, "gone")
+	a.send(gin.H{"type": "call_hangup", "call_id": id})
+	expectEnd(t, b, id, "completed")
+}
+
+func TestCallStartRateLimited(t *testing.T) {
+	f := newCallFixture(t, 0, 0)
+	a := f.dial(t, f.tokA)
+	b := f.dial(t, f.tokB)
+	callsMu.Lock()
+	callStartGap = time.Hour
+	callsMu.Unlock()
+	id := ring(t, a, b, f.bob.ID)
+	a.send(gin.H{"type": "call_hangup", "call_id": id})
+	expectEnd(t, a, id, "cancelled")
+	a.send(gin.H{"type": "call_start", "peer_id": f.bob.ID, "client_call_id": "r1", "device": "dev-a"})
+	if e := a.next("call_error"); e["error"] != "rate_limited" || e["client_call_id"] != "r1" {
+		t.Fatalf("second call: %v", e)
+	}
+
+	// The hourly cap: two calls, then a refusal.
+	callsMu.Lock()
+	callStartGap, callStartsPerHour = 0, 2
+	callStarts = map[int][]time.Time{}
+	callsMu.Unlock()
+	for n := range 2 {
+		a.send(gin.H{"type": "call_start", "peer_id": f.cal.ID, "client_call_id": fmt.Sprint("h", n), "device": "dev-a"})
+		id, _ := callOf(a.next("call_outgoing"))["id"].(string)
+		expectEnd(t, a, id, "unavailable")
+	}
+	a.send(gin.H{"type": "call_start", "peer_id": f.cal.ID, "client_call_id": "h2", "device": "dev-a"})
+	if e := a.next("call_error"); e["error"] != "rate_limited" || e["client_call_id"] != "h2" {
+		t.Fatalf("third call in the hour: %v", e)
+	}
+}
+
+// A callee device that connects while the server is between registering a
+// call and sending call_outgoing rings at once; the caller still hears
+// call_outgoing before call_ringing.
+func TestCallRingingFollowsOutgoing(t *testing.T) {
+	f := newCallFixture(t, 0, 0)
+	a := f.dial(t, f.tokA)
+	l := f.listen(t, f.tokB) // so the call is not unavailable
+	l.sync()
+	paused, resume := make(chan struct{}, 1), make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	callsMu.Lock()
+	callStartHook = func(point string) {
+		if point == "registered" {
+			paused <- struct{}{}
+			<-resume
+		}
+	}
+	callsMu.Unlock()
+	t.Cleanup(func() {
+		release()
+		callsMu.Lock()
+		defer callsMu.Unlock()
+		callStartHook = nil
+	})
+	a.send(gin.H{"type": "call_start", "peer_id": f.bob.ID, "media": "video", "client_call_id": "n1", "device": "dev-a"})
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("call_start never reached the pause")
+	}
+	b := f.dial(t, f.tokB)
+	b.next("call_incoming")
+	release()
+	if got := callFramesUntilPong(a); len(got) < 2 || got[0] != "call_outgoing" || got[1] != "call_ringing" {
+		t.Fatalf("caller frames = %v, want call_outgoing then call_ringing", got)
+	}
 }
 
 func TestCallEndsWhenPageUnloads(t *testing.T) {

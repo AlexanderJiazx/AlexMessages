@@ -74,7 +74,9 @@
     box-shadow: inset 0 0 0 1px rgba(0,0,0,.08);
   }
   .av img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
-  .toast-stack { position: fixed; bottom: 26px; left: 50%; transform: translate(-50%, 0); z-index: 9999; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
+  /* In a meeting the toasts sit above the control bar (--meet-bar-h is its
+     measured height; the bar stacks into two rows on narrow screens). */
+  .toast-stack { position: fixed; bottom: calc(var(--meet-bar-h, 0px) + 26px); left: 50%; transform: translate(-50%, 0); z-index: 9999; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
   .toast {
     background: var(--ink); color: #ECF3E8;
     padding: 9px 14px; border-radius: 999px; font-size: 12.5px;
@@ -281,9 +283,12 @@
 
   /* grid (group view) — tiles are sized in px by layout(), which picks the
      row/column split that maximizes tile area for the current window ratio */
-  .grid-area { flex:1; min-width:0; display:flex; align-items:center; gap: 6px; }
+  /* min-height:0 lets the grid shrink inside .meet-body's column (portrait):
+     without it the tiles sized for the previous window would hold the grid at
+     their height and push the lower rows off screen. */
+  .grid-area { flex:1; min-width:0; min-height:0; display:flex; align-items:center; gap: 6px; }
   .grid-pages {
-    flex:1; height: 100%; min-width: 0;
+    flex:1; height: 100%; min-width: 0; min-height: 0;
     display:flex; flex-wrap:wrap; align-content:center; justify-content:center;
     gap: 12px; padding: 2px;
   }
@@ -707,7 +712,19 @@
   const VOLC_SDK_SRC = "/static/vendor/volc-rtc-4.68.5.min.js";
   // Reconnect: retry the control-plane socket for this long before giving up.
   const RECONNECT_WINDOW_MS = 12000;
-  const RECONNECT_INTERVAL_MS = 2000;
+  // Retry delays back off from the base to the cap. A socket that is still
+  // connecting (or open with a join in flight) is left alone; only one that
+  // has been connecting longer than CONNECT_TIMEOUT_MS is replaced.
+  const RECONNECT_BASE_MS = 500;
+  const RECONNECT_MAX_MS = 4000;
+  const CONNECT_TIMEOUT_MS = 5000;
+  // The "Reconnecting…" banner shows only once the socket has stayed down this
+  // long (as in Alex Messages): a blip that recovers sooner flashes nothing.
+  const RECONNECT_BANNER_DELAY_MS = 3000;
+  // Pre-join gate: a dropped socket reconnects quietly, backing off to this.
+  const GATE_RETRY_MAX_MS = 8000;
+  // Renew the VolcEngine token this long before it expires.
+  const VOLC_RENEW_LEAD_MS = 120000;
 
   // Per-user outgoing stream quality. Each tier pairs a video size/bitrate
   // with an audio bitrate (mesh) / VolcEngine audio profile. "auto" leaves
@@ -762,8 +779,10 @@
   function initialsFor(name) {
     if (!name) return "?";
     const parts = String(name).split(/[\s._-]+/).filter(Boolean);
-    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-    return (parts[0] || "?").slice(0,2).toUpperCase();
+    // Code points, not UTF-16 units: an emoji initial must not split into a
+    // lone surrogate.
+    if (parts.length >= 2) return (Array.from(parts[0])[0] + Array.from(parts[1])[0]).toUpperCase();
+    return Array.from(parts[0] || "?").slice(0, 2).join("").toUpperCase();
   }
   function escapeHTML(s) {
     return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -900,7 +919,12 @@
     leaving: false,      // intentional exit — don't try to reconnect
     reconnecting: false,
     reconnectTimer: null,
+    reconnectBannerTimer: null,
     reconnectDeadline: 0,
+    reconnectAttempt: 0,
+    wsStartedAt: 0,      // when the current socket began connecting
+    gateRetryTimer: null,
+    gateRetryDelay: RECONNECT_BASE_MS,
     selfPid: null,
     hostPid: null,
     roster: new Map(),   // pid -> {pid, user, muted, camOn, sharing}
@@ -938,6 +962,9 @@
     volcEngine: null,
     volcGeneration: 0,   // invalidates callbacks from replaced/destroyed engines
     volcShareMedia: null, // MediaType we published for the current screen share
+    volcRenewTimer: null, // renews the VolcEngine token before it expires
+    volcRenewAskedAt: 0,
+    volcHeld: new Map(),  // volc user id -> {main, screen} media we refused (not on the roster yet)
     ws: null,
     wsReady: false,
     pendingSend: [],
@@ -963,7 +990,15 @@
   const VIEWS = ["lobbyView", "gateView", "interView", "meetView"];
   function showView(id) {
     VIEWS.forEach(v => { $(v).hidden = v !== id; });
+    syncToastLift();
   }
+  // Keeps toasts clear of the meeting's control bar.
+  const meetBar = document.querySelector(".meet-bottom");
+  function syncToastLift() {
+    const h = $("meetView").hidden ? 0 : meetBar.offsetHeight;
+    document.documentElement.style.setProperty("--meet-bar-h", h + "px");
+  }
+  if (window.ResizeObserver) new ResizeObserver(syncToastLift).observe(meetBar);
   function showInterstitial(title, note, canRejoin = true) {
     $("interTitle").textContent = title;
     $("interNote").textContent = note || "";
@@ -980,9 +1015,11 @@
     let ws;
     try { ws = new WebSocket(wsURL()); } catch { return; }
     state.ws = ws;
+    state.wsStartedAt = Date.now();
     ws.onopen = () => {
       if (state.ws !== ws) return;
       state.wsReady = true;
+      state.gateRetryDelay = RECONNECT_BASE_MS;
       Debug.info("ws_open", state.reconnecting ? "Control socket reopened (reconnect)" : "Control socket connected");
       // A socket opened mid-reconnect must re-announce us first; the server
       // evicts our stale ghost (matched by client_id) and replies "joined".
@@ -1009,6 +1046,7 @@
       if (state.reconnecting) return;       // the reconnect timer drives retries
       Debug.warn("ws_close", "Control socket dropped", { code: e.code, phase: state.phase });
       if (state.phase === "inmeeting" || state.phase === "joining") beginReconnect();
+      else if (state.phase === "gate") scheduleGateReconnect();
     };
     ws.onerror = () => {};
   }
@@ -1021,6 +1059,19 @@
   }
   setInterval(() => { if (state.wsReady) send({ type: "ping" }); }, 20000);
 
+  // Pre-join gate: keep a control socket available so Join works, retrying
+  // quietly with backoff. (Join itself falls back to beginReconnect, which
+  // shows an error if no socket opens in time.)
+  function scheduleGateReconnect() {
+    clearTimeout(state.gateRetryTimer);
+    const delay = state.gateRetryDelay;
+    state.gateRetryDelay = Math.min(state.gateRetryDelay * 2, GATE_RETRY_MAX_MS);
+    state.gateRetryTimer = setTimeout(() => {
+      state.gateRetryTimer = null;
+      if (state.phase === "gate" && !state.ws) connectWS();
+    }, delay);
+  }
+
   function sendJoin() {
     const msg = { type: "join", code: state.code, client_id: state.clientID };
     if (state.guestName) msg.guest_name = state.guestName;
@@ -1031,15 +1082,26 @@
   // A dropped control-plane socket no longer ends the meeting outright: we keep
   // local capture alive and retry for RECONNECT_WINDOW_MS, only surfacing
   // "Connection lost" once that window elapses.
+  // on: show the banner after RECONNECT_BANNER_DELAY_MS; off: hide it now.
   function showReconnecting(on) {
+    clearTimeout(state.reconnectBannerTimer);
+    state.reconnectBannerTimer = null;
     const b = $("reconnectBanner");
-    if (b) b.hidden = !on;
+    if (!b) return;
+    if (!on) { b.hidden = true; return; }
+    state.reconnectBannerTimer = setTimeout(() => {
+      state.reconnectBannerTimer = null;
+      b.hidden = false;
+    }, RECONNECT_BANNER_DELAY_MS);
   }
   function beginReconnect() {
     if (state.reconnecting) return;
     state.reconnecting = true;
     state.reconnectDeadline = Date.now() + RECONNECT_WINDOW_MS;
+    state.reconnectAttempt = 0;
     state.pendingSend = [];
+    clearTimeout(state.gateRetryTimer);
+    state.gateRetryTimer = null;
     showReconnecting(true);
     Debug.warn("reconnect_begin", "Lost connection, retrying");
     tryReconnect();
@@ -1049,17 +1111,30 @@
     state.reconnectTimer = null;
     if (!state.reconnecting) return;
     if (Date.now() > state.reconnectDeadline) { giveUpReconnect(); return; }
-    if (state.ws) { const old = state.ws; state.ws = null; try { old.close(); } catch {} }
-    connectWS();
-    state.reconnectTimer = setTimeout(tryReconnect, RECONNECT_INTERVAL_MS);
+    const ws = state.ws;
+    // An open socket has already sent its join (onopen): wait for "joined".
+    // A socket still connecting gets CONNECT_TIMEOUT_MS before it is replaced.
+    const busy = ws && (ws.readyState === WebSocket.OPEN ||
+      (ws.readyState === WebSocket.CONNECTING && Date.now() - state.wsStartedAt < CONNECT_TIMEOUT_MS));
+    if (!busy) {
+      if (ws) { state.ws = null; state.wsReady = false; try { ws.close(); } catch {} }
+      connectWS();
+    }
+    const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** state.reconnectAttempt);
+    state.reconnectAttempt++;
+    state.reconnectTimer = setTimeout(tryReconnect, delay);
   }
-  function endReconnect() {
+  // silent: the first join of this page (from the gate) — nothing to announce.
+  function endReconnect(silent = false) {
     if (!state.reconnecting) return;
     state.reconnecting = false;
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
+    // "Reconnected" answers a banner the user saw; a blip that never showed
+    // one announces nothing.
+    const shown = !$("reconnectBanner").hidden;
     showReconnecting(false);
-    toast("Reconnected", "ok");
+    if (!silent && shown) toast("Reconnected", "ok");
   }
   function giveUpReconnect(msg) {
     state.reconnecting = false;
@@ -1068,9 +1143,11 @@
     showReconnecting(false);
     if (state.ws) { const old = state.ws; state.ws = null; try { old.close(); } catch {} }
     teardownMedia();
+    const neverJoined = state.phase === "joining";
     state.phase = "left";
-    Debug.error("reconnect_failed", "Gave up reconnecting to the meeting");
-    showInterstitial("Connection lost", msg || "We couldn't reconnect to the meeting.");
+    Debug.error("reconnect_failed", neverJoined ? "Couldn't connect to join the meeting" : "Gave up reconnecting to the meeting");
+    if (neverJoined) showInterstitial("Couldn't join", msg || "We couldn't connect to the meeting server. Check your connection and try again.");
+    else showInterstitial("Connection lost", msg || "We couldn't reconnect to the meeting.");
   }
 
   function sendState() {
@@ -1089,9 +1166,14 @@
       case "joined": {
         // A "joined" that arrives while we still hold media is a reconnect:
         // reuse local capture (no permission re-prompt), just rewire peers.
+        // A "joined" for the first join from the gate is never a reconnect,
+        // even when the socket had to be reopened before the join went out.
+        const firstJoin = state.phase !== "inmeeting";
         const hadMedia = state.mode === "volc" ? !!state.volcEngine : !!state.localStream;
-        const reconnect = state.reconnecting && hadMedia;
+        const reconnect = !firstJoin && state.reconnecting && hadMedia;
         state.mode = data.mode;
+        // A reconnect gets a new pid: drop the speaking meter of the old one.
+        if (state.selfPid != null && state.selfPid !== data.self_pid) speakDropPeer(state.selfPid);
         state.selfPid = data.self_pid;
         state.hostPid = data.host_pid;
         state.allowGuests = !!data.allow_guests;
@@ -1102,6 +1184,8 @@
           state.order.push(p.pid);
         });
         state.volc = data.volc || null;
+        state.volcHeld.clear();
+        scheduleVolcRenew();
         state.phase = "inmeeting";
         Debug.info(reconnect ? "rejoined" : "joined", reconnect ? "Reconnected to meeting" : "Joined meeting", { participants: state.roster.size, host: state.hostPid });
         // Someone already sharing? Open on them instead of the grid.
@@ -1121,7 +1205,7 @@
             toast("Couldn't start audio/video", "err");
           });
         }
-        endReconnect();
+        endReconnect(firstJoin);
         sendState();
         break;
       }
@@ -1132,7 +1216,10 @@
         if (!state.order.includes(p.pid)) state.order.push(p.pid);
         syncTiles();
         toast(`${p.user.display_name || p.user.username} joined`);
-        if (state.mode === "mesh") meshEnsurePeer(p.pid);
+        // The participant already in the room makes the offer; the newcomer
+        // answers it (meshOnSignal), so the two never offer at once.
+        if (state.mode === "mesh") meshEnsurePeer(p.pid, true);
+        if (state.mode === "volc") volcReleaseHeld(p.pid);
         break;
       }
       case "peer_left": {
@@ -1145,6 +1232,7 @@
           if (state.pinned == null) state.grid = true; // their share focus ends with them
         }
         meshDropPeer(data.pid);
+        volcDropPeer(data.pid);
         syncTiles();
         if (p) toast(`${p.user.display_name || p.user.username} left`);
         break;
@@ -1152,19 +1240,9 @@
       case "peer_state": {
         const p = state.roster.get(data.pid);
         if (!p) break;
-        const wasSharing = p.sharing;
         p.muted = !!data.muted;
         p.camOn = !!data.cam_on;
-        p.sharing = !!data.sharing;
-        // A starting screen share pulls everyone into focus view on it; when
-        // it ends (and nothing was hand-picked) we fall back to the grid.
-        if (!wasSharing && p.sharing && data.pid !== state.selfPid && state.pinned == null) {
-          state.grid = false;
-          state.autoFocusPid = data.pid;
-        } else if (wasSharing && !p.sharing && state.autoFocusPid === data.pid) {
-          state.autoFocusPid = null;
-          if (state.pinned == null) state.grid = true;
-        }
+        setPeerSharing(data.pid, !!data.sharing);
         updateTile(data.pid);
         layout(); // sharing may change the auto main view
         renderPeople();
@@ -1194,7 +1272,14 @@
         break;
       }
       case "signal": {
+        // Only peers on the roster: a signal from anyone else would build a
+        // peer connection nobody tears down.
+        if (!state.roster.has(data.from)) break;
         meshOnSignal(data.from, data.payload);
+        break;
+      }
+      case "volc_token": {
+        onVolcToken(data.volc);
         break;
       }
       case "host_changed": {
@@ -1223,6 +1308,27 @@
       case "pong":
         break;
     }
+  }
+
+  // setPeerSharing records whether pid shares a screen and runs the share
+  // auto-focus: a starting share pulls the view into focus on the sharer
+  // (unless a tile was hand-picked); when it ends, the view falls back to the
+  // grid. Both peer_state and volc's onUserPublishScreen (which may arrive
+  // first) go through here, so the first one to report the share focuses it.
+  // Returns true when the sharing flag changed.
+  function setPeerSharing(pid, sharing) {
+    const p = state.roster.get(pid);
+    if (!p) return false;
+    const was = p.sharing;
+    p.sharing = !!sharing;
+    if (!was && p.sharing && pid !== state.selfPid && state.pinned == null) {
+      state.grid = false;
+      state.autoFocusPid = pid;
+    } else if (was && !p.sharing && state.autoFocusPid === pid) {
+      state.autoFocusPid = null;
+      if (state.pinned == null) state.grid = true;
+    }
+    return was !== p.sharing;
   }
 
   function normPart(p) {
@@ -1281,10 +1387,11 @@
       t.video = v;
       applyAudioOut(p.pid, v); // ensure volume/sink is wired even before srcObject arrives
     }
+    tiles.set(p.pid, t);
+    if (state.mode === "mesh") meshAttachRemote(p.pid, false); // tracks that arrived before the tile
     el.addEventListener("click", () => onTileClick(p.pid));
     el.querySelector(".tile-fs").addEventListener("click", (e) => { e.stopPropagation(); toggleFullscreen(el); });
     el.querySelector(".tile-fill").addEventListener("click", (e) => { e.stopPropagation(); setFill(state.fillMode === "fill" ? "fit" : "fill"); });
-    tiles.set(p.pid, t);
     updateTile(p.pid);
     return t;
   }
@@ -1469,6 +1576,8 @@
       state.gridPage = Math.min(state.gridPage, pages - 1);
       const start = state.gridPage * GRID_PAGE_SIZE;
       const visible = pids.slice(start, start + GRID_PAGE_SIZE);
+      // Show/hide the pagers before measuring: they take width from the grid.
+      $("gridPrev").parentElement.querySelectorAll(".pager").forEach(b => b.hidden = pages <= 1);
       const rect = gridPages.getBoundingClientRect();
       const size = bestGridSize(visible.length, Math.max(0, rect.width - 4), Math.max(0, rect.height - 4), 12);
       const wpx = Math.max(96, Math.floor(size.w)) + "px";
@@ -1490,7 +1599,6 @@
       placeTiles(gridPages, visEls); // page membership + stable order
       $("gridPrev").disabled = state.gridPage <= 0;
       $("gridNext").disabled = state.gridPage >= pages - 1;
-      $("gridPrev").parentElement.querySelectorAll(".pager").forEach(b => b.hidden = pages <= 1);
     } else {
       const mainPid = (state.pinned != null && state.roster.has(state.pinned)) ? state.pinned : autoMainPid();
       state.mainPid = mainPid;
@@ -2241,27 +2349,60 @@
     }
   }
 
-  function meshEnsurePeer(pid) {
+  // The tracks this client sends: the mic (or, while sharing with system
+  // audio, the mic + system mix) and the camera (or the shared screen).
+  function meshOutgoingTracks() {
+    const stream = state.localStream;
+    const audio = (state.shareMix ? state.shareMix.track : stream?.getAudioTracks()[0]) || null;
+    const share = state.sharing && state.screenStream ? state.screenStream.getVideoTracks()[0] : null;
+    const video = share || stream?.getVideoTracks()[0] || null;
+    return { audio, video };
+  }
+
+  // Puts the current outgoing tracks on a peer's senders. A peer connection
+  // made before local media was ready (or before the offer's transceivers
+  // were adopted) starts without them.
+  function meshSyncSenders(peer) {
+    const { audio, video } = meshOutgoingTracks();
+    if (peer.audioTx && peer.audioTx.sender.track !== audio) peer.audioTx.sender.replaceTrack(audio).catch(() => {});
+    if (peer.videoTx && peer.videoTx.sender.track !== video) peer.videoTx.sender.replaceTrack(video).catch(() => {});
+  }
+
+  // One side of each pair offers: the participant who was already in the
+  // room, when peer_joined announces the newcomer (offerer = true). The
+  // newcomer makes its peer connection when that offer arrives and answers on
+  // the offered transceivers (meshAdoptTransceivers). When both sides offered
+  // at once, the polite side's rollback left Chromium's ICE gathering stuck
+  // with no candidates, and each side's own transceivers became extra one-way
+  // m-lines; the call stayed black and silent. Only the offerer restarts ICE,
+  // and perfect negotiation below still guards any later renegotiation.
+  function meshEnsurePeer(pid, offerer = false) {
     if (state.mode !== "mesh" || pid === state.selfPid || state.pcs.has(pid)) return;
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     const peer = {
       pc,
+      offerer,
       polite: state.selfPid > pid, // newcomer (higher pid) yields on glare
       makingOffer: false,
       ignoreOffer: false,
       srdAnswerPending: false,
       audioTx: null,
       videoTx: null,
+      // One stream per remote peer that collects every track it receives, so
+      // a track that arrives without a stream (or in another stream) never
+      // replaces the tile's audio or video.
+      remote: new MediaStream(),
     };
-    const stream = state.localStream || new MediaStream();
-    // While sharing with system audio the outgoing audio is the mixed track.
-    const at = (state.shareMix ? state.shareMix.track : stream.getAudioTracks()[0]) || null;
-    const shareTrack = state.sharing && state.screenStream ? state.screenStream.getVideoTracks()[0] : null;
-    const vt = shareTrack || stream.getVideoTracks()[0] || null;
-    // Transceivers are created up-front in sendrecv so toggling devices later
-    // is always replaceTrack — never a renegotiation.
-    peer.audioTx = at ? pc.addTransceiver(at, { streams: [stream] }) : pc.addTransceiver("audio");
-    peer.videoTx = vt ? pc.addTransceiver(vt, { streams: [stream] }) : pc.addTransceiver("video");
+    if (offerer) {
+      const { audio, video } = meshOutgoingTracks();
+      // Transceivers are created up-front in sendrecv so toggling devices
+      // later is always replaceTrack — never a renegotiation. Both carry the
+      // same stream id, track or not, so the far side sees one stream (it
+      // also merges tracks per peer, see ontrack).
+      const stream = state.localStream || new MediaStream();
+      peer.audioTx = pc.addTransceiver(audio || "audio", { direction: "sendrecv", streams: [stream] });
+      peer.videoTx = pc.addTransceiver(video || "video", { direction: "sendrecv", streams: [stream] });
+    }
 
     pc.onnegotiationneeded = async () => {
       try {
@@ -2278,20 +2419,25 @@
       send({ type: "signal", to: pid, payload: { candidate } });
     };
     pc.ontrack = (ev) => {
-      const t = tiles.get(pid);
-      const remote = (ev.streams && ev.streams[0]) || new MediaStream([ev.track]);
-      if (t && t.video && t.video.srcObject !== remote) {
-        t.video.srcObject = remote;          // audio rides along, in sync
-        applyAudioOut(pid, t.video);         // volume + chosen output device
-        t.video.play().catch(() => {}); // Safari: autoplay may have been consumed
-        // Aggressive resume: mobile browsers sometimes pause after srcObject swap.
-        queueMicrotask(() => { if (t.video.paused) t.video.play().catch(() => {}); });
-        requestAnimationFrame(() => { if (t.video.paused) t.video.play().catch(() => {}); });
+      const track = ev.track;
+      const remote = peer.remote;
+      if (!remote.getTracks().includes(track)) {
+        // One track per kind: a newer track of a kind replaces the older one.
+        for (const old of remote.getTracks()) if (old.kind === track.kind) remote.removeTrack(old);
+        remote.addTrack(track);
+        track.addEventListener("ended", () => {
+          if (!remote.getTracks().includes(track)) return;
+          remote.removeTrack(track);
+          meshAttachRemote(pid, true);
+        });
       }
-      if (ev.track.kind === "audio") meshWatchMic(pid, ev.track);
+      meshAttachRemote(pid, true);
+      if (track.kind === "audio") meshWatchMic(pid, track);
     };
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed") {
+      // Only the offering side restarts ICE: a failure both sides see must
+      // not make both offer at once.
+      if (pc.connectionState === "failed" && peer.offerer) {
         try { pc.restartIce(); } catch {}
       }
       // Encodings exist only after negotiation; (re)apply the bitrate caps.
@@ -2300,12 +2446,53 @@
     state.pcs.set(pid, peer);
   }
 
+  // meshAttachRemote shows pid's merged remote stream in its tile (audio rides
+  // along in the same element, in sync). reload re-assigns the stream after
+  // its track set changed, so every browser picks up the added track.
+  function meshAttachRemote(pid, reload) {
+    const peer = state.pcs.get(pid);
+    const t = tiles.get(pid);
+    if (!peer || !t || !t.video) return;
+    const v = t.video;
+    if (v.srcObject === peer.remote && !reload) return;
+    if (v.srcObject === peer.remote) v.srcObject = null;
+    v.srcObject = peer.remote;
+    applyAudioOut(pid, v);               // volume + chosen output device
+    v.play().catch(() => {});            // Safari: autoplay may have been consumed
+    // Aggressive resume: mobile browsers sometimes pause after srcObject swap.
+    queueMicrotask(() => { if (v.paused) v.play().catch(() => {}); });
+    requestAnimationFrame(() => { if (v.paused) v.play().catch(() => {}); });
+  }
+
   function meshDropPeer(pid) {
     speakDropPeer(pid);
     const peer = state.pcs.get(pid);
     if (!peer) return;
     try { peer.pc.close(); } catch {}
     state.pcs.delete(pid);
+  }
+
+  // The answering side sends on the offered transceivers: direction
+  // sendrecv and our tracks, set before the answer is made, so the answer
+  // already carries our media and no renegotiation follows.
+  async function meshAdoptTransceivers(peer) {
+    if (peer.audioTx && peer.videoTx) return;
+    const offered = peer.pc.getTransceivers().filter(t => t.mid != null);
+    const stream = state.localStream || new MediaStream();
+    for (const kind of ["audio", "video"]) {
+      const key = kind === "audio" ? "audioTx" : "videoTx";
+      if (peer[key]) continue;
+      const tx = offered.find(t => t.receiver.track.kind === kind);
+      if (!tx) continue;
+      tx.direction = "sendrecv";
+      if (tx.sender.setStreams) tx.sender.setStreams(stream);
+      peer[key] = tx;
+    }
+    const { audio, video } = meshOutgoingTracks();
+    await Promise.all([
+      peer.audioTx && audio ? peer.audioTx.sender.replaceTrack(audio).catch(() => {}) : null,
+      peer.videoTx && video ? peer.videoTx.sender.replaceTrack(video).catch(() => {}) : null,
+    ]);
   }
 
   // Perfect negotiation (MDN pattern) — keeps the mesh stable under glare.
@@ -2326,6 +2513,7 @@
         await pc.setRemoteDescription(description);
         peer.srdAnswerPending = false;
         if (description.type === "offer") {
+          await meshAdoptTransceivers(peer);
           await pc.setLocalDescription();
           send({ type: "signal", to: from, payload: { description: pc.localDescription } });
         }
@@ -2641,6 +2829,74 @@
     if (state.mainPid != null) reattachVolcCamera(state.mainPid, state.fillMode === "fill");
   }
 
+  // ── Volc roster gate + token renewal ──
+  function volcHold(userId, which, mediaType) {
+    const h = state.volcHeld.get(userId) || { main: 0, screen: 0 };
+    h[which] = mediaType || VERTC.MediaType.AUDIO_AND_VIDEO;
+    state.volcHeld.set(userId, h);
+  }
+  function volcUnhold(userId, which) {
+    const h = state.volcHeld.get(userId);
+    if (!h) return;
+    h[which] = 0;
+    if (!h.main && !h.screen) state.volcHeld.delete(userId);
+  }
+  // A participant just joined the roster: subscribe the media we held back.
+  function volcReleaseHeld(pid) {
+    const uid = "p" + pid;
+    const h = state.volcHeld.get(uid);
+    const engine = state.volcEngine;
+    if (!h || !engine) return;
+    state.volcHeld.delete(uid);
+    if (h.main) {
+      Promise.resolve(engine.subscribeStream(uid, h.main)).catch(err => console.warn("[volc] subscribeStream failed", err));
+      if (h.main & VERTC.MediaType.VIDEO) attachVolcRemote(pid, false);
+    }
+    if (h.screen) {
+      if (setPeerSharing(pid, true)) { updateTile(pid); layout(); }
+      Promise.resolve(engine.subscribeScreen(uid, h.screen)).catch(err => console.warn("[volc] subscribeScreen failed", err));
+      if (h.screen & VERTC.MediaType.VIDEO) attachVolcRemote(pid, true);
+    }
+  }
+  // A participant left the roster (left, kicked, or replaced by its own
+  // rejoin): stop receiving it even if it is still in the media room.
+  function volcDropPeer(pid) {
+    const engine = state.volcEngine;
+    if (state.mode !== "volc" || !engine || !window.VERTC) return;
+    const uid = "p" + pid;
+    state.volcHeld.delete(uid);
+    Promise.resolve(engine.unsubscribeStream(uid, VERTC.MediaType.AUDIO_AND_VIDEO)).catch(() => {});
+    Promise.resolve(engine.unsubscribeScreen(uid, VERTC.MediaType.AUDIO_AND_VIDEO)).catch(() => {});
+  }
+  function scheduleVolcRenew() {
+    clearTimeout(state.volcRenewTimer);
+    state.volcRenewTimer = null;
+    const exp = state.volc && state.volc.expires_at;
+    if (!exp) return;
+    const wait = Math.max(10000, exp * 1000 - Date.now() - VOLC_RENEW_LEAD_MS);
+    state.volcRenewTimer = setTimeout(() => requestVolcToken(false), wait);
+  }
+  function requestVolcToken(fromSdk) {
+    if (state.mode !== "volc" || state.phase !== "inmeeting" || state.leaving) return;
+    if (Date.now() - state.volcRenewAskedAt < 5000) return; // one request in flight
+    state.volcRenewAskedAt = Date.now();
+    Debug.info("volc_token_renew", "Asking for a fresh Volc token", { from_sdk: !!fromSdk });
+    send({ type: "volc_token" });
+  }
+  function onVolcToken(info) {
+    if (!info || !state.volc || info.user_id !== state.volc.user_id) return; // stale (a rejoin changed our pid)
+    state.volc = info;
+    state.volcRenewAskedAt = 0;
+    scheduleVolcRenew();
+    const engine = state.volcEngine;
+    if (engine && engine.updateToken) {
+      Promise.resolve(engine.updateToken(info.token)).catch(err => {
+        console.warn("[volc] updateToken failed", err);
+        Debug.warn("volc_token_update_failed", "Volc updateToken failed", mediaErrorDetails(err));
+      });
+    }
+  }
+
   async function shutdownVolcEngine(engine, generation, reason) {
     if (!engine) return;
     Debug.info("volc_engine_shutdown", "Stopping replaced Volc engine", { engine_generation: generation, reason });
@@ -2672,15 +2928,26 @@
 
     on("onUserPublishStream", (e) => {
       const pid = pidFromVolcUid(e.userId);
-      if (pid != null && (e.mediaType & VERTC.MediaType.VIDEO)) attachVolcRemote(pid, false);
+      if (pid == null) return;
+      // Media from someone not on the roster (kicked, left, or not announced
+      // yet) is unsubscribed; peer_joined subscribes it again.
+      if (!state.roster.has(pid)) {
+        volcHold(e.userId, "main", e.mediaType);
+        Promise.resolve(engine.unsubscribeStream(e.userId, e.mediaType)).catch(() => {});
+        return;
+      }
+      if (e.mediaType & VERTC.MediaType.VIDEO) attachVolcRemote(pid, false);
     });
+    on("onUserUnpublishStream", (e) => { volcUnhold(e && e.userId, "main"); });
     on("onUserPublishScreen", (e) => {
       const pid = pidFromVolcUid(e.userId);
       if (pid == null) return;
-      // Ensure the tile styling reflects a screen share before the SDK paints,
-      // so the v-screen element is visible when setRemoteVideoPlayer runs.
-      const p = state.roster.get(pid);
-      if (p && !p.sharing) { p.sharing = true; updateTile(pid); layout(); }
+      // Not on the roster: don't subscribe (screens are never auto-subscribed);
+      // peer_joined subscribes it if the participant is announced later.
+      if (!state.roster.has(pid)) { volcHold(e.userId, "screen", e.mediaType); return; }
+      // Mark the share (and auto-focus it) before the SDK paints, so the
+      // v-screen element is visible when setRemoteVideoPlayer runs.
+      if (setPeerSharing(pid, true)) { updateTile(pid); layout(); }
       // isAutoSubscribeVideo only covers main (camera/mic) streams — without
       // an explicit subscription the screen stays black for everyone else.
       const media = e.mediaType || VERTC.MediaType.VIDEO;
@@ -2689,6 +2956,7 @@
       if (media & VERTC.MediaType.VIDEO) attachVolcRemote(pid, true);
     });
     on("onUserUnpublishScreen", (e) => {
+      volcUnhold(e && e.userId, "screen");
       const pid = pidFromVolcUid(e.userId);
       const t = pid != null && tiles.get(pid);
       if (t && t.vScreen) t.vScreen.innerHTML = "";
@@ -2716,6 +2984,11 @@
       if (kind !== "audio" || (e && e.isScreen)) return;
       Debug.info("volc_mic_track_unmuted", "Volc microphone track resumed", volcMicContext(engine, generation));
     });
+    // The token is short-lived (the server renews it only while we are on
+    // the roster); renew whenever the SDK warns, besides the timer.
+    on("onTokenWillExpire", () => requestVolcToken(true));
+    on("onTokenPublishPrivilegeWillExpire", () => requestVolcToken(true));
+    on("onTokenSubscribePrivilegeWillExpire", () => requestVolcToken(true));
     on("onAutoplayFailed", () => {
       toast("Click anywhere to enable audio", "warn");
       const resume = () => { try { engine.play && engine.play(); } catch {} document.removeEventListener("click", resume); };
@@ -2737,7 +3010,7 @@
     on("onRemoteAudioPropertiesReport", (list) => {
       (list || []).forEach(r => {
         const pid = pidFromVolcUid(r && r.streamKey && r.streamKey.userId);
-        const p = pid != null ? state.roster.get(pid) : null;
+        const p = pid != null ? state.roster.get(pid) : null; // off-roster users never light up
         const v = r && r.audioPropertiesInfo && r.audioPropertiesInfo.linearVolume;
         if (p && !p.muted && (v | 0) > SPEAK_VOLC) speakHeard(pid);
       });
@@ -2805,10 +3078,11 @@
       await ensureLocalMedia();
       refreshSelfPreview();
       meshWatchMic(state.selfPid, state.localStream?.getAudioTracks()[0]);
+      // Peers made while capture was starting (an offer that came first, or
+      // a newcomer announced meanwhile) get the tracks now. The participants
+      // already in the room offer to us, so no peer is made here.
+      for (const peer of state.pcs.values()) meshSyncSenders(peer);
       await applyQuality();
-      for (const pid of state.order) {
-        if (pid !== state.selfPid) meshEnsurePeer(pid);
-      }
       applyVolume();
       updateSelfRoster();
     }
@@ -2838,14 +3112,12 @@
       state.micRequest = null;
       await volcStart(state.volc, generation, "reconnect");
     } else {
-      // Far-side peers were keyed to our old pid; drop and rebuild the mesh.
+      // Far-side peers were keyed to our old pid; drop the mesh. The others
+      // see us as a newcomer (peer_joined) and offer again.
       for (const [pid] of state.pcs) meshDropPeer(pid);
       refreshSelfPreview();
       meshWatchMic(state.selfPid, state.localStream?.getAudioTracks()[0]);
       applyQuality();
-      for (const pid of state.order) {
-        if (pid !== state.selfPid) meshEnsurePeer(pid);
-      }
       updateSelfRoster();
     }
   }
@@ -2870,6 +3142,9 @@
     state.volcGeneration++;
     state.volcEngine = null;
     if (engine) shutdownVolcEngine(engine, generation, "teardown").catch(() => {});
+    clearTimeout(state.volcRenewTimer);
+    state.volcRenewTimer = null;
+    state.volcHeld.clear();
     state.sharing = false;
     state.volcShareMedia = null;
   }
@@ -3120,7 +3395,11 @@
       // just before it grabs the devices — so the camera isn't toggled off
       // mid-join (and the already-granted permission isn't re-prompted).
       updateControls();
-      sendJoin();
+      // The gate's socket may have dropped (or never opened): reconnect, and
+      // the socket's onopen sends the join. beginReconnect shows "Couldn't
+      // join" if no socket opens within RECONNECT_WINDOW_MS.
+      if (state.wsReady && state.ws) sendJoin();
+      else beginReconnect();
     });
     updateControls();
     startGatePreview(); // live selfie preview + unlock device labels

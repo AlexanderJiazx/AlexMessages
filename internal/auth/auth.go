@@ -47,7 +47,9 @@ func HashPassword(password string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
+	release := acquireHashSlot()
 	derived, err := scrypt.Key([]byte(password), salt, scryptN, scryptR, scryptP, scryptLen)
+	release()
 	if err != nil {
 		return "", err
 	}
@@ -69,7 +71,9 @@ func VerifyPassword(password, stored string) bool {
 	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil {
 		return false
 	}
+	release := acquireHashSlot()
 	derived, err := scrypt.Key([]byte(password), salt, n, r, p, len(expected))
+	release()
 	if err != nil {
 		return false
 	}

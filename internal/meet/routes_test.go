@@ -107,3 +107,57 @@ func TestRevokedCookieReachesGuestGate(t *testing.T) {
 		t.Fatalf("hello=%v", hello)
 	}
 }
+
+// Alex Meet's login shares the per-IP password budget with the other two
+// servers: wrong passwords are refused with 429 after the burst, and a
+// correct password does not use up the budget.
+func TestLoginRateLimitedPerIP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	meetDatabase(t)
+	auth.LoginLimiter.Reset()
+	t.Cleanup(auth.LoginLimiter.Reset)
+	hash, err := auth.HashPassword("password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateUser("alice", hash, "Alice", "approved", false); err != nil {
+		t.Fatal(err)
+	}
+	r := NewEngine()
+	login := func(remote, password string) *httptest.ResponseRecorder {
+		body := `{"username":"alice","password":"` + password + `"}`
+		req := httptest.NewRequest("POST", "/api/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = remote
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	for i := 0; i < 15; i++ {
+		if w := login("198.51.100.1:1", "password123"); w.Code != 200 {
+			t.Fatalf("correct login %d = %d", i+1, w.Code)
+		}
+	}
+	for i := 0; i < auth.LoginLimiter.Burst; i++ {
+		if w := login("198.51.100.1:1", "wrong-password"); w.Code != 401 {
+			t.Fatalf("wrong login %d = %d, want 401", i+1, w.Code)
+		}
+	}
+	w := login("198.51.100.1:1", "password123")
+	if w.Code != 429 || !strings.Contains(w.Body.String(), auth.TooManyAttemptsDetail) {
+		t.Fatalf("login after the burst = %d %s, want 429", w.Code, w.Body.String())
+	}
+	if w := login("198.51.100.2:1", "password123"); w.Code != 200 {
+		t.Fatalf("another IP = %d, want 200", w.Code)
+	}
+}
+
+func TestMeetLoginShellHasCacheAndFrameHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	meetDatabase(t)
+	w := httptest.NewRecorder()
+	NewEngine().ServeHTTP(w, httptest.NewRequest("GET", "/login", nil))
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-cache" || w.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("status=%d cc=%q xfo=%q", w.Code, w.Header().Get("Cache-Control"), w.Header().Get("X-Frame-Options"))
+	}
+}

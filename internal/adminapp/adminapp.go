@@ -30,13 +30,20 @@ func NewEngine() *gin.Engine {
 	s := &server{adminHTML: loadAdminHTML()}
 
 	r := gin.New()
+	httpx.TrustLocalProxy(r)
 	r.Use(gin.Recovery())
+	r.Use(httpx.SecurityHeaders())
 	for _, dir := range []string{"static", "fonts"} {
-		r.StaticFS("/"+dir, httpx.NoListFS{FS: http.Dir(filepath.Join(db.BaseDir, dir))})
+		policy := "no-cache"
+		if dir == "fonts" {
+			policy = "public, max-age=86400"
+		}
+		httpx.Static(r, "/"+dir, filepath.Join(db.BaseDir, dir), policy)
 	}
 
 	// The admin page shows a login form when no cookie; its JS handles both states.
 	r.GET("/", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache")
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.adminHTML))
 	})
 
@@ -77,6 +84,11 @@ func currentAdmin(c *gin.Context) (*db.User, bool) {
 }
 
 func handleLogin(c *gin.Context) {
+	ip := c.ClientIP()
+	if !auth.LoginLimiter.Allow(ip) {
+		httpx.Error(c, http.StatusTooManyRequests, auth.TooManyAttemptsDetail)
+		return
+	}
 	m := bindJSON(c)
 	username := auth.NormalizeUsername(strField(m, "username"))
 	password := strField(m, "password")
@@ -86,6 +98,8 @@ func handleLogin(c *gin.Context) {
 		httpx.Error(c, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
+	// A correct password gives the attempt back: only failures use the budget.
+	auth.LoginLimiter.Refund(ip)
 	if !user.IsAdmin {
 		httpx.Error(c, http.StatusForbidden, "Not an administrator")
 		return
@@ -268,7 +282,7 @@ func handlePatchUser(c *gin.Context) {
 
 	var displayName *string
 	if raw, isStr := isStr(m, "display_name"); isStr {
-		v := truncateRunes(strings.TrimSpace(raw), 40)
+		v := auth.CleanDisplayName(raw)
 		if v == "" {
 			v = user.DisplayName
 		}
@@ -415,17 +429,13 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n])
 }
 
-// resolveDisplayName mirrors `(payload.get("display_name") or username).strip()[:40] or username`.
+// resolveDisplayName returns the cleaned display name, or the username when
+// nothing visible is left (auth.CleanDisplayName).
 func resolveDisplayName(raw, username string) string {
-	dn := raw
-	if dn == "" {
-		dn = username
+	if dn := auth.CleanDisplayName(raw); dn != "" {
+		return dn
 	}
-	dn = truncateRunes(strings.TrimSpace(dn), 40)
-	if dn == "" {
-		dn = username
-	}
-	return dn
+	return username
 }
 
 // toBool mirrors Python's bool(x) for the values that arrive over JSON.

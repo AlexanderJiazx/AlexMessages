@@ -37,7 +37,7 @@ import (
 // session; expo-updates sends none.
 func registerOTARoutes(r *gin.Engine) {
 	r.GET("/api/ota/manifest", handleOTAManifest)
-	mountStatic(r, "/ota/files", updatesDir())
+	httpx.Static(r, "/ota/files", updatesDir(), "")
 	r.GET("/app", handleAppPage)
 	r.GET("/app/:file", handleAppFile)
 	r.HEAD("/app/:file", handleAppFile)

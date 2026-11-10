@@ -66,11 +66,11 @@ func allow(ip string, want int) int {
 	now := time.Now()
 	b := limiters[ip]
 	if b == nil {
-		b = &bucket{tokens: bucketCapacity, last: now}
-		limiters[ip] = b
-		if len(limiters) > 4096 {
+		if len(limiters) >= maxLimiters {
 			pruneLimitersLocked(now)
 		}
+		b = &bucket{tokens: bucketCapacity, last: now}
+		limiters[ip] = b
 	}
 	// Refill since last seen.
 	b.tokens += now.Sub(b.last).Seconds() * bucketRefillRate
@@ -87,12 +87,25 @@ func allow(ip string, want int) int {
 	return granted
 }
 
-// pruneLimitersLocked drops buckets idle for over 10 minutes. Caller holds the lock.
+// maxLimiters caps the number of per-IP buckets kept in memory.
+const maxLimiters = 4096
+
+// pruneLimitersLocked drops buckets idle for over 10 minutes; if more than
+// maxLimiters/2 buckets remain (many addresses active at once), it also drops
+// arbitrary buckets until maxLimiters/2 remain, so the map never holds more
+// than maxLimiters entries. A dropped address starts again with a full
+// bucket. Caller holds the lock.
 func pruneLimitersLocked(now time.Time) {
 	for ip, b := range limiters {
 		if now.Sub(b.last) > 10*time.Minute {
 			delete(limiters, ip)
 		}
+	}
+	for ip := range limiters {
+		if len(limiters) <= maxLimiters/2 {
+			break
+		}
+		delete(limiters, ip)
 	}
 }
 

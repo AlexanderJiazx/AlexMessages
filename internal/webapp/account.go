@@ -113,10 +113,18 @@ func handleExportData(c *gin.Context) {
 	if !ok {
 		return
 	}
-	known, _ := runtime.AllKnownUsers()
+	known, err := runtime.AllKnownUsers()
+	if err != nil {
+		httpx.Error(c, http.StatusInternalServerError, "internal error")
+		return
+	}
 
 	// Contacts (resolved to public profiles where still known).
-	contactIDs, _ := db.ListContacts(user.ID)
+	contactIDs, err := db.ListContacts(user.ID)
+	if err != nil {
+		httpx.Error(c, http.StatusInternalServerError, "internal error")
+		return
+	}
 	contacts := []runtime.PublicUser{}
 	for _, id := range contactIDs {
 		if u, ok := known[id]; ok {
@@ -129,10 +137,13 @@ func handleExportData(c *gin.Context) {
 	for _, id := range contactIDs {
 		partners[id] = struct{}{}
 	}
-	if p, err := db.DMPartnerIDs(user.ID); err == nil {
-		for id := range p {
-			partners[id] = struct{}{}
-		}
+	p, err := db.DMPartnerIDs(user.ID)
+	if err != nil {
+		httpx.Error(c, http.StatusInternalServerError, "internal error")
+		return
+	}
+	for id := range p {
+		partners[id] = struct{}{}
 	}
 
 	conversations := []exportConversation{}
@@ -140,7 +151,8 @@ func handleExportData(c *gin.Context) {
 		ch := db.DMChannelID(user.ID, pid)
 		msgs, err := db.FetchChannelWindow(ch, exportMaxMessages, nil, nil)
 		if err != nil {
-			continue
+			httpx.Error(c, http.StatusInternalServerError, "internal error")
+			return
 		}
 		if len(msgs) == 0 {
 			continue

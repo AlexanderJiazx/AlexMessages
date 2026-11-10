@@ -157,8 +157,9 @@
     if (isDeletedUser(uid)) return "?";
     const name = nameFor(uid);
     const parts = name.split(/[\s._-]+/).filter(Boolean);
-    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-    return (parts[0] || "?").slice(0,2).toUpperCase();
+    // Code points, not UTF-16 units, so an emoji is never split in half.
+    if (parts.length >= 2) return (Array.from(parts[0])[0] + Array.from(parts[1])[0]).toUpperCase();
+    return Array.from(parts[0] || "?").slice(0, 2).join("").toUpperCase();
   }
   function fmtSize(n) {
     if (n < 1024) return n + " B";

@@ -2,12 +2,15 @@ package webapp
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"image"
+	"image/jpeg"
 	"image/png"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -81,5 +84,68 @@ func TestOggUploadServedInlineAsAudio(t *testing.T) {
 	NewEngine().ServeHTTP(w, req)
 	if w.Code != 200 || w.Header().Get("Content-Type") != "audio/ogg" || w.Header().Get("Content-Disposition") != "" || w.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("status=%d headers=%v", w.Code, w.Header())
+	}
+}
+
+func TestSafeUploadNameKeepsExtension(t *testing.T) {
+	for in, want := range map[string]string{
+		"报告.pdf":                          "file.pdf",
+		"photo 1.JPG":                     "photo_1.JPG",
+		"..pdf":                           "file.pdf",
+		"noext":                           "noext",
+		".bashrc":                         "file.bashrc",
+		"a.tar.gz":                        "a.tar.gz",
+		"x." + strings.Repeat("e", 20):    "x",
+		strings.Repeat("a", 300) + ".pdf": strings.Repeat("a", 80) + ".pdf",
+	} {
+		if got := safeUploadName(in); got != want {
+			t.Fatalf("safeUploadName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// exifJPEG returns a w×h JPEG with an EXIF APP1 segment that sets the
+// given orientation, in the given byte order ("II" or "MM").
+func exifJPEG(t *testing.T, w, h, orientation int, order string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, w, h)), nil); err != nil {
+		t.Fatal(err)
+	}
+	var bo binary.ByteOrder = binary.LittleEndian
+	if order == "MM" {
+		bo = binary.BigEndian
+	}
+	tiff := make([]byte, 8+2+12+4)
+	copy(tiff, order)
+	bo.PutUint16(tiff[2:], 42)
+	bo.PutUint32(tiff[4:], 8)
+	bo.PutUint16(tiff[8:], 1)                    // one IFD entry
+	bo.PutUint16(tiff[10:], 0x0112)              // Orientation
+	bo.PutUint16(tiff[12:], 3)                   // SHORT
+	bo.PutUint32(tiff[14:], 1)                   // count
+	bo.PutUint16(tiff[18:], uint16(orientation)) // value
+	seg := append([]byte("Exif\x00\x00"), tiff...)
+	app1 := []byte{0xFF, 0xE1, byte((len(seg) + 2) >> 8), byte(len(seg) + 2)}
+	raw := buf.Bytes()
+	out := append([]byte{}, raw[:2]...)
+	out = append(out, app1...)
+	out = append(out, seg...)
+	return append(out, raw[2:]...)
+}
+
+func TestImageDimensionsHonorExifOrientation(t *testing.T) {
+	for _, order := range []string{"II", "MM"} {
+		if w, h := imageDimensions(exifJPEG(t, 40, 30, 6, order), "image/jpeg"); w != 30 || h != 40 {
+			t.Fatalf("%s orientation 6: got %dx%d, want 30x40", order, w, h)
+		}
+		if w, h := imageDimensions(exifJPEG(t, 40, 30, 1, order), "image/jpeg"); w != 40 || h != 30 {
+			t.Fatalf("%s orientation 1: got %dx%d, want 40x30", order, w, h)
+		}
+	}
+	// Truncated or garbage EXIF must not panic.
+	raw := exifJPEG(t, 40, 30, 6, "II")
+	for n := 0; n < 60; n++ {
+		_ = jpegOrientation(raw[:n])
 	}
 }

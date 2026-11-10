@@ -21,6 +21,7 @@ func (s *Server) registerPages(r *gin.Engine) {
 			c.Redirect(http.StatusFound, "/login")
 			return
 		}
+		c.Header("Cache-Control", "no-cache")
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.shellHTML()))
 	})
 
@@ -30,6 +31,7 @@ func (s *Server) registerPages(r *gin.Engine) {
 			c.Redirect(http.StatusFound, "/")
 			return
 		}
+		c.Header("Cache-Control", "no-cache")
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(s.loginHTMLFor(c)))
 	})
 }

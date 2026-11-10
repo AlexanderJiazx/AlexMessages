@@ -22,6 +22,9 @@ const (
 	InitialHistoryPage = 50
 	// MaxUploadBytes caps a single upload at 20 MB.
 	MaxUploadBytes = 20 * 1024 * 1024
+	// MaxAttachments caps the attachments of one message. The server refuses
+	// (does not save) a message frame that carries more.
+	MaxAttachments = 6
 )
 
 // ---------- presence ----------

@@ -169,13 +169,15 @@ func TestDMStateReadReceipts(t *testing.T) {
 		t.Fatalf("sender unread = %d, want 0", n)
 	}
 
-	// Mark-unread forces the sticky flag and zeroes last_read_at.
+	// Mark-unread sets the sticky flag and keeps the read receipt (the peer
+	// reads last_read_at / last_read_position as "Read").
+	before := st
 	if err := SetDMUnread(b, ch); err != nil {
 		t.Fatalf("SetDMUnread: %v", err)
 	}
 	st, _ = GetDMState(b, ch)
-	if !st.ForceUnread || st.LastReadAt != 0 {
-		t.Fatalf("after SetDMUnread: %+v", st)
+	if !st.ForceUnread || st.LastReadAt != 150 || st.LastReadPosition != before.LastReadPosition || st.LastReadPosition == 0 {
+		t.Fatalf("after SetDMUnread: %+v (before %+v)", st, before)
 	}
 	// Reading again clears the sticky flag.
 	if err := SetDMLastRead(b, ch, 250); err != nil {
@@ -195,7 +197,7 @@ func TestDMChannelIDParseRoundTrip(t *testing.T) {
 	if !ok || a != 3 || b != 7 {
 		t.Fatalf("ParseDMChannel = %d,%d,%v", a, b, ok)
 	}
-	for _, bad := range []string{"general", "dm:3", "dm:x:7", "dm:3:7:9", ""} {
+	for _, bad := range []string{"general", "dm:3", "dm:x:7", "dm:3:7:9", "", "dm:7:3", "dm:03:7", "dm:+3:7", "dm:3:+7", "dm:3:3", "dm:0:7", "dm:-1:7", "dm: 3:7"} {
 		if _, _, ok := ParseDMChannel(bad); ok {
 			t.Fatalf("ParseDMChannel(%q) unexpectedly ok", bad)
 		}

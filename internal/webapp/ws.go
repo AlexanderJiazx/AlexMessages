@@ -3,6 +3,7 @@ package webapp
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,9 @@ var (
 	wsSessionCheck = 5 * time.Second
 	// wsWriteWait bounds a ping write, which waits for any frame in flight.
 	wsWriteWait = 10 * time.Second
+	// messageLimiter: an account sends at most 30 message/edit frames at
+	// once, then 2 a second (per process, over all of its sockets).
+	messageLimiter = auth.NewAttemptLimiter(30, 500*time.Millisecond, 4096)
 )
 
 // registerWS wires the /ws WebSocket endpoint (mirrors routes/ws.py), and the
@@ -82,6 +86,8 @@ type initPayload struct {
 	HistoryHasMore map[string]bool                `json:"history_has_more"`
 	PageSize       int                            `json:"page_size"`
 	MaxUpload      int                            `json:"max_upload"`
+	// MaxAttachments is the most attachments one message may carry.
+	MaxAttachments int `json:"max_attachments"`
 }
 
 // broadcastMessage is the live "message" shape — note it carries author, which
@@ -207,10 +213,19 @@ func handleWS(c *gin.Context) {
 		}
 		kind, _ := data["type"].(string)
 		switch kind {
-		case "message":
-			handleWSMessage(user.ID, data, token)
-		case "edit":
-			handleWSEdit(user.ID, data, token)
+		case "message", "edit":
+			// Each saved message is a database write and a push to the peer,
+			// so an account (over all of its sockets) gets a budget. A frame
+			// over it is dropped like any refused message: the client shows
+			// "Failed to send · Retry".
+			if !messageLimiter.Allow(strconv.Itoa(user.ID)) {
+				continue
+			}
+			if kind == "message" {
+				handleWSMessage(user.ID, data, token)
+			} else {
+				handleWSEdit(user.ID, data, token)
+			}
 		case "switch":
 			handleWSSwitch(client, data)
 		case "open_dm":
@@ -342,6 +357,7 @@ func buildInitPayload(user *db.User) (initPayload, error) {
 		HistoryHasMore: historyHasMore,
 		PageSize:       runtime.InitialHistoryPage,
 		MaxUpload:      runtime.MaxUploadBytes,
+		MaxAttachments: runtime.MaxAttachments,
 	}, nil
 }
 
@@ -407,13 +423,13 @@ func handleWSMessage(userID int, data map[string]any, sessionToken ...string) {
 	if text == "" && len(attachmentsIn) == 0 {
 		return
 	}
+	if len(attachmentsIn) > runtime.MaxAttachments {
+		return // Refuse the whole message rather than save part of it.
+	}
 
 	cleanAtts := []db.Attachment{}
 	userPrefix := fmt.Sprintf("/uploads/%d/", userID)
-	for i, raw := range attachmentsIn {
-		if i >= 6 {
-			break
-		}
+	for _, raw := range attachmentsIn {
 		am, ok := raw.(map[string]any)
 		if !ok {
 			continue
@@ -528,9 +544,23 @@ func handleWSOpenDM(client *runtime.Client, userID int, data map[string]any) {
 		return
 	}
 	ch := db.DMChannelID(userID, peerID)
-	state, _ := db.GetDMState(userID, ch)
-	peerState, _ := db.GetDMState(peerID, ch)
-	hist, _ := db.FetchDMWindow(userID, ch, runtime.InitialHistoryPage, nil, "")
+	state, err := db.GetDMState(userID, ch)
+	var peerState db.DMState
+	var hist []db.HistoryMessage
+	if err == nil {
+		peerState, err = db.GetDMState(peerID, ch)
+	}
+	if err == nil {
+		hist, err = db.FetchDMWindow(userID, ch, runtime.InitialHistoryPage, nil, "")
+	}
+	if err != nil {
+		// An empty thread would replace the client's history with nothing.
+		// Close 1011 makes the client reconnect and load a full init.
+		debuglog.Emit("messages", "error", "ws_open_dm_failed", "DM could not be loaded", map[string]any{"err": err.Error()})
+		_ = client.Conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "open_dm failed"), time.Now().Add(time.Second))
+		_ = client.Conn.Close()
+		return
+	}
 	runtime.SendJSON(client, gin.H{
 		"type":     "dm_opened",
 		"channel":  ch,
@@ -641,6 +671,11 @@ func clampDimension(v any) int {
 func parsePeerID(v any) (int, bool) {
 	switch x := v.(type) {
 	case float64:
+		// Only whole numbers in range: int(2.7) would open user 2, and int()
+		// of a value beyond int's range is implementation-defined.
+		if x != math.Trunc(x) || x < 1 || x > math.MaxInt32 {
+			return 0, false
+		}
 		return int(x), true
 	case string:
 		n, err := strconv.Atoi(x)

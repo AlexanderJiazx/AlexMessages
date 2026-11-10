@@ -200,4 +200,3 @@ func TestTranscribeMissingKey(t *testing.T) {
 		t.Fatalf("no key: got %d, want 503", rec.Code)
 	}
 }
-

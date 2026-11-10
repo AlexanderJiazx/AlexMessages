@@ -34,7 +34,9 @@ func NewEngine() *gin.Engine {
 	}
 
 	r := gin.New()
+	httpx.TrustLocalProxy(r)
 	r.Use(gin.Recovery())
+	r.Use(httpx.SecurityHeaders())
 
 	// The service worker must be served from the root scope so it can intercept
 	// push events for the whole app. We keep the source under static/.
@@ -46,20 +48,20 @@ func NewEngine() *gin.Engine {
 
 	// Uploads require authentication and DM membership; they are never static.
 	// Profile photos live flat under data/avatars/.
-	mountStatic(r, "/avatars", db.AvatarRoot)
+	httpx.Static(r, "/avatars", db.AvatarRoot, "public, max-age=86400")
 	if dir := filepath.Join(db.BaseDir, "fonts"); isDir(dir) {
-		mountStatic(r, "/fonts", dir)
+		httpx.Static(r, "/fonts", dir, "public, max-age=86400")
 	}
 	// Call ringtone and ringback.
 	if dir := filepath.Join(db.BaseDir, "sound"); isDir(dir) {
-		mountStatic(r, "/sound", dir)
+		httpx.Static(r, "/sound", dir, "public, max-age=86400")
 	}
 	if dir := filepath.Join(db.BaseDir, "static"); isDir(dir) {
-		mountStatic(r, "/static", dir)
+		httpx.Static(r, "/static", dir, "no-cache")
 	}
 	// The built React client's hashed bundles (Vite emits web/dist/assets/).
 	if s.spaHTML != "" {
-		mountStatic(r, "/assets", filepath.Join(db.BaseDir, "web", "dist", "assets"))
+		httpx.Static(r, "/assets", filepath.Join(db.BaseDir, "web", "dist", "assets"), "public, max-age=31536000, immutable")
 	}
 
 	// Route modules, grouped by concern (mirrors the Python routers).
@@ -107,10 +109,6 @@ func requestSessionToken(c *gin.Context) string {
 }
 
 // ---------- static helpers ----------
-
-func mountStatic(r *gin.Engine, prefix, dir string) {
-	r.StaticFS(prefix, httpx.NoListFS{FS: http.Dir(dir)})
-}
 
 func isDir(p string) bool {
 	info, err := os.Stat(p)

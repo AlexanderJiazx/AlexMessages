@@ -144,9 +144,19 @@
   const form = $('#form-login');
 
   // Same-site path the server told us to return to (e.g. a meeting link).
+  // Same rule as safeNext in internal/meet/routes.go: exactly one leading
+  // "/", no backslash (browsers read "/\evil.com" as "//evil.com"), no
+  // control character (browsers drop tabs and newlines), and the result must
+  // stay on this origin.
   function nextPath() {
     const next = new URLSearchParams(location.search).get('next') || '/';
-    return next.startsWith('/') && !next.startsWith('//') ? next : '/';
+    if (!next.startsWith('/') || next.startsWith('//')) return '/';
+    if (/[\\\u0000-\u001f\u007f]/.test(next)) return '/';
+    try {
+      const u = new URL(next, location.origin);
+      if (u.origin !== location.origin || u.username || u.password) return '/';
+    } catch { return '/'; }
+    return next;
   }
 
   function showMsg(text) {

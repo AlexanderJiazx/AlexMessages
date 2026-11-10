@@ -118,3 +118,16 @@ func (n NoListFS) Open(name string) (http.File, error) {
 	}
 	return f, nil
 }
+
+// TrustLocalProxy makes c.ClientIP() return the real client address behind
+// the production chain (Cloudflare → nginx on the same host → this server):
+// the forwarding headers CF-Connecting-IP, then X-Forwarded-For, then
+// X-Real-IP are read only on a request whose TCP peer is loopback (127.0.0.1
+// or ::1). A request from any other peer gets its TCP address, whatever
+// headers it carries. (Gin's default trusts those headers from every peer.)
+func TrustLocalProxy(e *gin.Engine) {
+	if err := e.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		panic(err) // constant input: cannot fail
+	}
+	e.RemoteIPHeaders = []string{"CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP"}
+}

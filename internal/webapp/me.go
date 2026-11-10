@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"alexmessage/internal/auth"
 	"alexmessage/internal/db"
 	"alexmessage/internal/httpx"
 	"alexmessage/internal/runtime"
@@ -35,10 +36,11 @@ func handlePatchMe(c *gin.Context) {
 	}
 	m := bindJSON(c)
 
-	// display_name: trim + cap 40; empty falls back to the existing name.
+	// display_name: cleaned (auth.CleanDisplayName) + cap 40; a name with nothing
+	// visible falls back to the existing name.
 	var displayName *string
 	if raw, isStr := isStr(m, "display_name"); isStr {
-		v := truncateRunes(trimSpace(raw), 40)
+		v := auth.CleanDisplayName(raw)
 		if v == "" {
 			v = user.DisplayName
 		}

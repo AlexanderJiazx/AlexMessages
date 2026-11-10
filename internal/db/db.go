@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -631,7 +630,8 @@ func DMChannelID(a, b int) string {
 	return fmt.Sprintf("dm:%d:%d", lo, hi)
 }
 
-// ParseDMChannel reverses DMChannelID. ok is false for non-DM/malformed channels.
+// ParseDMChannel reverses DMChannelID. ok is false for non-DM/malformed
+// channels, and for any spelling other than DMChannelID's own.
 // The two ids are returned in the order they appear in the string (not sorted).
 func ParseDMChannel(channel string) (a, b int, ok bool) {
 	if !strings.HasPrefix(channel, "dm:") {
@@ -644,7 +644,10 @@ func ParseDMChannel(channel string) (a, b int, ok bool) {
 	var err1, err2 error
 	a, err1 = strconv.Atoi(parts[1])
 	b, err2 = strconv.Atoi(parts[2])
-	if err1 != nil || err2 != nil {
+	// Only the exact string DMChannelID builds names a thread: "dm:2:1",
+	// "dm:01:2", "dm:+1:2" and "dm:1:1" would otherwise store messages in a
+	// channel that neither participant's thread list shows.
+	if err1 != nil || err2 != nil || a <= 0 || a >= b || DMChannelID(a, b) != channel {
 		return 0, 0, false
 	}
 	return a, b, true
@@ -688,24 +691,51 @@ type PushSubscription struct {
 	Auth     string
 }
 
+// MaxPushSubscriptions is how many push subscriptions one user keeps. A new
+// subscription beyond it drops the user's oldest ones.
+const MaxPushSubscriptions = 10
+
 // UpsertPushSubscription inserts or refreshes a subscription keyed by endpoint.
-// If another user owned this endpoint, the row is reassigned to user_id.
+// If another user owned this endpoint, it now belongs to user_id. A refresh
+// replaces the row with a new one (a new id and created_at), so the endpoint
+// counts as the newest. Afterwards the user keeps only the
+// MaxPushSubscriptions newest rows (highest id; ids only grow): older ones
+// are deleted.
 func UpsertPushSubscription(userID int, endpoint, p256dh, authToken, userAgent string) error {
-	_, err := pool.Exec(
-		"INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent, created_at) "+
-			"VALUES (?, ?, ?, ?, ?, ?) "+
-			"ON CONFLICT(endpoint) DO UPDATE SET "+
-			"user_id = excluded.user_id, "+
-			"p256dh = excluded.p256dh, "+
-			"auth = excluded.auth, "+
-			"user_agent = excluded.user_agent",
+	tx, err := pool.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec("DELETE FROM push_subscriptions WHERE endpoint = ?", endpoint); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		"INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 		userID, endpoint, p256dh, authToken, userAgent, NowTS(),
-	)
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		"DELETE FROM push_subscriptions WHERE user_id = ? AND id NOT IN ("+
+			"SELECT id FROM push_subscriptions WHERE user_id = ? ORDER BY id DESC LIMIT ?)",
+		userID, userID, MaxPushSubscriptions,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RemovePushSubscription deletes the row for endpoint, whoever owns it (used
+// when the push service reports the endpoint gone).
+func RemovePushSubscription(endpoint string) error {
+	_, err := pool.Exec("DELETE FROM push_subscriptions WHERE endpoint = ?", endpoint)
 	return err
 }
 
-func RemovePushSubscription(endpoint string) error {
-	_, err := pool.Exec("DELETE FROM push_subscriptions WHERE endpoint = ?", endpoint)
+// RemoveUserPushSubscription deletes endpoint only when userID owns it.
+func RemoveUserPushSubscription(userID int, endpoint string) error {
+	_, err := pool.Exec("DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?", endpoint, userID)
 	return err
 }
 
@@ -799,8 +829,32 @@ func SetDMLastRead(userID int, channel string, ts int64) error {
 	return err
 }
 
+// SetDMReadThrough marks the channel read up to the newest message whose
+// position is at or below position, and clears force_unread. The read
+// position and last_read_at never move backwards. It returns the resulting
+// state.
+func SetDMReadThrough(userID int, channel string, position int64) (DMState, error) {
+	var pos, ts int64
+	err := pool.QueryRow(
+		"SELECT position, created_at FROM messages WHERE channel = ? AND position <= ? ORDER BY position DESC LIMIT 1",
+		channel, position,
+	).Scan(&pos, &ts)
+	if err != nil && err != sql.ErrNoRows {
+		return DMState{}, err
+	}
+	if _, err := pool.Exec("INSERT INTO dm_state (user_id, channel, last_read_at, last_read_position, force_unread) VALUES (?, ?, ?, ?, 0) ON CONFLICT(user_id, channel) DO UPDATE SET last_read_at = MAX(dm_state.last_read_at, excluded.last_read_at), last_read_position = MAX(dm_state.last_read_position, excluded.last_read_position), force_unread = 0", userID, channel, ts, pos); err != nil {
+		return DMState{}, err
+	}
+	return GetDMState(userID, channel)
+}
+
+// SetDMUnread sets the sticky force_unread flag ("Mark as unread"). It leaves
+// last_read_at and last_read_position unchanged: the peer reads them as this
+// user's read receipt, which must not go back. While the flag is set the
+// thread reports at least one unread message (see buildInitPayload); reading
+// the thread clears it.
 func SetDMUnread(userID int, channel string) error {
-	_, err := pool.Exec("INSERT INTO dm_state (user_id, channel, last_read_at, force_unread) VALUES (?, ?, 0, 1) ON CONFLICT(user_id, channel) DO UPDATE SET last_read_at = 0, last_read_position = 0, force_unread = 1", userID, channel)
+	_, err := pool.Exec("INSERT INTO dm_state (user_id, channel, force_unread) VALUES (?, ?, 1) ON CONFLICT(user_id, channel) DO UPDATE SET force_unread = 1", userID, channel)
 	return err
 }
 
@@ -1130,15 +1184,4 @@ func nullInt64ToPtrI64(n sql.NullInt64) *int64 {
 	}
 	v := n.Int64
 	return &v
-}
-
-// SortedKeys returns the integer keys of a set in ascending order (helper used
-// by callers that need deterministic ordering, e.g. presence rosters).
-func SortedKeys(set map[int]struct{}) []int {
-	out := make([]int, 0, len(set))
-	for k := range set {
-		out = append(out, k)
-	}
-	sort.Ints(out)
-	return out
 }

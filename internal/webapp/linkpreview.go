@@ -81,42 +81,14 @@ func previewCachePut(key string, p LinkPreview) {
 
 // ---------- SSRF-guarded HTTP client ----------
 
-// isPublicIP rejects loopback, private, link-local, multicast, and unspecified
-// addresses — anything that could reach internal services.
-func isPublicIP(ip net.IP) bool {
-	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified())
-}
-
-// guardedDialContext resolves the host itself and only dials public IPs, so
-// the check can't be bypassed via DNS tricks or redirects (the transport is
-// reused for every hop).
-func guardedDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
-	}
-	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
-	if err != nil {
-		return nil, err
-	}
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	for _, ip := range ips {
-		if !isPublicIP(ip) {
-			continue
-		}
-		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-		if err == nil {
-			return conn, nil
-		}
-	}
-	return nil, fmt.Errorf("no public address for %s", host)
-}
+// isPublicIP and the dialer live in httpx (IsPublicIP, GuardedDialContext),
+// shared with the Web Push sender.
+func isPublicIP(ip net.IP) bool { return httpx.IsPublicIP(ip) }
 
 var linkPreviewClient = &http.Client{
 	Timeout: linkPreviewTimeout,
 	Transport: &http.Transport{
-		DialContext:       guardedDialContext,
+		DialContext:       httpx.GuardedDialContext,
 		MaxIdleConns:      4,
 		DisableKeepAlives: true,
 	},

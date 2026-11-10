@@ -70,6 +70,13 @@ func TestAdminServesFontAndIconAssets(t *testing.T) {
 		if w.Code != 200 || w.Body.String() != "asset" {
 			t.Fatalf("%s status=%d", path, w.Code)
 		}
+		want := "no-cache"
+		if strings.HasPrefix(path, "/fonts/") {
+			want = "public, max-age=86400"
+		}
+		if got := w.Header().Get("Cache-Control"); got != want {
+			t.Fatalf("%s Cache-Control=%q want %q", path, got, want)
+		}
 	}
 	// The admin host is public: its mounts must never list their files.
 	for _, path := range []string{"/static/", "/fonts/", "/static/icons/"} {
@@ -122,5 +129,15 @@ func TestDeleteDisabledAdmin(t *testing.T) {
 	}
 	if u, _ := db.GetUserByID(a); u == nil {
 		t.Fatal("last admin deleted")
+	}
+}
+
+func TestAdminShellHasCacheAndFrameHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	reviewDatabase(t)
+	w := httptest.NewRecorder()
+	NewEngine().ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-cache" || w.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("status=%d cc=%q xfo=%q", w.Code, w.Header().Get("Cache-Control"), w.Header().Get("X-Frame-Options"))
 	}
 }
