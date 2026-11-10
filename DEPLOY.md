@@ -24,7 +24,10 @@ credentials are configured. To deploy by hand after distributing updated
 mobile binaries:
 
 ```bash
-# 0. From the repo root. Verify before shipping.
+# 0. From the repo root. Verify before shipping. `scripts/verify.sh` runs
+#    these same checks (with the race detector on `go test`, plus
+#    mobile/scripts/test-upload.sh and the web and mobile typechecks) in
+#    one command; `scripts/verify.sh --e2e` adds the Playwright suite.
 go build ./... && go vet ./... && go test ./...
 python3 deploy/remote_deploy_test.py
 (cd shared && npm ci && npm run typecheck && npm test)
@@ -54,10 +57,13 @@ ssh -p 2222 alexander@35.226.215.209 \
 rm release.tgz   # the deploy script deletes the Pi's copy; git does not ignore this one
 ```
 
-> **Stale-cache gotcha:** asset URLs are stable (`/static/app.js`) and the
-> server sends no `Cache-Control` on them, so browsers (Safari especially) keep
-> serving the old frontend after a deploy. Tell testers to hard-refresh, or add
-> cache-busting before relying on a frontend change being live.
+> **Caching:** the servers send `Cache-Control: no-cache` on files under
+> `/static` (stable names such as `/static/app.js`) and on every HTML shell, so
+> the browser asks the server on each load and receives the new file after a
+> deploy. Hashed `/assets` bundles are `public, max-age=31536000, immutable`;
+> `/fonts`, `/sound` and `/avatars` are `public, max-age=86400`. A 404 carries
+> no `Cache-Control`. This was NOT checked through Cloudflare: its caching of
+> these responses is untested.
 
 > **A bad mobile-app update (OTA):** see **Mobile app updates → Undo an
 > update** at the end of this file.
@@ -201,6 +207,15 @@ internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/f
   which passes the same-origin check only while nginx keeps the `Host`
   header as above. A socket without an `Origin` header is accepted; only the
   Android ring service's call listener (OkHttp) sends none.
+- **Client IP**: the binaries take the client IP from `CF-Connecting-IP`
+  (then `X-Forwarded-For`, then `X-Real-IP`) only on requests from loopback
+  (the local nginx). nginx forwards every request header it does not
+  override, so Cloudflare's `CF-Connecting-IP` reaches the binaries and the
+  per-IP login limit and debug-report limit count real clients (NOT checked
+  on the Pi: that no vhost overrides or clears this header). A
+  request that reaches the relay at `35.226.215.209` directly, without
+  Cloudflare, can set `CF-Connecting-IP` to any value, so those limits hold
+  per IP only for traffic that comes through Cloudflare.
 - **Upload limit**: the HTTPS server block of
   `/etc/nginx/sites-available/messages.alexanderjia.com` sets
   `client_max_body_size 21m;` (since 2026-10-28). The app takes attachments
@@ -240,7 +255,8 @@ internet ──► 35.226.215.209 (frps :7000)  ◄── frpc on the Pi (/etc/f
 `.github/workflows/deploy.yml`:
 
 - **Pull requests** into `main`/`react` run the tests only:
-  `go build`/`vet`/`test`, deployment rollback tests, the `shared/` typecheck +
+  `go build`/`vet`, `go test -race -count=1`, deployment rollback tests, the
+  upload test (`mobile/scripts/test-upload.sh`), the `shared/` typecheck +
   Vitest suite, and a React web build plus Playwright browser tests.
 - **Pushes** to `main` or `react` — including merging a PR — and
   manual *Run workflow* runs then **deploy**: cross-compile the three
@@ -334,9 +350,19 @@ Both scripts run on the Mac, from any directory, and reach the Pi over SSH
 mobile/scripts/publish-update.sh
 ```
 
-It runs `npx expo export` for Android and iOS and copies the result into
+The script refuses to publish (exit 1, before any export or SSH call)
+while `mobile/` or `shared/` has uncommitted or untracked files; commit
+first. There is no override for a publish to the Pi. Then it runs the
+`shared/` typecheck and unit tests and the `mobile/` typecheck; a failure
+stops it. Then it runs `npx expo export` for Android and iOS and copies the result into
 `~/alexmessage/data/updates/<app version>/<unix seconds>/` on the Pi. The
-server needs no restart. Every phone whose app has that version
+server needs no restart. Each update directory holds `commit.txt`, the
+commit the update was built from. The update is uploaded as one tar file
+first; the Pi computes its SHA-256 and compares it with the Mac's, and only
+when they are equal does it extract the tar and rename the directory to its
+final name (a cut upload is deleted and nothing is published). This check
+is NOT tested against the Pi yet; `mobile/scripts/test-upload.sh` tests it
+against a stand-in for `ssh`. Every phone whose app has that version
 (`mobile/app.json` → `expo.version`) downloads the update at its next start,
 or when the app comes back after 15 minutes in the background, and runs it
 from the start after that, or from the next such return. The app never
@@ -373,7 +399,9 @@ mobile/scripts/publish-update.sh
    Each runs `npx expo prebuild --clean`, a release build (`gradlew
    assembleRelease`; an unsigned `xcodebuild archive` packed into an IPA)
    and copies `AlexMessages.apk` or `AlexMessages.ipa` into
-   `~/alexmessage/data/app/` on the Pi. The APK is signed with the debug
+   `~/alexmessage/data/app/` on the Pi. The Pi checks the SHA-256 of the
+   upload against the Mac's before the file gets its final name (NOT tested
+   against the Pi yet). The APK is signed with the debug
    keystore of Expo's Android template, the same file after every prebuild,
    so it installs over the old app and keeps its data.
 3. Everyone opens https://messages.alexanderjia.com/app on the phone and

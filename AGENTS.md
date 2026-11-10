@@ -41,6 +41,13 @@ the app has **diverged** from the Python original:
   `runtime.PublicUser` carries an `avatar` URL field.
 - **Read receipts** — marking a DM read broadcasts a `dm_read` WS event to both
   participants; init/`dm_opened` `dm_state` payloads include `peer_last_read_at`.
+  `POST /api/dm/:channel/read` takes an optional JSON body `{"position": n}`
+  (the newest message position the client holds): the read position becomes
+  the newest message at or below `n`. Without it the thread is read through
+  its newest message. The read position never moves backwards, and `dm_read`
+  carries the resulting `last_read_position`. "Mark as unread"
+  (`POST /api/dm/:channel/unread`) sets only `force_unread`: the read receipt
+  the peer sees does not change.
 - **Message editing** — the author can edit their own text messages: WS `edit`
   client message → `messages.edited_at` stamped → `message_edited` broadcast to
   both participants. History payloads carry `edited_at` (null until edited);
@@ -49,7 +56,9 @@ the app has **diverged** from the Python original:
   `width`/`height`, persisted on `attachments`, so clients reserve a correctly
   sized loading placeholder.
 - **Link previews** — `GET /api/link-preview?url=` fetches OpenGraph metadata
-  server-side (SSRF-guarded dialer, in-memory TTL cache) for preview cards.
+  server-side (SSRF-guarded dialer `httpx.GuardedDialContext`, which dials
+  only addresses outside the IANA special-purpose ranges listed in
+  `internal/httpx/netguard.go`; in-memory TTL cache) for preview cards.
 - **UI refresh** — message bubbles (own messages right-aligned), sidebar rows
   show avatar + name + last-message preview, compose icon starts a new chat.
   The rail header is a large **"Messages"** navigation title (Instrument Serif);
@@ -73,7 +82,8 @@ the app has **diverged** from the Python original:
   session — `POST /api/logout` drops all of the user's sessions), delete
   account (`POST /api/me/delete` — password-verified, refuses the last admin).
   Notifications: a toggle for DM push alerts. Data: JSON export
-  (`GET /api/me/export`). Peer profiles use a separate read-only sheet
+  (`GET /api/me/export`, which answers 500 and sends no download when one of
+  its reads fails). Peer profiles use a separate read-only sheet
   (Message · Voice call · Video call · add/remove contact).
 - **Voice dictation** — a ChatGPT-style dictation bar (cancel · live waveform +
   timer · stop → transcribe into the composer · send-audio voice message ·
@@ -88,6 +98,12 @@ the app has **diverged** from the Python original:
 - **Rich media attachments** — image, video, audio, GIF, and generic-file
   attachments; clients render inline image/video players, audio players, and
   file cards from `attachmentKind`/`attachmentLabel` in `shared/src/format.ts`.
+  One message carries at most 6 attachments (`runtime.MaxAttachments`, sent
+  to clients as `max_attachments` in `init`); the server refuses (does not
+  save) a `message` frame with more. One account may send at most 30
+  `message`/`edit` frames at once, then 2 a second, over all of its sockets
+  (`messageLimiter` in `internal/webapp/ws.go`); a frame over that budget is
+  dropped unsaved, and the client shows **Failed to send · Retry**.
 - **Mobile bearer auth** — `POST /api/login` returns `session_token` alongside
   the `am_session` cookie so cookie-less clients (the RN app) can authenticate
   REST calls with `Authorization: Bearer <token>`, and the `/ws` upgrade with
@@ -124,9 +140,17 @@ All three are served through `httpx.Serve` (in `internal/httpx/serve.go`), which
 adds slow-loris timeouts (`ReadHeaderTimeout`/`IdleTimeout`, but **no**
 `WriteTimeout` — that would kill the WS control plane and the SSE debug stream)
 and drains in-flight requests on SIGINT/SIGTERM. Every static directory the
-three servers mount (`/static`, `/fonts`, `/sound`, `/avatars`, `/assets`) is
-served through `httpx.NoListFS`, so a request for a directory returns 404
-instead of a file listing. Each `main` also calls
+three servers mount (`/static`, `/fonts`, `/sound`, `/avatars`, `/assets`,
+`/ota/files`) is served through `httpx.Static` (which uses `httpx.NoListFS`),
+so a request for a directory returns 404 instead of a file listing. The
+`Cache-Control` of a found file is `public, max-age=31536000, immutable` on
+`/assets`, `public, max-age=86400` on `/fonts`, `/sound` and `/avatars`,
+`no-cache` on `/static`, and none on `/ota/files`. A 404 never carries
+`Cache-Control`. Every response of the three servers carries
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and
+`Referrer-Policy: strict-origin-when-cross-origin` (`httpx.SecurityHeaders`;
+the upload handler replaces the last one with `no-referrer`), and every HTML
+shell carries `Cache-Control: no-cache`. Each `main` also calls
 `db.StartBackgroundMaintenance()`, a 10-minute sweep that deletes upload files
 older than 24 hours that no attachment references, prunes expired sessions,
 and caps the debug ring buffer. Each `main` logs
@@ -232,7 +256,7 @@ Vite + React 18 + TypeScript SPA. Structure:
   `SettingsModal`, `Modals`, `Overlays`, `Avatar`, `icons`.
 - `src/hooks.ts`, `src/format-ui.tsx` — `useSyncExternalStore` bindings and
   React-side formatting glue.
-- `e2e/` — Playwright suite (49 tests across 8 specs) + `start-server.sh`,
+- `e2e/` — Playwright suite (56 tests across 9 specs) + `start-server.sh`,
   which builds an isolated server on :8795 against its own database in
   `$E2E_RUN_DIR` (default `/tmp/am-e2e`; it persists between runs), seeded by
   `web/e2e/seed` (a tiny Go program).
@@ -257,18 +281,38 @@ Android from one codebase, plus `expo start --web`.
   `settings/` is its own nested native stack (`_layout` + `index`, `profile`,
   `account`, `notifications`, `data`, `admin`), so sections push with the
   platform transition and the native header owns back/Done; the grouped-list
-  primitives live in `src/components/SettingsList.tsx`.
+  primitives live in `src/components/SettingsList.tsx`. Every modal closes
+  from its native header's right button: **Done** on Settings and on the
+  contact card (`profile`), **Cancel** on New Message (`new-chat`).
+  `src/nav.ts` resets the root Stack (`resetToLogin` at sign-out,
+  `showConversation` for a notification tap), which also removes every
+  open modal.
 - `src/session.tsx` — the mobile twin of `web/src/client.ts`: one `ApiClient` +
   one `ChatStore` created once the server URL and bearer token are known.
   Auth token in `expo-secure-store` (AsyncStorage fallback on web); server URL
   from `EXPO_PUBLIC_AM_SERVER` or `app.json → extra.defaultServerUrl`;
   `AppState` drives `store.setForeground`. On Android dev builds, `localhost`
   server URLs are remapped to `10.0.2.2` (the emulator's host alias).
+  Sign-out (Log Out, Delete Account, a close 4401) does not wait for the
+  network: it shows the login screen, resets the store, clears the drafts
+  and every notification of the app (an app start that ends on the login
+  screen also deletes the drafts), and then sends `POST /api/logout` in
+  the background (given up after `ApiClient`'s 20 s timeout). The
+  notification permission is asked after sign-in and at app start, never
+  when the first notification is posted.
 - `src/notify.ts` — local notifications (the managed-Expo analogue of the
   legacy Android `MessagingService`): the shared socket stays connected while
   the process lives, `store.onNotify` posts a per-conversation notification,
-  and taps route back to that conversation.
+  and taps route back to that conversation (`app/chat.tsx`): a channel the
+  signed-in user is not part of is ignored, open modals close first, and
+  during a live call the tap only selects the thread without navigating.
 - `src/audio.ts` — `useVoiceRecorder` (expo-audio) for dictation + voice notes.
+- `src/drafts.ts` — composer drafts, one per conversation, in memory; they
+  are written to AsyncStorage every time the app leaves the foreground and
+  right before an over-the-air reload, and read back at the next start
+  (nothing is written before that read; a write while there is no draft
+  deletes the stored copy).
+  NOT tested on a device or simulator.
 - `src/updates.ts` — over-the-air updates (expo-updates): applies a
   downloaded update when the app returns after 15 minutes away; the Settings
   footer's "built-in code" / "update of …" label. `scripts/publish-update.sh`
@@ -290,8 +334,10 @@ Android from one codebase, plus `expo start --web`.
   iMessage-style swipe right → Unread/Read + Pin, left → Delete, full swipe
   fires the outermost action), `SwipeRow`,
   `ConversationView`, `MessageList`, `Bubble`, `Composer` (+ `DictationBar`),
-  `Avatar`, `Icon`, `Sheet`, `ActionSheet`, `attachments`, `ImageViewer`,
-  `Toasts`. On iOS, images open in the native viewer from `modules/native-menu`
+  `Avatar`, `Icon`, `ActionSheet`, `attachments`, `ImageViewer`,
+  `Toasts` (`ToastHost`, mounted once in `app/_layout.tsx`: above the
+  modals, in a `FullWindowOverlay` on iOS, and above the keyboard while it
+  is up). On iOS, images open in the native viewer from `modules/native-menu`
   instead; `ImageViewer` is the Android/web fallback.
 - `modules/native-menu/` — local Expo module (Swift): the UIKit context-menu
   view and glass menu button behind `NativeMenu` on iOS, and the UIKit image
@@ -381,10 +427,29 @@ socket to the server (no push: the target phones have no Google Play).
   someone with no open socket, no call listener (below), and no Web Push
   subscription ends at once as `unavailable`. Two users who dial each other
   at the same moment are joined into one call.
+- One user may place at most one call every 2 s (`callStartGap`) and at most
+  30 calls in any hour (`callStartsPerHour`). Only calls the server creates
+  count (also those that end at once as `busy` or `unavailable`); a
+  `call_start` that answers a crossed call, or that is refused, does not. A
+  `call_start` past either limit gets `call_error` with error
+  `rate_limited`, and no call is created.
 - A call binds exactly two sockets — the device that placed it and the device
   that answered — and only those two exchange signaling. Answering on one
   device stops the ringing on the callee's other devices and call listeners
-  (`call_ended` with reason `answered_elsewhere`).
+  (`call_ended` with reason `answered_elsewhere`). A second `call_accept`
+  from the device that answered (same `device` id) binds the socket it came
+  on and gets `call_accepted` again; from any other device it gets
+  `call_ended` with reason `gone`.
+- While a call rings, a `call_hangup` from any `/ws` socket of either user
+  ends it (`cancelled` from the caller, `declined` from the callee). Once it
+  is answered, the server takes `call_hangup` only from one of the two bound
+  sockets, or from a socket whose frame names a bound device in `device` (a
+  hang-up that the client queued while its socket was down arrives on its
+  next socket). Any other `call_hangup` for an answered call is ignored, so
+  a Decline that another device of the callee sent before it heard
+  `answered_elsewhere` cannot end the call
+  (`TestCallStaleDeclineKeepsAnsweredCall`). Logout and account deletion
+  end the call without this check (`endUserCall`, below).
 - When a bound socket drops without a close frame or with any close code
   other than 1001, the call survives for 30 s (`callResumeGrace`): the
   reconnecting client sends `call_resume` and receives the signals held for
@@ -393,6 +458,23 @@ socket to the server (no push: the target phones have no Google Play).
   page is closed or reloaded) ends the call at once, as `completed` if it was
   answered and as `cancelled` if it was still ringing, because that page's
   media is gone (`callSocketGone`, tested by `TestCallEndsWhenPageUnloads`).
+  A call whose caller socket dropped before the answer and did not come back
+  within the 30 s is logged as `failed`, not `completed`, because the two
+  devices never connected (`TestCallCallerGoneBeforeAnswerLoggedFailed`).
+- A device that sent `call_start` but lost its socket before it heard the
+  answer sends `call_resume` with `call_id` `""` and its `client_call_id`
+  and `device`. If that user's live call was placed with that
+  `client_call_id` from that device, the server binds the new socket as the
+  caller and sends `call_outgoing`, then `call_accepted` if the call was
+  answered meanwhile (else `call_ringing` if a callee device rang), then the
+  held signals. If that `call_start` crossed the peer's call and answered it,
+  the server binds the new socket as the callee and sends `call_accepted`.
+  Otherwise it sends `call_ended` with `call_id` `""`, that
+  `client_call_id`, and reason `gone` (`TestCallResumeByNonce`,
+  `TestCallResumeByNonceAfterGlare`).
+- The caller never gets `call_ringing` before `call_outgoing`: a callee
+  device that connects in between is rung at once, and its `call_ringing`
+  goes out right after `call_outgoing` (`TestCallRingingFollowsOutgoing`).
 - Ringing also goes out as a Web Push (`kind: "call"`, tag `call-<id>`,
   `require_interaction` true: it stays on screen until something replaces or
   closes it) when the callee has a Web Push subscription and none of the
@@ -465,14 +547,20 @@ socket to the server (no push: the target phones have no Google Play).
   cannot connect its media — see `DEPLOY.md`.
 
 WS protocol — client → server: `call_start {peer_id, media, client_call_id,
-device}`, `call_accept {call_id, device}`, `call_hangup {call_id, reason?}`
-(`reason: "failed"` marks an answered call whose media never connected),
-`call_signal {call_id, payload}`, `call_resume {call_id, device}`. Server →
+device}`, `call_accept {call_id, device}`, `call_hangup {call_id, reason?,
+device}` (`reason: "failed"` marks an answered call whose media never
+connected; `device` is this device's id, which the TS client always sends),
+`call_signal {call_id, payload}`, `call_resume {call_id, device}`, and
+`call_resume {call_id: "", client_call_id, device}` for a `call_start` whose
+answer was lost. `shared/src/types.ts` does not list `device` on
+`call_hangup` or `client_call_id` on `call_resume` yet; `call.ts` sends them
+through its own frame types. Server →
 client: `call_outgoing {client_call_id, call}`, `call_incoming {call}`,
 `call_ringing {call_id}`, `call_accepted {client_call_id, call}`,
 `call_signal {call_id, payload}`, `call_resumed {call}`,
 `call_ended {call_id, client_call_id?, reason}`,
-`call_error {client_call_id, error}` (`invalid` or `busy_self`). Signal
+`call_error {client_call_id, error}` (`invalid`, `busy_self`, or
+`rate_limited`). Signal
 payloads: `offer` / `answer` (SDP), `candidate`, `state {mic, camera}`, and
 `restart` (the callee asks the caller for an ICE restart). The client also
 sends `visibility {visible}` on `/ws` (not a call message: every TS client
@@ -491,7 +579,25 @@ renegotiation. A video call without a usable camera goes ahead with the
 camera off; a call without a microphone ends with a message saying why. ICE
 "disconnected" for 4 s triggers an ICE restart; media that stays lost for
 30 s ends the call (`lost`); an answered call whose media doesn't connect
-within 30 s ends as `failed`. An ended session stays in `store.state.call`
+within 30 s ends as `failed`. The callee's 30 s connect timer starts when it
+sends `call_accept`, so an answer that the server never confirms also ends
+as `failed`. An outgoing call whose `call_start` gets no `call_outgoing`,
+`call_accepted`, or `call_error` within 15 s of socket uptime
+(`CALL_START_TIMEOUT_MS`; the timer stops while the socket is down and
+starts again at the resume) ends as `failed` with the message "Couldn't
+reach the server. Try again." After a reconnect the client sends
+`call_resume` by `client_call_id` for a `call_start` still unanswered and
+for each `call_start` it hung up before the server named the call; a
+callee whose `call_accept` was lost (the resumed call is still ringing)
+sends `call_accept` again. `rate_limited` ends the outgoing call (outcome
+`rate_limited`, shown as "Call ended") with the toast "Too many calls. Wait
+a moment." A call that rings on this device while its own `call_start` is
+unanswered is held back, and shows as soon as that attempt ends without
+becoming a call: `call_error`, `call_ended` for its `client_call_id`, the
+15 s timeout, or an End before `call_start` went out (for example during
+the permission prompt). A dropped socket forgets the held-back call, because
+the server rings a still-ringing call again on the next socket. An ended
+session stays in `store.state.call`
 for 2 s so the UI can say why it ended. A device that hangs up its outgoing
 call before the server has answered its `call_start` sends `call_hangup` for
 whichever call the server then names: a late `call_outgoing`, or a
@@ -658,17 +764,20 @@ cards in the thread with a
   (`CallRinger.notificationsAllowed()`: the app's notifications are on and
   its "Incoming calls" category isn't blocked). Without notifications no
   call could show, so the service stops itself and the phone stops counting
-  as reachable. With the setting on, the app asks for the notification
-  permission at sign-in and at app start (Android stops showing the prompt
-  after two denials); the Settings page then shows **Allow notifications**,
+  as reachable. The app asks for the notification permission at sign-in
+  and at app start, with the setting on or off (Android stops showing the
+  prompt after two denials); with the setting on, the Settings page then
+  shows **Allow notifications**,
   **Allow full-screen calls** (Android 14+ lets the user deny them), and
   **Allow background use** (the battery-optimization exemption) for each
   one that is missing. Logout, a close 4401 on the listener, and an app
   start that ends on the login screen (no stored token, or the startup
-  `GET /api/me` fails) stop the service and clear its stored session. Any
-  failure of that startup `GET /api/me`, a network error included, discards
-  the stored token, so opening the app offline signs the user out and stops
-  the service until the next sign-in. With the setting off, Android rings as
+  `GET /api/me` answers 401 or 403) stop the service and clear its stored
+  session. Only a 401 or 403 from that startup request discards the stored
+  token. A network error, a server error, or no answer within 20 s keeps
+  it: the app opens signed in and its socket keeps reconnecting, and a
+  session that the server has revoked still signs out through the
+  socket's close 4401. With the setting off, Android rings as
   before: by itself while the app's process runs, and with a local
   notification while the app is in the background.
 - Which notification rings a call while the app is in the background: on
@@ -744,8 +853,10 @@ signed by 万能签.
   when that is set, for test builds against a local server.
   `src/updates.ts`: `useUpdatesOnReturn` (called in `session.tsx`) also
   applies a downloaded update when the app comes back after at least 15
-  minutes in the background (never during a call), and otherwise asks the
-  server again at that moment; `runningCodeLabel` is the Settings footer's
+  minutes in the background (never during a call, and never while a
+  composer records, uploads, transcribes, or holds staged files; composer
+  drafts are saved across the reload, `src/drafts.ts`), and otherwise asks
+  the server again at that moment; `runningCodeLabel` is the Settings footer's
   "Alex Messages 1.2.0 · built-in code" or "· update of Oct 27 at 8:32 PM"
   (the update's publish time, in the phone's locale).
   Debug builds (`npm run ios`, `npm run android`) load their JavaScript
@@ -777,12 +888,20 @@ signed by 万能签.
   version>/<unix seconds>/<path>`, which serves `data/updates/`. Each
   update's manifest is built once per platform and kept in memory: a
   published update never changes.
-- **Publishing**: `mobile/scripts/publish-update.sh` exports both platforms
-  and copies the export over SSH (`PI`, `PI_PORT`; default
-  `alexander@35.226.215.209`, port 2222) into
-  `~/alexmessage/data/updates/<version>/.<unix seconds>`, then renames it to
-  `<unix seconds>`. `OTA_LOCAL=<data dir>` publishes into a local server's
-  `data/` instead. Deploys never touch `data/` (`deploy/remote_deploy.sh`
+- **Publishing**: `mobile/scripts/publish-update.sh` first refuses to
+  publish (exit 1, before any export or SSH call) while `mobile/` or
+  `shared/` has uncommitted or untracked files (no override; with
+  `OTA_LOCAL` a dirty tree is allowed and the commit gets the suffix
+  `-dirty`), then runs the `shared/` typecheck and unit tests and the
+  `mobile/` typecheck. It exports both platforms, writes `commit.txt` (the
+  commit) into the update, tars it, and uploads the tar over SSH (`PI`,
+  `PI_PORT`; default `alexander@35.226.215.209`, port 2222) with
+  `upload_verified` (`mobile/scripts/lib-upload.sh`): the Pi computes the
+  tar's SHA-256, compares it with the Mac's, and only when equal extracts it
+  into `~/alexmessage/data/updates/<version>/.<unix seconds>` and renames it
+  to `<unix seconds>`. NOT tested against the Pi; tested against a stand-in
+  `ssh` by `mobile/scripts/test-upload.sh`. `OTA_LOCAL=<data dir>` publishes
+  into a local server's `data/` instead. Deploys never touch `data/` (`deploy/remote_deploy.sh`
   refuses a release that contains it).
 - **Rolling back**: expo-updates only takes an update newer than the one it
   runs, so deleting the newest update directory does not undo it on phones
@@ -796,7 +915,9 @@ signed by 万能签.
   `mobile/scripts/publish-app.sh android|ios` runs `expo prebuild --clean`
   and a release build (`gradlew assembleRelease`; an unsigned `xcodebuild
   archive` packed into an IPA for 万能签) and copies the file there over
-  SSH (`APP_LOCAL=<data dir>` copies it into a local server's `data/`).
+  SSH with `upload_verified`: the Pi checks the file's SHA-256 against the
+  Mac's before the file gets its final name (NOT tested against the Pi).
+  `APP_LOCAL=<data dir>` copies it into a local server's `data/`.
   Android release builds are signed with the debug keystore of Expo's
   Android template (`android/app/debug.keystore`, the same file after every
   prebuild), so a new APK installs over the old app and keeps its data.
@@ -811,10 +932,26 @@ chosen per meeting from a lobby dropdown:
 
 - **`mesh` — Standard WebRTC ("Default experience").** Full-mesh
   RTCPeerConnections between participants; the server only relays opaque
-  SDP/ICE (`signal` messages). The client uses the MDN perfect-negotiation
-  pattern (newcomer = polite peer) and creates audio+video transceivers
-  up-front so mute/device-switch/screen-share are all `replaceTrack` — no
-  renegotiation. Screen shares request system/tab audio
+  SDP/ICE (`signal` messages). Exactly one side of each pair offers: the
+  participant already in the room, when `peer_joined` announces the newcomer
+  (`meshEnsurePeer(pid, true)`). It creates the audio+video transceivers
+  up front; the newcomer creates its peer connection when that offer arrives
+  and answers on the offered transceivers (`meshAdoptTransceivers`: sets them
+  `sendrecv` and attaches its tracks). So mute/device-switch/screen-share are
+  all `replaceTrack` — no renegotiation. Only the offerer restarts ICE when
+  a connection fails; the MDN perfect-negotiation pattern (newcomer = polite
+  peer) stays as the guard for any later renegotiation. When both sides
+  offered at once (the old design), Chromium's ICE gathering stalled after
+  the polite side's rollback and the call stayed black and silent (2 of 4
+  two-person test joins); with one offerer, 8 of 8 two-person joins and 4 of
+  4 three-person simultaneous joins connected media both ways. Every transceiver, with or without a track, is added with
+  `{streams: [localStream]}`, and the receiving side keeps **one
+  `MediaStream` per remote peer** (`peer.remote`): `ontrack` adds each
+  received track to it (replacing an older track of the same kind) and
+  re-assigns it to the tile's `<video>` (`meshAttachRemote`). So a
+  participant without a camera stays audible: before this, the track-less
+  video transceiver arrived with `streams = []`, and its stand-in stream
+  replaced the tile's stream and dropped the audio. Screen shares request system/tab audio
   (`getDisplayMedia({audio: true})`); when the browser grants it, the capture
   is mixed with the mic via WebAudio (`state.shareMix`) into the existing
   audio sender — still no renegotiation, mic mute keeps working
@@ -834,39 +971,85 @@ chosen per meeting from a lobby dropdown:
   `isAutoSubscribeVideo` covers only main (camera/mic) streams — remote screen
   streams must be explicitly `subscribeScreen`d in `onUserPublishScreen`, or
   viewers get a black tile.
+  **Tokens are short-lived**: each token (and its publish and subscribe
+  privileges) expires 15 minutes after it is minted (`volcTokenTTL` in
+  `routes.go`; the join payload carries `expires_at` in unix seconds). The
+  client asks for a new one with the control message `volc_token` 2 minutes
+  before `expires_at`, and also when the SDK fires `onTokenWillExpire`,
+  `onTokenPublishPrivilegeWillExpire`, or
+  `onTokenSubscribePrivilegeWillExpire`; it passes the answer to the SDK's
+  `updateToken`. The server answers `volc_token` only for a socket that is
+  on the roster of a volc meeting, so a kicked participant (or one that
+  left) keeps its media-room access for at most 15 minutes. Clients also
+  refuse media from VolcEngine users whose `p<pid>` is not on their roster:
+  `onUserPublishStream` from such a user is unsubscribed and its screen is
+  not subscribed; if that pid later arrives in `peer_joined`, the held
+  streams are subscribed then. `peer_left` unsubscribes the departed pid's
+  streams.
 
 Either way, every participant stays on the meet server's `/ws` **control
 plane**: it owns the roster, AV state fan-out (`peer_state`), and host powers.
 Protocol: client sends `join {code, guest_name?, client_id?}` / `leave` /
 `signal {to, payload}` / `state {muted, cam_on, sharing}` / `host_mute {pid}` /
-`host_transfer {pid}` / `host_kick {pid}` / `set_guests {allowed}` / `ping`;
+`host_transfer {pid}` / `host_kick {pid}` / `set_guests {allowed}` /
+`volc_token` / `ping`;
 server sends `hello` (`me` is `null` for anonymous connections) / `joined`
 (roster + `host_pid` + `allow_guests` + `volc` join payload when applicable) /
 `peer_joined` / `peer_left` / `signal {from}` / `peer_state` / `host_changed` /
-`force_mute` / `kicked` / `replaced` / `guests_changed {allowed}` / `error` /
-`pong`.
+`force_mute` / `kicked` / `replaced` / `guests_changed {allowed}` /
+`volc_token {volc}` (a fresh join payload, volc meetings only) / `error` /
+`pong`. Clients ignore a `signal` whose `from` pid is not on their roster.
+
+**Message order**: every socket has an ordered outbound queue (`conn.out`,
+256 frames, `sendQueueSize`) drained by one writer goroutine, and every
+handler queues its messages while it still holds `meetMu`. So each recipient
+receives messages in the order the room state changed (for example, a
+newcomer's `signal` never overtakes the `peer_joined` that announces it).
+Queuing never blocks; a socket whose queue is full is closed, and its read
+loop then leaves the room. Each frame write still has the `writeWait`
+(10 s) deadline. So that one participant's flood can't fill the others'
+queues, each socket has an inbound budget (`frameBurst` 400 units at once,
+one back every `frameRefill` 10 ms; a frame costs 1 + 1 per 2 KB): a frame
+over it is dropped unread.
 
 Rooms (`internal/meet/state.go`) are in-memory only, keyed by
 `xxx-xxxx-xxx` codes (no i/l/o). The first joiner is host; when the host
 leaves, the longest-present participant inherits (`host_changed`). Empty rooms
 survive a 5-minute grace (refresh-proof) and never-joined rooms an hour, then
-are pruned lazily. **One slot per identity**: a `join` whose registered user id
+are pruned lazily. One account can have at most 20 rooms it created alive
+at once (`maxLiveRoomsPerUser`); `POST /api/meetings` answers 429 beyond
+that. **One slot per identity**: a `join` whose registered user id
 (or per-tab `client_id`) already occupies the room evicts the prior instance —
 the displaced socket gets `replaced` and the rejoiner reclaims host — so an
 abnormal disconnect + rejoin can't leave a ghost (or a stuck host) behind. A
 **heartbeat** (server read deadline `pongWait`=75s, refreshed per frame; the
-client pings every 20s) reclaims a silently-dead socket even without a rejoin;
-`conn.send` carries a `writeWait` deadline so a half-open socket can't wedge a
-fan-out. The client treats a dropped control socket as recoverable: it keeps
-local capture and retries `connectWS`+`join` for ~12s behind a "Reconnecting…"
-banner (mesh rebuilds peers, volc rejoins the room with the fresh token) before
-falling back to a "Connection lost" screen.
+client pings every 20s) reclaims a silently-dead socket even without a rejoin.
+The client treats a dropped control socket as recoverable: it keeps
+local capture and retries `connectWS`+`join` for 12 s (`RECONNECT_WINDOW_MS`)
+(mesh rebuilds peers, volc rejoins the room with the fresh token) before
+falling back to a "Connection lost" screen. The "Reconnecting…" banner
+appears only once the socket has stayed down for 3 s
+(`RECONNECT_BANNER_DELAY_MS`, as in Alex Messages), and the "Reconnected"
+toast follows only a banner that was shown, so a blip that recovers sooner
+shows nothing.
+Retries back off from 0.5 s to 4 s; a socket that is open (its join was sent)
+is never replaced, and a socket that is still connecting is replaced only
+after 5 s (`CONNECT_TIMEOUT_MS`). A reconnect drops the speaking meter of the
+old self pid. **Pre-join gate**: a socket that drops while the gate is shown
+reconnects quietly (backoff 0.5 s to 8 s). If no socket is open when Join is
+pressed, Join starts the same 12 s retry and sends the join once a socket
+opens; if none opens, the page shows "Couldn't join".
 **Guest access**: each room has a host-toggled `allowGuests` flag (the switch
 lives in the People panel; `set_guests` over WS). When on, non-registered
 visitors get the meeting page instead of the login redirect and join by just
 entering a name; guests are synthetic `meetUser`s with a negative id,
 `username "guest"`, and `guest: true`. The host can also kick anyone
-(`host_kick` → `kicked` to the target, who sees a "removed" screen).
+(`host_kick` → `kicked` to the target, who sees a "removed" screen). The room
+remembers whom the host removed (the account id of a registered user, and
+the per-tab `client_id`) for the rest of its life: a `join` from one of them,
+on any device, gets `error` "The host removed you from this meeting." A
+guest that also drops its tab id (a new browser profile) can come back; the
+host's guest switch keeps guests out.
 
 Routes: `GET /` (lobby) and `GET /m/:code` (meeting page; anonymous users are
 redirected through `/login?next=…` unless the room allows guests; a request
@@ -874,10 +1057,15 @@ whose `am_session` cookie no longer resolves to a session counts as anonymous,
 and `GET /`, `GET /m/:code`, `GET /login`, and every route that needs a
 signed-in user clear that cookie, so a browser whose session was revoked opens
 a guest-enabled meeting at the guest gate),
-`POST /api/meetings {mode}` → `{code}`, `GET /api/meetings/:code` →
+`POST /api/meetings {mode}` → `{code}` (429 past the per-user room cap), `GET /api/meetings/:code` →
 `{mode, participants, allow_guests}` (deliberately public so the page can pick
 gate vs. login before auth), plus login/logout/me and the debug-console
-ingest `POST /api/debug/report`. The meet server mounts
+ingest `POST /api/debug/report`. `GET /login?next=` (server, `safeNext`)
+and `meet_login.html` (client, `nextPath`) apply the same rule to `next`:
+it must start with exactly one `/`, contain no backslash and no control
+character, and stay on the same origin (no scheme, host, or user info);
+anything else becomes `/`. Reason: browsers read `/\evil.com` as
+`//evil.com`, an off-site URL. The meet server mounts
 `/static`, `/fonts`, `/sound`, and `/avatars` (so meeting tiles can show
 profile photos; `meetUser` = `{id, username, display_name, avatar, guest?}`,
 still no bio). Alex Meet does not write meeting history (the `calls` table logs
@@ -894,14 +1082,18 @@ selected device has vanished, and mic capture requests auto-gain so quiet
 sources stay audible. Meeting UI: the **grid "group view" is the default** (paged at 9
 tiles; `bestGridSize` picks the row/column split that maximizes 16:9 tile area
 for the current window ratio, so wide windows lean on columns and portrait
-phones stack one column; relaid out on resize). Clicking a tile switches to
+phones stack one column; relaid out on resize; the pagers are shown or hidden
+before the grid is measured, and `.grid-area`/`.grid-pages` have
+`min-height: 0` so a rotation to portrait never leaves tiles below the
+screen). Clicking a tile switches to
 the focus view (clicked tile big, the rest in a 16:9 stack); the stack's
 placement follows the **window ratio**, not its width — landscape windows
 (including a sideways phone) keep it in a scrollable right column so the main
 tile isn't squeezed, portrait windows drop it below (`meet-body.stack-bottom`,
 toggled from `layout()`). Clicking the main view returns to the grid. A
 starting remote screen share auto-focuses the sharer and falls back to the grid
-when it ends. The focused tile carries two overlay controls (Lucide icons, only
+when it ends (`setPeerSharing`: called by `peer_state` and by volc's
+`onUserPublishScreen`, whichever reports the share first). The focused tile carries two overlay controls (Lucide icons, only
 shown on the tile in `.main-view`): **top-left fullscreen** (Fullscreen API on
 the tile element) and **bottom-left fit/fill** — video **scale-to-fill (cover)
 is the default**, the toggle restores letterboxing (`fit`), and the choice is
@@ -957,7 +1149,8 @@ between them:
   event, message, ctx)` (e.g. ws connect/disconnect, meeting create/join/
   leave). The actor's identity is resolved server-side from the session —
   never trusted from the body.
-- **Abuse prevention** — per-IP token bucket, 64 KB body cap, 50-event batch
+- **Abuse prevention** — per-IP token bucket (at most 4096 addresses kept in
+  memory), 64 KB body cap, 50-event batch
   cap, per-field length limits, level whitelist. Over-budget events are dropped
   but the endpoint always returns `200 {"ok":true}`.
 - **Reading** — the admin panel (`adminapp/debug.go`) serves `GET /api/debug/events`
@@ -982,6 +1175,10 @@ ADMIN_PASSWORD=changeme go run ./cmd/admin
 # Alex Meet (default 127.0.0.1:8002)
 ADMIN_PASSWORD=changeme go run ./cmd/meet
 ```
+
+`scripts/verify.sh` runs the repository's checks in one command (Go build,
+vet and race-detector tests, the deploy and upload tests, the TypeScript
+typechecks and `shared` tests; `--e2e` adds Playwright).
 
 Build standalone binaries with `go build -o bin/server ./cmd/server` (etc.).
 
@@ -1051,7 +1248,9 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   `internal/webapp/call_listener_test.go`, `internal/webapp/review_test.go`,
   `internal/meet/volctoken_test.go`, `internal/meet/routes_test.go`,
   `internal/debuglog/debuglog_test.go`,
-  `internal/webapp/ota_routes_test.go`): DB layer (DM state, read receipts,
+  `internal/webapp/ota_routes_test.go`, `internal/httpx/netguard_test.go`,
+  `internal/auth/limits_test.go`, `internal/db/hardening_test.go`,
+  `internal/webapp/hardening_test.go`, `internal/meet/ws_test.go`): DB layer (DM state, read receipts,
   attachment dims, paging, debug filters/prune), link-preview SSRF guard,
   image-dimension extraction, transcribe format/model mapping + upstream
   handling, VolcEngine token wire format, debug ingest rate-limiter; the DM
@@ -1077,8 +1276,22 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   progress skipped, the asset hashes, `extra.expoClient`, https URLs behind
   the TLS proxy), 204 when there is no update, 400 for bad headers, a
   `metadata.json` naming a file outside its update refused, and the `/app`
-  page and downloads.
-  `go test ./...` — DB tests point the package-level path vars at a temp
+  page and downloads. Hardening: special-purpose IP ranges refused by the
+  guarded dialer, push endpoints limited to known push services, at most 10
+  push subscriptions per user, unsubscribe limited to the caller's own rows,
+  the client IP taken from forwarding headers only behind a loopback proxy,
+  the login/register rate limit and the scrypt concurrency cap, a message
+  with too many attachments refused, concurrent avatar changes, the avatar
+  and transcription body caps, mark-unread keeping the read receipt,
+  mark-read with a position, a message flood cut to the account's budget,
+  and in Alex Meet a removed participant refused on rejoin and a frame
+  flood dropped before it reaches the others. Headers and static files
+  (`internal/httpx/headers_test.go`): the three security headers on a 200 and
+  on a 404, `httpx.Static` (Cache-Control on a found file, none on a 404 or
+  when empty, HEAD, Range, no directory or traversal), the login shell's
+  `Cache-Control` and headers on all three servers, an `open_dm` with a failing
+  read closing with 1011, and the export answering 500 after a failed read.
+  `go test -race -count=1 ./...` (CI runs it this way too) — DB tests point the package-level path vars at a temp
   dir.
 - **deploy** — `python3 deploy/remote_deploy_test.py` runs
   `deploy/remote_deploy.sh` against scratch directories with fake `sudo`,
@@ -1086,15 +1299,26 @@ cd mobile && npx maestro test e2e/                          # E2E on a booted de
   check or a missing React build restores the old release, `data/` is
   byte-identical after a deploy and after a rollback, and a release that
   contains `data/` is refused.
+- **upload** — `bash mobile/scripts/test-upload.sh` tests `upload_verified`
+  against a stand-in `ssh` (no network): an intact upload is published, a
+  cut upload is refused and its temporary file deleted, and the tar flow of
+  `publish-update.sh` extracts identical files. CI runs it.
+- **all checks** — `scripts/verify.sh` runs the Go, deploy, upload and
+  TypeScript checks above in one command (`--e2e` adds Playwright). Its
+  first step fails when `AGENTS.md` and `CLAUDE.md` differ after their first
+  3 lines: the two files are copies of each other, so every edit of one
+  must be made in the other (`{ head -n 3 AGENTS.md; tail -n +4 CLAUDE.md; }
+  > AGENTS.new && mv AGENTS.new AGENTS.md` copies `CLAUDE.md`'s text into
+  `AGENTS.md`).
 - **CI** — `.github/workflows/mobile-checks.yml` (first pushed on 2026-10-28):
   on every push and pull request to `main`/`react`, `shared` typecheck +
   Vitest and `mobile` `tsc --noEmit`, each after `npm ci --ignore-scripts`.
   No secrets.
-- **shared** — `cd shared && npm test` (Vitest, 92 tests in 6 files): store
+- **shared** — `cd shared && npm test` (Vitest, 127 tests in 6 files): store
   reducers (optimistic send → delivered → read, edits, replies, unread),
   socket reconnect/queue, api error mapping, format helpers, WAV encoding,
   and the call engine (`call.test.ts`, against a fake `CallPlatform`).
-- **web** — `cd web && npm run test:e2e` (Playwright, 49 tests across 8
+- **web** — `cd web && npm run test:e2e` (Playwright, 56 tests across 9
   specs): `start-server.sh` builds an isolated `cmd/server` on :8795 against
   its own SQLite database in `$E2E_RUN_DIR` (default `/tmp/am-e2e`), seeded by
   `web/e2e/seed`, so the suite never touches dev data. That database persists
@@ -1141,11 +1365,30 @@ Real-world gotchas hit while bringing the RN app up on simulators/emulators:
 - **`hideKeyboard` on Android ≈ back-nav** — when no keyboard is open, Maestro's
   `hideKeyboard` pops the route. Gate it behind `visible: "return"` (the iOS
   key) in flows.
+- **Maestro typing on iOS** — during a long `inputText` in the iOS
+  Simulator, the soft keyboard can slide down and come back mid-input, and
+  the last keyboard event the app receives then says height 0 while the
+  keyboard is on screen (seen on 2026-10-29): the composer stays behind the
+  keyboard, and a `tapOn: "Send"` lands on the keyboard. Flows therefore
+  run `waitForAnimationToEnd`, the gated `hideKeyboard`, and
+  `waitForAnimationToEnd` again before tapping Send or Save
+  (`e2e/reply-edit.yaml`). Maestro's `hideKeyboard` on iOS is a swipe, and
+  the conversation dismisses the keyboard interactively (as Messages does):
+  a swipe that is too short brings the keyboard back, and a Send tap can
+  land while the composer slides (seen in about 1 run in 4). The flow
+  therefore waits, taps Send again only while the composer still holds the
+  text (a blind retry would hit the microphone button that takes Send's
+  place), and asserts that the composer gave the text up. Run the iOS and
+  Android flows one after the other: they sign in as the same account, and
+  one device's messages move the other device's list mid-gesture.
 - **Long-press timing** — React Native's default `delayLongPress` (500 ms) is
   what Maestro's injected taps expect; don't shorten it.
-- **Safe areas on Android are real** — modal screens must use
-  `SafeAreaView edges={["top","bottom"]}`; without it the header renders under
-  the status bar (edge-to-edge) and the close control is unreachable.
+- **Safe areas on Android are real** — the modal sheets show the native
+  stack header, which clears the status bar, so their root `SafeAreaView`
+  takes `edges={["bottom"]}` (a top edge pads by the status bar twice). A
+  modal without a native header needs `edges={["top","bottom"]}`, or its
+  content renders under the status bar (edge-to-edge). On Android the sheets
+  close with the header's up arrow ("Navigate up"); on iOS with Cancel / Done.
 - **Uploads and Expo's fetch** — Expo SDK 57 replaces the global `fetch` with
   `expo/fetch`, which can't send React Native `{uri, name, type}` FormData
   parts (every upload failed instantly). `ApiClient` takes a `readFile` hook
@@ -1170,7 +1413,9 @@ Real-world gotchas hit while bringing the RN app up on simulators/emulators:
   height set in the keyboard's own animation block; drags follow the finger).
   A downward drag on the list or the composer dismisses the keyboard
   interactively, as in Messages. Back waits for the keyboard to start hiding
-  before it pops (see `mobile/AGENTS.md`). Android keeps `KeyboardAvoidingView`.
+  before it pops (see `mobile/AGENTS.md`). Android keeps `KeyboardAvoidingView`,
+  which needs a `behavior` there too: the app draws edge to edge, so the
+  keyboard never resizes the window.
 - **Message list** — an inverted FlatList; iOS 26 scroll-edge effects are
   hidden per scroll view with `NoScrollEdgeEffects`
   (`src/components/ScrollEdge.tsx`), see `mobile/AGENTS.md`.
@@ -1178,7 +1423,12 @@ Real-world gotchas hit while bringing the RN app up on simulators/emulators:
   (`app/_layout.tsx`). Don't add expo-status-bar's `<StatusBar>`: Info.plist
   turns on view-controller-based status bar appearance (the image viewer
   hides the status bar), and React Native's StatusBar module throws under it
-  (a red box on iOS).
+  (a red box on iOS). The `expo-status-bar` config plugin (`app.json`,
+  `style: "dark"`) only sets the style of the launch screen.
+- **Light design only** — Android's activity theme has a light parent and a
+  sage `colorAccent` (`mobile/plugins/withAndroidLightTheme.js`), so a phone
+  in dark mode still gets light `Alert` dialogs with sage buttons; see
+  `mobile/AGENTS.md`.
 - **`@expo/ui` stays linked on Android** — expo-router's Android code imports
   it; excluding it from Android autolinking crashed the app at launch
   ("Cannot find native module 'ExpoUI'").
@@ -1226,15 +1476,40 @@ The Python servers ran on a single-threaded asyncio event loop, so shared state
 needed no locks. Go has real concurrency (one goroutine per WebSocket read loop,
 plus broadcast goroutines), so:
 
-- **Per-connection write mutex.** Gorilla WebSocket connections are not safe for
-  concurrent writes. `runtime.Client` (main app) and the meet server's `conn`
-  each carry a `sync.Mutex` that serializes every send, so two fan-outs never
-  interleave a frame on the same socket.
+- **One writer per socket.** Gorilla WebSocket connections are not safe for
+  concurrent writes. `runtime.Client` (main app) carries a `sync.Mutex` that
+  serializes every send, so two fan-outs never interleave a frame on the same
+  socket. The meet server's `conn` instead has an outbound queue of 256
+  frames (`sendQueueSize`) drained by one writer goroutine; `send` never
+  blocks, and a socket whose queue overflows or whose write fails is closed
+  (the client reconnects and rejoins).
 - **Presence is mutex-guarded.** `runtime.Presence` protects its maps with its
   own mutex.
 - **Alex Meet state** uses a single mutex (`meetMu`) guarding the room
-  registry and all room/participant fields; handlers mutate under the lock,
-  snapshot recipients, then send after releasing it.
+  registry and all room/participant fields; handlers mutate and queue their
+  frames under the lock (queueing never blocks), so every participant
+  receives a room's events in the order the server applied them.
+- **Avatar changes are serialized per user** (`lockAvatar` in
+  `internal/webapp/avatar.go`); after each change the server deletes every
+  avatar file of that user except the one the database row names.
+- **scrypt runs at most 4 at a time per process** (`auth.MaxConcurrentHashes`,
+  around `HashPassword` and `VerifyPassword`); further calls wait.
+
+### Client IP and login rate limit
+
+`httpx.TrustLocalProxy` is applied to all three engines (inside
+`webapp.NewEngine` and `adminapp.NewEngine`, and in `cmd/meet/main.go` for
+Alex Meet): Gin reads the forwarding
+headers `CF-Connecting-IP`, then `X-Forwarded-For`, then `X-Real-IP` only on
+a request whose TCP peer is loopback (127.0.0.1 or ::1, the local nginx); a
+request from any other peer gets its TCP address as `c.ClientIP()`. The
+user app's `POST /api/login` and `POST /api/register`, the admin panel's
+`POST /api/login`, and Alex Meet's `POST /api/login` share a per-IP token
+bucket in each process
+(`auth.LoginLimiter`: 10 attempts at once, then one more every 6 s; a login
+with the correct password gives its attempt back). A refused attempt gets
+429 `{"detail": "Too many attempts. Try again in a minute."}`
+(`auth.TooManyAttemptsDetail`).
 
 ### Database
 
@@ -1274,6 +1549,16 @@ key so the served key can't drift. Encryption/signing is delegated to
 [webpush-go](https://github.com/SherClockHolmes/webpush-go) (the analogue of
 `pywebpush`), which wants the keys as base64url; `push.deriveKeys` converts the
 EC key into those forms. Subscriptions returning 404/410 are pruned automatically.
+`POST /api/push/subscribe` accepts only an `https` endpoint on the default
+port whose host is `fcm.googleapis.com` (Chromium browsers),
+`updates.push.services.mozilla.com` (Firefox), `web.push.apple.com` or a
+subdomain of `push.apple.com` (Safari), or a subdomain of
+`notify.windows.com` (Edge on Windows), and answers 400 otherwise
+(`push.ValidEndpoint`). A user keeps at most 10 subscriptions
+(`db.MaxPushSubscriptions`): a new or refreshed one becomes the newest, and
+the oldest beyond 10 are deleted. `POST /api/push/unsubscribe` deletes only
+the caller's own row. `pushHTTPClient` dials only public addresses
+(`httpx.GuardedDialContext`) and follows no redirects.
 Each send gives up after 30 s (`pushHTTPClient`). A push service that never
 answers therefore delays the pushes queued behind it (the same user's next
 subscription, and the same call's next push) by at most 30 s per stalled
@@ -1308,7 +1593,9 @@ legacy `static/app.js`, which sends no keepalive, stays connected. If any
 database read behind `init` fails (contacts, users, DM state, thread
 partners, thread history, unread counts), the server closes the socket with
 1011 (`init failed`) instead of sending a partial `init`, and the client
-reconnects. HTTPS cookies carry Secure, including requests forwarded by
+reconnects. An `open_dm` whose reads fail (DM state of either user, thread
+history) closes the socket with 1011 (`open_dm failed`) too and sends no
+`dm_opened`. HTTPS cookies carry Secure, including requests forwarded by
 loopback nginx with `X-Forwarded-Proto: https`; direct localhost HTTP remains
 usable.
 
